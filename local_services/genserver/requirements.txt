@@ -1,0 +1,27 @@
+# The generation sidecar's dependencies (spec 30).
+#
+# torch is NOT listed here, because the wheel depends on the card: this
+# machine is Blackwell (sm_120) and needs cu128 or later, which pip will not
+# pick from PyPI. Install it first, from PyTorch's own index:
+#
+#   python -m venv local_services/genserver/.venv
+#   local_services/genserver/.venv/Scripts/python -m pip install torch --index-url https://download.pytorch.org/whl/cu128
+#   local_services/genserver/.venv/Scripts/python -m pip install -r local_services/genserver/requirements.txt
+#
+# A cu124 wheel imports, reports torch.cuda.is_available() == True, and then
+# fails every kernel with "no kernel image is available for execution on the
+# device". `docreel doctor` checks for exactly that.
+
+# ZImagePipeline landed in 0.37; anything older cannot load Z-Image-Turbo.
+diffusers>=0.37.0
+transformers>=4.46
+accelerate>=1.0
+safetensors>=0.4.5
+sentencepiece>=0.2.0
+pillow>=10.0
+huggingface_hub>=0.26
+
+# Used only to ask Ollama to let go of the card before a generation
+# (GEN_UNLOAD_OLLAMA=0 turns that off). huggingface_hub already pulls it in;
+# it is listed so the dependency is visible rather than incidental.
+requests>=2.31

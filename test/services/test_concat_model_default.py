@@ -60,6 +60,7 @@ def test_nullable_api_mode_reaches_native_renderer_and_completes(tmp_path):
     params = TaskVideoRequest(
         video_subject="Coffee",
         video_script="Supplied narration",
+        video_source="pexels",
         video_concat_mode=None,
         subtitle_enabled=False,
         bgm_type="",

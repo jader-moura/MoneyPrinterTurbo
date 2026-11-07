@@ -554,6 +554,28 @@ def is_azure_v1_voice(voice_name: str | None) -> bool:
     return True
 
 
+# Edge TTS 音色名的形状：<locale>-<Name>Neural，可带展示用的性别后缀。
+# 例如 en-US-AvaNeural、zh-CN-XiaoxiaoMultilingualNeural-Female。
+_AZURE_V1_VOICE_PATTERN = re.compile(
+    r"^[A-Za-z]{2,3}(-[A-Za-z0-9]+)+Neural(-(Female|Male))?$"
+)
+
+
+def looks_like_azure_v1_voice(voice_name: str | None) -> bool:
+    """Whether a name has the shape of an Edge TTS (Azure v1) voice.
+
+    Deliberately a *positive* check on the name's shape, unlike
+    `is_azure_v1_voice`, which answers "no other provider claims it" and so
+    says yes to anything at all. The dispatcher needs the former before it
+    sends a name to Microsoft, or a typo in a self-hosted voice name becomes a
+    network request on a pipeline that is supposed to be offline.
+    """
+    name = str(voice_name or "").strip()
+    if not name:
+        return False
+    return bool(_AZURE_V1_VOICE_PATTERN.match(name))
+
+
 def estimate_no_voice_duration(text: str) -> float:
     """
     为无配音模式估算一个稳定的视频时间轴长度。
@@ -788,6 +810,26 @@ def _single_tts(
                 prompt_text=voxcpm_prompt_text,
             )
         logger.error(f"Invalid VoxCPM voice name format: {voice_name}")
+        return None
+
+    # 兜底分支是 Edge TTS（Azure v1）——这是项目最早唯一的 Provider。现在
+    # 自托管 Provider 都靠前缀识别，一个丢了前缀的名字（例如把
+    # "kokoro:af_heart" 写成 "af_heart"）会从这里静默发往微软的在线服务。
+    # 本地链路不应该出现这种隐式联网，因此先确认名字确实是 Edge 音色。
+    #
+    # The catch-all here is Edge TTS, which was once the only provider. Now
+    # that the self-hosted ones are recognised by prefix, a name that lost its
+    # prefix — "af_heart" instead of "kokoro:af_heart" — would reach Microsoft
+    # as a silent network call on what the user set up as an offline pipeline.
+    # Edge voice names are always "<locale>-<Name>Neural", so a name that is
+    # not one is a mistake worth naming rather than a request to go online.
+    if not looks_like_azure_v1_voice(voice_name):
+        logger.error(
+            f'unknown voice name "{voice_name}": it matches no TTS provider. '
+            "Edge TTS voices look like en-US-AvaNeural; a self-hosted voice "
+            "needs its provider prefix, for example kokoro:af_heart, "
+            "chatterbox:default or voxcpm:<id>."
+        )
         return None
     return azure_tts_v1(text, voice_name, voice_rate, voice_file)
 

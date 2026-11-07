@@ -380,8 +380,18 @@ def reuse_existing_llm_provider(config_path: Path) -> str:
 
 
 def selected_video_source(cli_args: list[str]) -> str:
-    """Read the effective material source from forwarded CLI arguments."""
-    source = "pexels"
+    """Read the effective material source from forwarded CLI arguments.
+
+    The fallback must match ``cli.py``'s ``--video-source`` default, which is
+    the local image server; test_mpt_agent_skill.py compares the two directly.
+    It is spelled out rather than imported because this skill runs as a
+    standalone script, without the application package on sys.path.
+
+    The consequence is the point of the change: a run that names no source no
+    longer takes the Pexels branch, so a first run asks for the local image
+    endpoint instead of sending the user off to register for a Pexels API key.
+    """
+    source = "openai_image"
     for index, item in enumerate(cli_args):
         if item == "--video-source" and index + 1 < len(cli_args):
             source = cli_args[index + 1].strip().lower()

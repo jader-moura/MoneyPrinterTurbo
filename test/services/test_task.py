@@ -429,7 +429,7 @@ class TestTaskService(unittest.TestCase):
 
     def test_run_pipeline_fails_fast_when_ffmpeg_is_not_ready(self):
         """完整视频流水线必须在 LLM/TTS/素材服务之前先确认 FFmpeg 可用。"""
-        params = VideoParams(video_subject="test")
+        params = VideoParams(video_subject="test", video_source="pexels")
         state = MemoryState()
         with (
             patch.object(tm.utils, "check_ffmpeg_ready", return_value=False),
@@ -530,7 +530,7 @@ class TestTaskService(unittest.TestCase):
 
     def test_start_rejects_missing_sonilo_key_before_costly_pipeline_steps(self):
         """完整任务缺少 Sonilo Key 时不能先调用 LLM、TTS 或素材服务。"""
-        params = VideoParams(video_subject="test", bgm_type="sonilo")
+        params = VideoParams(video_subject="test", bgm_type="sonilo", video_source="pexels")
         state = MemoryState()
         with (
             patch.object(tm.sonilo, "is_enabled", return_value=False),
@@ -553,6 +553,7 @@ class TestTaskService(unittest.TestCase):
     def test_start_does_not_require_sonilo_key_when_volume_is_zero(self):
         """0 音量不会使用 Sonilo，因此缺少 Key 时仍应进入正常任务流水线。"""
         params = VideoParams(
+video_source="pexels",
             video_subject="test",
             bgm_type="sonilo",
             bgm_volume=0.0,
@@ -775,7 +776,7 @@ class TestTaskService(unittest.TestCase):
 
     def test_start_rejects_missing_elevenlabs_key_before_pipeline_steps(self):
         """完整任务缺少 ElevenLabs Key 时必须在任何付费步骤前失败。"""
-        params = VideoParams(video_subject="test", bgm_type="elevenlabs")
+        params = VideoParams(video_subject="test", bgm_type="elevenlabs", video_source="pexels")
         state = MemoryState()
         with (
             patch.object(tm.elevenlabs_music, "is_enabled", return_value=False),
@@ -793,7 +794,7 @@ class TestTaskService(unittest.TestCase):
 
     def test_start_rejects_free_elevenlabs_plan_before_pipeline_steps(self):
         """已确认的免费套餐不能先消耗 LLM、TTS 或素材服务额度。"""
-        params = VideoParams(video_subject="test", bgm_type="elevenlabs")
+        params = VideoParams(video_subject="test", bgm_type="elevenlabs", video_source="pexels")
         state = MemoryState()
         with (
             patch.object(tm.elevenlabs_music, "is_enabled", return_value=True),
@@ -821,6 +822,7 @@ class TestTaskService(unittest.TestCase):
     def test_start_rejects_oversized_elevenlabs_prompt_before_account_check(self):
         """API/CLI 绕过 WebUI 时，超长提示词也必须在昂贵步骤前被拒绝。"""
         params = VideoParams(
+video_source="pexels",
             video_subject="test",
             bgm_type="elevenlabs",
             video_music_prompt="x" * 1001,
@@ -873,6 +875,7 @@ class TestTaskService(unittest.TestCase):
         却又在任务编排层把空列表转换成其它真值后继续执行外部请求。
         """
         params = VideoParams(
+video_source="pexels",
             video_subject="startup story",
             video_script="A short startup story.",
         )
@@ -1386,7 +1389,7 @@ class TestTaskService(unittest.TestCase):
 
         for stop_at, expected in expected_results.items():
             with self.subTest(stop_at=stop_at):
-                params = VideoParams(video_subject="Coffee")
+                params = VideoParams(video_subject="Coffee", video_source="pexels")
                 with (
                     patch.object(
                         tm, "generate_script", return_value="generated script"
@@ -1458,7 +1461,7 @@ class TestTaskService(unittest.TestCase):
         完整任务在自动发布未配置时仍应稳定完成，并把所有中间产物写入最终
         状态。这里还覆盖 API 可能传入字符串拼接模式的兼容转换。
         """
-        params = VideoParams(video_subject="Coffee")
+        params = VideoParams(video_subject="Coffee", video_source="pexels")
         params.video_concat_mode = "sequential"
 
         with (
@@ -1525,7 +1528,7 @@ class TestTaskService(unittest.TestCase):
         for stage, failure_results in failure_cases.items():
             with self.subTest(stage=stage):
                 audio_result, materials_result, videos_result = failure_results
-                params = VideoParams(video_subject="Coffee")
+                params = VideoParams(video_subject="Coffee", video_source="pexels")
                 state = MemoryState()
                 with (
                     patch.object(
@@ -1557,7 +1560,7 @@ class TestTaskService(unittest.TestCase):
 
     def test_start_records_unexpected_pipeline_exception(self):
         """未预期异常也必须结束任务，并向 API 暴露原始异常类型和信息。"""
-        params = VideoParams(video_subject="Coffee")
+        params = VideoParams(video_subject="Coffee", video_source="pexels")
         state = MemoryState()
 
         with (
@@ -1585,6 +1588,7 @@ class TestTaskService(unittest.TestCase):
         成片，并在任务结果中保留每次上传成功或失败的独立结果。
         """
         params = VideoParams(
+video_source="pexels",
             video_subject="Coffee",
             video_language="en",
         )
@@ -1695,7 +1699,7 @@ class TestTaskService(unittest.TestCase):
 
     def test_start_returns_before_cross_post_worker_runs(self):
         """视频任务完成时只提交发布工作，不能在生成线程中同步上传。"""
-        params = VideoParams(video_subject="Coffee")
+        params = VideoParams(video_subject="Coffee", video_source="pexels")
         service = tm.upload_post.upload_post_service
         state = MemoryState()
         submitted = []
@@ -1884,7 +1888,7 @@ class TestTaskService(unittest.TestCase):
 
     def test_start_returns_cross_post_scheduling_failure(self):
         """同步调度失败必须同时体现在任务状态和 start() 返回快照中。"""
-        params = VideoParams(video_subject="Coffee")
+        params = VideoParams(video_subject="Coffee", video_source="pexels")
         service = tm.upload_post.upload_post_service
         state = MemoryState()
 

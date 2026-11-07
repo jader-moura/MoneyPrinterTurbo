@@ -6,6 +6,7 @@ import pydantic
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.config import config
+from app.models.const import DEFAULT_VIDEO_SOURCE, DEFAULT_VOICE_NAME
 
 # 忽略 Pydantic 的特定警告
 warnings.filterwarnings(
@@ -121,7 +122,9 @@ class VideoParams(BaseModel):
     match_materials_to_script: bool = False
     video_count: int = Field(default=1, ge=1)
 
-    video_source: Optional[str] = "pexels"
+    # Pictures generated on this machine rather than stock footage searched for
+    # with somebody's API key. Every other source still works when chosen.
+    video_source: Optional[str] = DEFAULT_VIDEO_SOURCE
     video_materials: Optional[List[MaterialInfo]] = (
         None  # Materials used to generate the video
     )
@@ -131,7 +134,9 @@ class VideoParams(BaseModel):
     )
     video_language: Optional[str] = ""  # auto detect
 
-    voice_name: Optional[str] = ""
+    # A local Kokoro voice, so a request that names none still narrates without
+    # a cloud account. Any provider's voice name is still accepted here.
+    voice_name: Optional[str] = DEFAULT_VOICE_NAME
     voice_volume: Optional[float] = Field(default=1.0, allow_inf_nan=False)
     voice_rate: Optional[float] = Field(default=1.0, allow_inf_nan=False)
     bgm_type: Optional[str] = "random"
@@ -168,11 +173,28 @@ class VideoParams(BaseModel):
     video_script_prompt: str = Field(default="", max_length=2000)
     custom_system_prompt: str = Field(default="", max_length=8000)
 
+    # Which model writes the script and the keywords, for this task only.
+    #
+    # `[app] llm_provider` is one global setting, which makes "draft this one
+    # on the Claude API and the rest on Ollama" a config edit between runs —
+    # and a race, when two tasks overlap. These two fields carry the choice
+    # with the task instead: empty means "whatever the config says", and a
+    # provider id from app/models/llm_provider.py overrides it for this run
+    # without touching config or affecting any other task.
+    #
+    # `llm_model` overrides that provider's model name the same way, so
+    # ollama + a model that is not the configured one needs no config edit.
+    llm_provider: Optional[str] = ""
+    llm_model: Optional[str] = ""
+
 
 class SubtitleRequest(BaseModel):
     video_script: str
     video_language: Optional[str] = ""
-    voice_name: Optional[str] = "zh-CN-XiaoxiaoNeural-Female"
+    # Local Kokoro, like VideoParams: these endpoints should not reach a cloud
+    # voice service for a caller who named no voice. Pass any provider's voice
+    # name to use that provider instead.
+    voice_name: Optional[str] = DEFAULT_VOICE_NAME
     voice_volume: Optional[float] = Field(default=1.0, allow_inf_nan=False)
     voice_rate: Optional[float] = Field(default=1.2, allow_inf_nan=False)
     bgm_type: Optional[str] = "random"
@@ -199,7 +221,10 @@ class SubtitleRequest(BaseModel):
 class AudioRequest(BaseModel):
     video_script: str
     video_language: Optional[str] = ""
-    voice_name: Optional[str] = "zh-CN-XiaoxiaoNeural-Female"
+    # Local Kokoro, like VideoParams: these endpoints should not reach a cloud
+    # voice service for a caller who named no voice. Pass any provider's voice
+    # name to use that provider instead.
+    voice_name: Optional[str] = DEFAULT_VOICE_NAME
     voice_volume: Optional[float] = Field(default=1.0, allow_inf_nan=False)
     voice_rate: Optional[float] = Field(default=1.2, allow_inf_nan=False)
     bgm_type: Optional[str] = "random"
@@ -224,6 +249,9 @@ class VideoScriptParams:
     paragraph_number: int = Field(default=1, ge=1, le=10)
     video_script_prompt: str = Field(default="", max_length=2000)
     custom_system_prompt: str = Field(default="", max_length=8000)
+    # Per-request provider override; see VideoParams above.
+    llm_provider: Optional[str] = ""
+    llm_model: Optional[str] = ""
 
 
 class VideoTermsParams:
@@ -242,6 +270,9 @@ class VideoTermsParams:
     )
     amount: Optional[int] = 5
     match_materials_to_script: bool = False
+    # Per-request provider override; see VideoParams above.
+    llm_provider: Optional[str] = ""
+    llm_model: Optional[str] = ""
 
 
 class VideoSocialMetadataParams:

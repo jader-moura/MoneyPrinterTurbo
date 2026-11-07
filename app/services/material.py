@@ -1444,6 +1444,12 @@ def is_openai_image_enabled(app_config: dict | None = None) -> bool:
 def _openai_image_endpoint() -> tuple[str, str]:
     """
     读取文生图端点与模型名，缺失时抛出带配置指引的错误。
+
+    这里不替用户填默认值。``openai_image_base_url`` 可以指向任何服务，包括
+    计费中转；“必须显式配置”是上游有意的约定，并由
+    test_settings_providers.py::test_keyless_image_gateway_needs_explicit_endpoint_and_model
+    固定。config.example.toml 已经写好指向本机 genserver 的默认值，因此全新
+    安装开箱可用；旧配置缺少这两项时按原样报错，并说明要填什么。
     """
     base_url = (
         str(config.app.get("openai_image_base_url", "") or "").strip().rstrip("/")

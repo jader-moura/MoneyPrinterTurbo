@@ -361,6 +361,26 @@ def _stage_progress_reporter(task_id: str, stage_start: float, stage_end: float)
     return report
 
 
+def _llm_override_kwargs(params) -> dict:
+    """``{"app_config": snapshot}`` when this task names its own provider.
+
+    Resolved from `params`, which is this task's own object, so two tasks
+    running at once cannot affect each other's choice and nothing global is
+    mutated.
+
+    Empty when the task named no provider, and then the call is made exactly as
+    it always was: the LLM service falls back to `config.app` itself. That
+    keeps the default path — and everything that depends on its call
+    signature — unchanged, and confines the new behaviour to runs that asked
+    for it.
+    """
+    provider = str(getattr(params, "llm_provider", "") or "").strip()
+    model = str(getattr(params, "llm_model", "") or "").strip()
+    if not provider and not model:
+        return {}
+    return {"app_config": llm.resolve_llm_app_config(provider, model)}
+
+
 def generate_script(task_id, params):
     logger.info("\n\n## generating video script")
     video_script = params.video_script.strip()
@@ -371,6 +391,7 @@ def generate_script(task_id, params):
             paragraph_number=params.paragraph_number,
             video_script_prompt=params.video_script_prompt,
             custom_system_prompt=params.custom_system_prompt,
+            **_llm_override_kwargs(params),
         )
     else:
         logger.debug(f"video script: \n{video_script}")
@@ -394,6 +415,9 @@ def generate_terms(task_id, params, video_script):
             video_script=utils.remove_pause_tags(video_script),
             amount=8 if params.match_materials_to_script else 5,
             match_script_order=params.match_materials_to_script,
+            # Resolved from the same params the script used, so the two stages
+            # cannot land on different providers.
+            **_llm_override_kwargs(params),
         )
     else:
         if isinstance(video_terms, str):
@@ -1569,6 +1593,32 @@ def _run_pipeline(
 
     generation_progress.stage("preparing")
 
+    # Which model writes this run's script and keywords, decided once here and
+    # carried down to both stages. Two reasons it is not read again later:
+    # the stages must not end up on different providers, and a second task
+    # that starts mid-run must not be able to change this one's.
+    # getattr throughout: this runs for AudioRequest and SubtitleRequest as
+    # well as VideoParams, and those two carry no video_terms at all.
+    llm_needs_script = not (getattr(params, "video_script", "") or "").strip()
+    llm_needs_terms = (
+        not getattr(params, "video_terms", None)
+        and stop_at in {"terms", "materials", "video"}
+        and getattr(params, "video_source", "") != "local"
+    )
+    try:
+        llm_app_config = llm.resolve_llm_app_config(
+            getattr(params, "llm_provider", ""),
+            getattr(params, "llm_model", ""),
+            app_config=config.snapshot_config_with_pending(config.app),
+            # A caller who brought their own script and keywords never asks a
+            # model for anything, so there is no key to insist on.
+            require_credentials=llm_needs_script or llm_needs_terms,
+        )
+    except ValueError as exc:
+        return _mark_task_failed(task_id, "preflight", str(exc))
+    if llm_needs_script or llm_needs_terms:
+        logger.info(f"llm provider for this task: {llm_app_config.get('llm_provider')}")
+
     if stop_at == "video" and params.subtitle_enabled:
         try:
             video.validate_subtitle_colors(params)
@@ -1744,6 +1794,8 @@ def _run_pipeline(
     sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=10)
 
     if stop_at == "script":
+        # The LLM is the last thing this run needed, so give the card back.
+        llm.unload_ollama_model(llm_app_config)
         sm.state.update_task(
             task_id, state=const.TASK_STATE_COMPLETE, progress=100, script=video_script
         )
@@ -1760,6 +1812,13 @@ def _run_pipeline(
                 "terms",
                 "failed to generate video search terms",
             )
+
+    # 2b. Nothing after this point asks a model for words, and the stages that
+    # follow want the card: a local image model needs about 13 GB resident and
+    # Whisper wants its own, which a 14B model still holding 10 GB does not
+    # leave. A no-op unless this run used Ollama — a hosted provider holds
+    # nothing here, so a Claude run skips it.
+    llm.unload_ollama_model(llm_app_config)
 
     save_script_data(task_id, video_script, video_terms, params)
 

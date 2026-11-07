@@ -23,7 +23,9 @@ def test_prepared_script_and_visuals_need_no_llm_credentials(tmp_path, forwarded
 def test_stock_materials_without_terms_still_need_llm(tmp_path):
     config = tmp_path / "config.toml"
     config.write_text('[app]\nllm_provider = "moonshot"\nmoonshot_api_key = ""\npexels_api_keys = ["fixture"]\n', encoding="utf-8")
-    assert helper.missing_config(config, ["--video-script", "Prepared narration"])[1] == ["moonshot_api_key"]
+    assert helper.missing_config(
+        config, ["--video-script", "Prepared narration", "--video-source", "pexels"]
+    )[1] == ["moonshot_api_key"]
 
 
 def test_last_empty_script_option_requires_generation_again(tmp_path):

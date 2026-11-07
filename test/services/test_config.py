@@ -40,6 +40,8 @@ class TestConfigPersistence:
         assert example_config["listen_port"] == 8080
         assert example_config["log_level"] == "DEBUG"
         assert app_config["video_source"] in {
+            # 默认值，指向本机图片服务（local_services/genserver）。
+            "openai_image",
             "pexels",
             "pixabay",
             "coverr",

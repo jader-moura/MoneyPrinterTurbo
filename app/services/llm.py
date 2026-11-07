@@ -10,12 +10,17 @@ import unicodedata
 from time import perf_counter
 from typing import List
 
+import requests
 from loguru import logger
 from openai import AzureOpenAI, OpenAI
 from openai.types.chat import ChatCompletion
 
 from app.config import config
-from app.models.llm_provider import DEFAULT_LLM_PROVIDER_ID, get_llm_provider
+from app.models.llm_provider import (
+    DEFAULT_LLM_PROVIDER_ID,
+    LLM_PROVIDERS,
+    get_llm_provider,
+)
 from app.utils import utils
 from app.utils.request_logging import trace_sdk_call
 
@@ -53,11 +58,16 @@ _SENSITIVE_QUERY_RE = re.compile(
     re.IGNORECASE,
 )
 
+# 约束 1-8 是下游流程依赖的输出契约（纯文本、无标题、段落数、语言），不要改动。
+# 9-14 只约束写法：本地中小模型在默认提示词下容易写成百科式开头、长度一致的
+# 长句，并以“in conclusion”之类的套话收尾；这几条针对的就是这些问题，对
+# 托管模型同样适用，且不改变返回格式。
 DEFAULT_SCRIPT_SYSTEM_PROMPT = """
 # Role: Video Script Generator
 
 ## Goals:
-Generate a script for a video, depending on the subject of the video.
+Write the spoken narration for a short video on the given subject: prose that
+holds attention from its first sentence to its last.
 
 ## Constrains:
 1. the script is to be returned as a string with the specified number of paragraphs.
@@ -68,6 +78,14 @@ Generate a script for a video, depending on the subject of the video.
 6. do not include "voiceover", "narrator" or similar indicators of what should be spoken at the beginning of each paragraph or line.
 7. you must not mention the prompt, or anything about the script itself. also, never talk about the amount of paragraphs or lines. just write the script.
 8. respond in the same language as the video subject.
+
+## Writing:
+9. open on a hook. the first sentence must state something concrete and surprising about the subject — never a definition, a date range, or a sentence that begins by explaining what the subject is.
+10. vary sentence length. follow a long sentence with a short one. a three-word sentence is allowed, and is often what makes a point land.
+11. prefer a concrete detail to a summary: a number, a date, a place, a name, an object someone could photograph. one specific fact is worth more than three general claims.
+12. stop on the last real thing you have to say. never write a closing summary, and never use "in conclusion", "in summary", "ultimately", "to this day", "stands as a testament", "underscoring", "paved the way" or any similar flourish.
+13. no filler openings ("did you know", "imagine a world", "since the dawn of time"), and no rhetorical questions addressed to the audience.
+14. this will be read aloud by a speech synthesiser. write words that are easy to say, and avoid parentheses, asides set off by dashes, lists, and abbreviations that have to be spelled out.
 """.strip()
 
 # Claude Code CLI 默认使用编码 agent 的系统提示词，其中大量约束与文案写作
@@ -310,6 +328,153 @@ def _extract_qwen_generation_text(response) -> str:
 
     text = _get_response_field(output, "text") if output else None
     return _normalize_text_response(text, "qwen")
+
+
+def llm_provider_ids() -> list[str]:
+    """Every provider id, for an argparse `choices` list or an error message."""
+    return sorted(LLM_PROVIDERS)
+
+
+def resolve_llm_app_config(
+    llm_provider: str | None = "",
+    llm_model: str | None = "",
+    app_config=None,
+    *,
+    require_credentials: bool = False,
+) -> dict:
+    """A config snapshot carrying one run's provider and model.
+
+    The provider used to be `[app] llm_provider` and nothing else, so choosing
+    per video meant editing config between runs — and two overlapping tasks
+    could not disagree. This returns a *copy* of the config with the choice
+    written into it, which `generate_script` and `generate_terms` already know
+    how to take as `app_config`. Nothing global is mutated, so concurrent tasks
+    stay independent.
+
+    Empty `llm_provider` means "whatever the config says", which is what the
+    CLI, the API and the WebUI all send when the user expressed no preference.
+    `llm_model` overrides that provider's `*_model_name` the same way.
+
+    `require_credentials` runs the provider's own key and model-name rules now
+    rather than at the first token, so a run that cannot possibly write a
+    script fails at the preflight instead of after the pictures are paid for.
+    """
+    base = app_config if app_config is not None else config.app
+    # snapshot_config_with_pending rather than dict(): config.app is a
+    # synchronized section, and this also folds in a provider the WebUI has
+    # just selected but not yet saved.
+    snapshot = (
+        dict(base) if isinstance(base, dict) else config.snapshot_config_with_pending(base)
+    )
+
+    requested = str(llm_provider or "").strip().lower()
+    if not requested:
+        # Absent or blank in config means "no preference", not "no provider":
+        # a config.toml written before llm_provider existed, or with the value
+        # cleared, should still get the default rather than an error.
+        requested = (
+            str(snapshot.get("llm_provider", "") or "").strip().lower()
+            or DEFAULT_LLM_PROVIDER_ID
+        )
+
+    provider = get_llm_provider(requested)
+    if provider is None:
+        raise ValueError(
+            f'"{requested}" is not a known llm provider. '
+            f"Available: {', '.join(llm_provider_ids())}."
+        )
+    # Always written, even when it came from the config: the snapshot is what
+    # the rest of the run reads, and a snapshot that only *implies* its
+    # provider leaves `unload_ollama_model` and the logs guessing.
+    snapshot["llm_provider"] = provider.provider_id
+
+    model = str(llm_model or "").strip()
+    if model:
+        snapshot[provider.config_key("model_name")] = model
+
+    if require_credentials:
+        _require_llm_credentials(provider, snapshot)
+    return snapshot
+
+
+def _require_llm_credentials(provider, snapshot: dict) -> None:
+    """Fail now if this provider cannot possibly be billed to anyone.
+
+    Only the API key, and only for providers that need one. The point of
+    checking early is that a *missing key* is cheap to detect and expensive to
+    discover late — a run that dies on it after the narration and the pictures
+    has wasted real time. The wording matches what `_generate_response` would
+    have said, so an early failure reads like the one it prevented.
+
+    Deliberately not checked here: `model_name` and `base_url`. They are
+    settings, not credentials, and `_generate_response` already reports both
+    clearly at the point of use. Insisting on them here would fail every task
+    on a fresh install — where `ollama_model_name` is empty until the user
+    picks one — including tasks that never reach the model because the caller
+    supplied the script, and tasks whose LLM is stubbed out.
+    """
+    if provider.requires_api_key and not str(
+        snapshot.get(provider.config_key("api_key"), "") or ""
+    ).strip():
+        raise ValueError(
+            f"{provider.provider_id}: api_key is not set, "
+            "please set it in the config.toml file."
+        )
+
+
+def resolved_llm_provider(app_config=None) -> str:
+    """The provider id a snapshot will actually use."""
+    base = app_config if app_config is not None else config.app
+    return str(base.get("llm_provider", DEFAULT_LLM_PROVIDER_ID) or "").lower()
+
+
+def unload_ollama_model(app_config=None) -> bool:
+    """Ask Ollama to drop its model, so the next stage has the card.
+
+    Z-Image-Turbo needs about 13 GB resident and a 14B model holds about 10 GB:
+    on a 16 GB card they do not fit together, and the stage that loses the race
+    either spills to host memory or dies on a small allocation with gigabytes
+    nominally free. `keep_alive: 0` is Ollama's own way of saying "now".
+
+    Only for Ollama. A hosted provider holds nothing here, and calling this
+    after a Claude run would unload a model this run never used.
+
+    Returns whether a request was sent. Never raises: the next stage may well
+    have room anyway, and a failed tidy-up is not a failed video.
+    """
+    if resolved_llm_provider(app_config) != "ollama":
+        return False
+
+    base = app_config if app_config is not None else config.app
+    model_name = str(base.get("ollama_model_name", "") or "").strip()
+    if not model_name:
+        return False
+
+    base_url = str(base.get("ollama_base_url", "") or "").strip()
+    if not base_url:
+        base_url = config.get_default_ollama_base_url()
+    # ollama_base_url points at the OpenAI-compatible surface (".../v1"); the
+    # unload lives on Ollama's native API next to it.
+    root = base_url.rstrip("/")
+    if root.endswith("/v1"):
+        root = root[: -len("/v1")]
+
+    try:
+        response = requests.post(
+            f"{root}/api/generate",
+            json={"model": model_name, "keep_alive": 0},
+            timeout=30,
+        )
+        logger.info(
+            f"asked ollama to unload {model_name} (status {response.status_code})"
+        )
+        return True
+    except Exception as e:
+        logger.warning(
+            f"could not ask ollama to unload {model_name} ({type(e).__name__}); "
+            "the next stage may have less VRAM than it wants"
+        )
+        return False
 
 
 def _generate_response(

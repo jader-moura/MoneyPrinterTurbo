@@ -45,3 +45,21 @@ htmlcov/
 
 # Claude Code 订阅令牌（docker compose 自动读取），禁止提交
 .env
+
+# 本地服务（local_services/）：只提交源码，不提交权重、虚拟环境与产物。
+# Z-Image-Turbo 的权重约 33 GB，默认留在 Hugging Face 缓存里（HF_HOME），
+# 不在仓库内；下面几条是运行时偶尔会落到这里的东西。
+/local_services/**/.venv/
+/local_services/**/models/
+/local_services/**/weights/
+/local_services/**/outputs/
+/local_services/**/.cache/
+/local_services/**/*.safetensors
+/local_services/**/*.ckpt
+/local_services/**/*.bin
+/local_services/**/*.pt
+/local_services/**/*.png
+
+# config.toml 的时间戳备份：里面是真实配置，含 API Key 与令牌，禁止提交。
+# scripts/start-local.sh 与手动切换配置时都会产生这类文件。
+/config.toml.backup-*

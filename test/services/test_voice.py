@@ -206,6 +206,11 @@ class TestVoiceService(unittest.TestCase):
         """
         空 voice 通常意味着配置缺失或接口参数错误，不能自动切到无配音模式。
         否则用户填错 TTS 配置时也会得到一个“成功”的静音视频，定位成本更高。
+
+        它同样不会被兜底发往 Edge TTS。Edge 曾是唯一的 Provider，所以识别不出
+        的名字都落到它那里；现在自托管 Provider 按前缀路由，一个丢了前缀的名字
+        （把 kokoro:af_heart 写成 af_heart）会让离线链路静默联网。因此无效名字
+        直接失败并说明正确写法，Edge 只在名字确实是它的音色时使用。
         """
         sentinel = object()
 
@@ -217,8 +222,10 @@ class TestVoiceService(unittest.TestCase):
                 voice_file="/tmp/empty-voice.mp3",
             )
 
-        self.assertIs(result, sentinel)
-        azure_tts_v1.assert_called_once()
+        # 失败而不是静音成功，这是本用例原本要守住的行为。
+        self.assertIsNone(result)
+        self.assertIsNot(result, sentinel)
+        azure_tts_v1.assert_not_called()
 
     @unittest.skipUnless(
         RUN_INTEGRATION_TESTS,

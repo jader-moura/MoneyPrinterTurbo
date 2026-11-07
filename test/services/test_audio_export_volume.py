@@ -48,7 +48,7 @@ def test_audio_only_export_applies_requested_volume_to_real_pcm(tmp_path, gain):
 
 
 def test_full_video_keeps_unscaled_narration_for_its_existing_mixer(tmp_path):
-    params = VideoParams(video_subject='Narration', video_script='A narration.', voice_volume=2.0, subtitle_enabled=False)
+    params = VideoParams(video_subject='Narration', video_script='A narration.', voice_volume=2.0, subtitle_enabled=False, video_source="pexels")
     observed = []
     def render(*args, **_kwargs):
         observed.append(_rms(args[3])[0])

@@ -69,7 +69,9 @@ class TestTaskArtifacts(unittest.TestCase):
 
         self.assertEqual(payload["params"]["video_subject"], "test subject")
         self.assertEqual(payload["params"]["video_terms"], ["city", "night"])
-        self.assertEqual(payload["params"]["video_source"], "pexels")
+        # VideoParams 的默认素材源，即本机图片服务。这里只验证默认值被完整
+        # 序列化，与具体选用哪个 Provider 无关。
+        self.assertEqual(payload["params"]["video_source"], "openai_image")
 
     def test_patch_missing_script_is_non_blocking(self):
         """独立调用素材下载时没有任务清单，应静默跳过而不是创建残缺 JSON。"""

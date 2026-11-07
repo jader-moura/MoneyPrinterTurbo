@@ -21,5 +21,5 @@ def test_transient_unknown_key_survives_a_successful_peer_validation(tmp_path):
     config = tmp_path / "config.toml"
     config.write_text('[app]\npexels_api_keys = ["unknown-fixture", "valid-fixture", "rejected-fixture"]\n', encoding="utf-8")
     with patch.object(helper, "_validate_pexels_key", side_effect=["unknown", "valid", "rejected"]):
-        assert helper.validate_pexels_config(config, []) is True
+        assert helper.validate_pexels_config(config, ["--video-source", "pexels"]) is True
     assert tomllib.loads(config.read_text(encoding="utf-8"))["app"]["pexels_api_keys"] == ["unknown-fixture", "valid-fixture"]

@@ -1,7 +1,12 @@
 from dataclasses import dataclass
 
 
-DEFAULT_LLM_PROVIDER_ID = "moonshot"
+# Ollama rather than a hosted provider: a fresh install should write a script
+# without an API key, on the machine it is installed on. Every hosted provider
+# below is unchanged and works the moment it is chosen — in config.toml, with
+# the WebUI's provider selector, or per run with `--llm-provider`.
+# See app/models/const.py for the rest of the local-first defaults.
+DEFAULT_LLM_PROVIDER_ID = "ollama"
 
 
 @dataclass(frozen=True, slots=True)
@@ -192,7 +197,7 @@ class LLMProviderSpec:
 # 元组顺序就是 WebUI 下拉框顺序。新增普通 OpenAI-compatible Provider 时，
 # 通常只需要在这里增加一项并补充 locale；只有协议不同的 Provider 才需要在
 # app/services/llm.py 中增加对应 adapter 实现。
-LLM_PROVIDER_REGISTRY = (
+_DECLARED_PROVIDERS = (
     # 推荐 Provider
     LLMProviderSpec(
         "moonshot",
@@ -637,10 +642,35 @@ LLM_PROVIDER_REGISTRY = (
     ),
 )
 
+# 下拉框顺序：Ollama 在最前，其次 Claude API 与 Claude Code，其余保持声明顺序。
+#
+# The blocks above are grouped by what a provider *is*, which is the right way
+# to read them and the wrong way to offer them: the dropdown order is this
+# tuple's order, and the three that cost nothing up front belong at the top of
+# it. Ollama runs on this machine, and `claude_code` uses a subscription the
+# user already has. Reordering here rather than moving the blocks keeps those
+# groups intact — and `sorted` is stable, so everything else stays exactly in
+# the order it was declared.
+_PREFERRED_ORDER = ("ollama", "anthropic", "claude_code")
+
+LLM_PROVIDER_REGISTRY = tuple(
+    sorted(
+        _DECLARED_PROVIDERS,
+        key=lambda provider: (
+            _PREFERRED_ORDER.index(provider.provider_id)
+            if provider.provider_id in _PREFERRED_ORDER
+            else len(_PREFERRED_ORDER)
+        ),
+    )
+)
+
 LLM_PROVIDERS = {provider.provider_id: provider for provider in LLM_PROVIDER_REGISTRY}
 
 if len(LLM_PROVIDERS) != len(LLM_PROVIDER_REGISTRY):
     raise RuntimeError("duplicate LLM provider id in registry")
+
+if DEFAULT_LLM_PROVIDER_ID not in LLM_PROVIDERS:
+    raise RuntimeError(f"default LLM provider {DEFAULT_LLM_PROVIDER_ID!r} is not in the registry")
 
 
 def get_llm_provider(provider_id: str) -> LLMProviderSpec | None:

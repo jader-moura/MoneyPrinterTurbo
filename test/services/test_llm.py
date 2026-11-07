@@ -677,16 +677,23 @@ class TestLiteLLMProvider(unittest.TestCase):
         self.assertIn(DEFAULT_LLM_PROVIDER_ID, LLM_PROVIDERS)
 
     def test_provider_registry_preserves_product_group_order(self):
-        """下拉顺序按推荐、原厂、聚合平台、本地部署和其它服务排列。"""
+        """下拉顺序：Ollama、Claude API、Claude Code 置顶，其后按声明顺序排列。
+
+        置顶的三个不需要预先付费：Ollama 跑在本机，claude_code 复用已有订阅。
+        其余仍是“推荐、原厂、聚合平台、本地部署、其它服务”的声明顺序，
+        由 llm_provider.py 中的稳定排序保证。
+        """
         self.assertEqual(
             [provider.provider_id for provider in LLM_PROVIDER_REGISTRY],
             [
+                "ollama",
+                "anthropic",
+                "claude_code",
                 "moonshot",
                 "kimi_code",
                 "openai",
                 "openai_codex",
                 "openai_chatgpt",
-                "anthropic",
                 "gemini",
                 "muse_spark",
                 "deepseek",
@@ -718,8 +725,6 @@ class TestLiteLLMProvider(unittest.TestCase):
                 "empiriolabs",
                 "runcrate",
                 "cloudgpu",
-                "ollama",
-                "claude_code",
                 "oneapi",
                 "litellm",
                 "groq",

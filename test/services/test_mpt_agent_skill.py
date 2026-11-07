@@ -39,8 +39,8 @@ muapi_api_key = ""
 infistar_video_api_key = ""
 jalapeno_api_key = ""
 jalapeno_video_api_key = ""
-openai_image_base_url = ""
-openai_image_model = ""
+openai_image_base_url = "http://127.0.0.1:8730/v1"
+openai_image_model = "zimage-turbo"
 openai_image_api_keys = []
 oneapi_api_key = ""
 oneapi_base_url = ""
@@ -139,7 +139,7 @@ class TestMptAgentSkill(unittest.TestCase):
                     self.assertEqual(mpt_agent.reuse_existing_llm_provider(config_path), "ollama")
                     self.assertEqual(mpt_agent.missing_config(config_path, ["--video-source", "local", "--video-materials", directory]), ("ollama", []))
                     with patch.object(mpt_agent, "_validate_pexels_key", return_value="valid") as validate:
-                        self.assertTrue(mpt_agent.validate_pexels_config(config_path, []))
+                        self.assertTrue(mpt_agent.validate_pexels_config(config_path, ["--video-source", "pexels"]))
                     validate.assert_called_once_with("fixture#key")
                 self.assertEqual(config_path.read_text(encoding="utf-8"), text)
 
@@ -179,7 +179,6 @@ class TestMptAgentSkill(unittest.TestCase):
             text = output.getvalue()
             self.assertIn("MPT_NEEDS_INPUT", text)
             self.assertIn("MISSING=moonshot_api_key", text)
-            self.assertIn("MISSING=pexels_api_keys", text)
             self.assertIn("LLM_PROVIDER_OPTION=deepseek|DeepSeek|", text)
             self.assertIn(
                 "LLM_PROVIDER_OPTION=oneapi|Other OpenAI-compatible provider|",
@@ -188,9 +187,10 @@ class TestMptAgentSkill(unittest.TestCase):
             self.assertNotIn("Alibaba Cloud Qwen", text)
             self.assertNotIn("Microsoft Azure OpenAI", text)
             self.assertNotIn("xAI Grok", text)
-            self.assertIn(
-                f"PEXELS_API_KEY_URL={mpt_agent.PEXELS_API_KEY_URL}", text
-            )
+            # 默认素材源是本机图片服务，首次运行不应再把用户引去注册 Pexels
+            # API Key。选中 pexels 时仍会给出注册地址，见
+            # test_only_missing_pexels_key_does_not_ask_for_llm_again。
+            self.assertNotIn("PEXELS_API_KEY_URL=", text)
 
     def test_environment_keys_are_written_without_being_logged(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -246,9 +246,15 @@ class TestMptAgentSkill(unittest.TestCase):
             _, pixabay_missing = mpt_agent.missing_config(
                 config_path, ["--video-source", "pixabay"]
             )
+            _, pexels_missing = mpt_agent.missing_config(
+                config_path, ["--video-source", "pexels"]
+            )
 
-            self.assertEqual(default_missing, ["pexels_api_keys"])
+            # 默认源是本机图片服务，fixture 里已配置好，因此没有缺失项。
+            self.assertEqual(default_missing, [])
             self.assertEqual(pixabay_missing, [])
+            # 只有被显式选中的源才会被检查：pexels 的 Key 在 fixture 里是空的。
+            self.assertEqual(pexels_missing, ["pexels_api_keys"])
 
     def test_local_video_source_requires_video_materials(self):
         """本地素材源必须提供 --video-materials，否则应提前报错。"""
@@ -308,6 +314,11 @@ class TestMptAgentSkill(unittest.TestCase):
             config_path.write_text(
                 MINIMAL_CONFIG.replace(
                     'moonshot_api_key = ""', 'moonshot_api_key = "configured"'
+                ).replace(
+                    'openai_image_base_url = "http://127.0.0.1:8730/v1"',
+                    'openai_image_base_url = ""',
+                ).replace(
+                    'openai_image_model = "zimage-turbo"', 'openai_image_model = ""'
                 ),
                 encoding="utf-8",
             )
@@ -982,7 +993,7 @@ class TestMptAgentSkill(unittest.TestCase):
             self.assertEqual(provider, "oneapi")
             self.assertEqual(
                 missing,
-                ["oneapi_base_url", "oneapi_model_name", "pexels_api_keys"],
+                ["oneapi_base_url", "oneapi_model_name"],
             )
             self.assertIn("OPENAI_COMPATIBLE_REQUIRED=", output.getvalue())
 
@@ -1051,7 +1062,7 @@ class TestMptAgentSkill(unittest.TestCase):
             with patch.object(
                 mpt_agent.urllib.request, "urlopen", side_effect=validate
             ), redirect_stdout(output):
-                valid = mpt_agent.validate_pexels_config(config_path, [])
+                valid = mpt_agent.validate_pexels_config(config_path, ["--video-source", "pexels"])
 
             config = config_path.read_text(encoding="utf-8")
             self.assertTrue(valid)
@@ -1080,7 +1091,7 @@ class TestMptAgentSkill(unittest.TestCase):
             with patch.object(
                 mpt_agent.urllib.request, "urlopen", side_effect=error
             ):
-                valid = mpt_agent.validate_pexels_config(config_path, [])
+                valid = mpt_agent.validate_pexels_config(config_path, ["--video-source", "pexels"])
 
             self.assertFalse(valid)
 

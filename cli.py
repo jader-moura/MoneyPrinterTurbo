@@ -251,6 +251,13 @@ def _bgm_type(value: str) -> str:
 
 
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
+    # The provider ids come from the Registry rather than a list kept here, so
+    # adding a provider does not leave the CLI behind. llm_provider.py is
+    # dataclasses and nothing else, so importing it keeps `--help` as quick as
+    # it was; app.services.llm would drag in the SDKs.
+    from app.models.const import DEFAULT_VIDEO_SOURCE
+    from app.models.llm_provider import DEFAULT_LLM_PROVIDER_ID, LLM_PROVIDERS
+
     command = "mpt cli" if __name__ == "app.cli" else "uv run python cli.py"
     parser = argparse.ArgumentParser(
         prog="mpt cli" if __name__ == "app.cli" else None,
@@ -350,13 +357,36 @@ Batch manifests:
         default=None,
         help="replace the default LLM system prompt for script generation",
     )
+    content_group.add_argument(
+        "--llm-provider",
+        choices=sorted(LLM_PROVIDERS),
+        default=None,
+        metavar="PROVIDER",
+        help=(
+            "model that writes the script and keywords, for this run only; "
+            "omit to use [app] llm_provider from config.toml, which defaults "
+            f"to {DEFAULT_LLM_PROVIDER_ID}. Choices: %(choices)s"
+        ),
+    )
+    content_group.add_argument(
+        "--llm-model",
+        default=None,
+        help=(
+            "model name for the chosen provider, for this run only "
+            "(default: that provider's *_model_name in config.toml)"
+        ),
+    )
 
     material_group = parser.add_argument_group("materials and pipeline")
     material_group.add_argument(
         "--video-source",
-        default="pexels",
+        default=DEFAULT_VIDEO_SOURCE,
         choices=_CLI_VIDEO_SOURCES,
-        help="video material provider; online providers require matching API keys in config.toml",
+        help=(
+            "video material provider (default: %(default)s, which generates "
+            "pictures through a local OpenAI-compatible image server); online "
+            "providers require matching API keys in config.toml"
+        ),
     )
     material_group.add_argument(
         "--video-materials",
@@ -972,6 +1002,10 @@ def build_video_params(args: argparse.Namespace) -> VideoParams:
         "paragraph_number",
         "video_script_prompt",
         "custom_system_prompt",
+        # Left out of params_kwargs above on purpose: None means "no
+        # preference", and the task resolves it against config.toml.
+        "llm_provider",
+        "llm_model",
         "video_fit_mode",
         "image_motion",
         "video_concat_mode",

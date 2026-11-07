@@ -1569,7 +1569,7 @@ def _apply_restored_params(params):
     )
 
     # 视频设置。素材上传控件不能由服务端写入，因此本地素材需要用户重新选择。
-    video_source = params.get("video_source") or "pexels"
+    video_source = params.get("video_source") or const.DEFAULT_VIDEO_SOURCE
     _set_stable_widget_value("video_source_select", video_source)
     _set_stable_widget_value(
         "video_concat_mode_select", params.get("video_concat_mode") or "random"
@@ -3376,7 +3376,7 @@ def _initialize_material_navigation(target, settings):
         for group, providers in VIDEO_SOURCE_GROUPS.items()
         if group != "local"
     }
-    source = settings.get("video_source", "pexels")
+    source = settings.get("video_source", const.DEFAULT_VIDEO_SOURCE)
     source_group = next(
         (group for group, providers in groups.items() if source in providers), None
     )
@@ -3500,7 +3500,7 @@ def _render_general_settings(settings):
         active = (
             settings.get("llm_provider", DEFAULT_LLM_PROVIDER_ID)
             if section == "llm"
-            else settings.get("video_source", "pexels")
+            else settings.get("video_source", const.DEFAULT_VIDEO_SOURCE)
         )
         is_active_category = section == "llm" or active in VIDEO_SOURCE_GROUPS[section]
         options = configured[section]
@@ -6051,7 +6051,9 @@ def _render_video_settings(panel, params):
                 "local": tr("Local file"),
             }
             saved_video_source_name = str(
-                config.snapshot_config_with_pending(config.app).get("video_source", "pexels")
+                config.snapshot_config_with_pending(config.app).get(
+                    "video_source", const.DEFAULT_VIDEO_SOURCE
+                )
                 or "pexels"
             )
             params.video_source = grouped_selectbox(
@@ -7343,7 +7345,7 @@ def _get_reusable_full_voice_preview(params, voice_mode: str) -> dict | None:
         return None
 
     script_content = str(params.video_script or "").strip()
-    selected_tts_server = config.ui.get("tts_server", "azure-tts-v1")
+    selected_tts_server = config.ui.get("tts_server", const.DEFAULT_TTS_SERVER)
     if (
         not script_content
         or not params.voice_name
@@ -7937,7 +7939,7 @@ def _render_audio_settings(panel, params):
 
             # 配音方式是音频设置的一级状态，负责明确区分自动配音、用户上传和无配音。
             # 旧配置没有 voice_mode 时，根据原 tts_server 的无配音哨兵保持兼容。
-            saved_tts_server = config.ui.get("tts_server", "azure-tts-v1")
+            saved_tts_server = config.ui.get("tts_server", const.DEFAULT_TTS_SERVER)
             saved_voice_mode = config.ui.get("voice_mode")
             if saved_voice_mode not in {
                 VOICE_MODE_TTS,
@@ -7969,6 +7971,8 @@ def _render_audio_settings(panel, params):
             # Provider 下拉只负责选择自动配音服务；无配音已经由上方模式控制，
             # 不再作为 TTS Provider 混入列表，避免两个入口表达同一状态。
             tts_servers = [
+                # Kokoro first because it is the default: local, free, no key.
+                ("kokoro", "Kokoro TTS (local)"),
                 ("azure-tts-v1", "Azure TTS V1 (Edge TTS)"),
                 ("azure-tts-v2", "Azure TTS V2"),
                 ("siliconflow", "SiliconFlow TTS"),
@@ -7977,14 +7981,13 @@ def _render_audio_settings(panel, params):
                 ("minimax-tts", "MiniMax TTS"),
                 ("elevenlabs", "ElevenLabs TTS"),
                 ("chatterbox", "Chatterbox TTS"),
-                ("kokoro", "Kokoro TTS"),
                 ("fish_audio", "Fish Audio TTS"),
                 ("voxcpm", "VoxCPM TTS"),
             ]
 
             tts_server_values = [server_value for server_value, _ in tts_servers]
             if saved_tts_server not in tts_server_values:
-                saved_tts_server = "azure-tts-v1"
+                saved_tts_server = const.DEFAULT_TTS_SERVER
 
             if tts_mode_enabled:
                 selected_tts_server = stable_selectbox(
@@ -8125,11 +8128,31 @@ def _render_audio_settings(panel, params):
                     saved_voice_name
                 )
             else:
-                # 如果不在，则根据当前UI语言选择一个默认声音
-                for i, v in enumerate(filtered_voices):
-                    if v.lower().startswith(st.session_state["ui_language"].lower()):
-                        saved_voice_name_index = i
-                        break
+                # 本地 Kokoro 的音色名（af_heart）不带语言前缀，无法用下面的
+                # UI 语言前缀匹配，否则只会落到字母序第一个 af_alloy（评级 C）。
+                # Kokoro 自身的默认音色是 af_heart，这里优先选它。
+                #
+                # The language-prefix match below works for Azure's
+                # "en-US-..." names and finds nothing in Kokoro's; without this
+                # a fresh install would preselect one of Kokoro's weakest
+                # voices purely because it sorts first.
+                preferred_default = (
+                    f"kokoro:{voice.KOKORO_DEFAULT_VOICE}"
+                    if selected_tts_server == "kokoro"
+                    else None
+                )
+                if preferred_default in friendly_names:
+                    saved_voice_name_index = list(friendly_names.keys()).index(
+                        preferred_default
+                    )
+                else:
+                    # 如果不在，则根据当前UI语言选择一个默认声音
+                    for i, v in enumerate(filtered_voices):
+                        if v.lower().startswith(
+                            st.session_state["ui_language"].lower()
+                        ):
+                            saved_voice_name_index = i
+                            break
 
             # 如果没有找到匹配的声音，使用第一个声音
             if saved_voice_name_index >= len(friendly_names) and friendly_names:
