@@ -412,6 +412,43 @@ if [ "$CHECK_ONLY" = "1" ]; then
   exit 0
 fi
 
+# --- 4. the API server -------------------------------------------------------
+# The WebUI runs the pipeline in its own process and does not need this. The
+# timeline editor does: it is a page served by the API, talking to the API's
+# routes, so without this step its link from the review panel goes nowhere.
+#
+# Started before the WebUI because the next step `exec`s into webui.sh and
+# never comes back here.
+
+API_PORT=$("$PYTHON_BIN" - <<'PY' 2>/dev/null || echo 8080
+from app.config import config
+print(config.listen_port)
+PY
+)
+API_PORT=${API_PORT:-8080}
+
+if port_owned "$API_PORT"; then
+  ok "API server already on :$API_PORT"
+elif [ -z "$PYTHON_BIN" ]; then
+  fail "no Python found; cannot start the API server"
+  detail "the WebUI still works; only the timeline editor needs this"
+else
+  mkdir -p storage/logs
+  "$PYTHON_BIN" main.py >> storage/logs/api.log 2>&1 &
+  STARTED_PIDS="$STARTED_PIDS $!"
+  if wait_for "http://127.0.0.1:$API_PORT/docs" 40; then
+    ok "API server on :$API_PORT"
+  else
+    # Not fatal: one-click generation never touches the API, so refusing to
+    # start the WebUI over this would take away the part that does work.
+    fail "the API server did not answer on :$API_PORT"
+    detail "the WebUI still works; the timeline editor will not"
+    detail "see storage/logs/api.log"
+  fi
+fi
+detail "timeline editor: http://127.0.0.1:$API_PORT/editor/"
+echo
+
 if [ "$START_WEBUI" != "1" ]; then
   if [ -n "$STARTED_PIDS" ]; then
     echo "Services this script started will stop when it exits. Ctrl-C when done."
@@ -421,7 +458,7 @@ if [ "$START_WEBUI" != "1" ]; then
   exit 0
 fi
 
-# --- 4. the WebUI ------------------------------------------------------------
+# --- 5. the WebUI ------------------------------------------------------------
 
 echo "starting the WebUI..."
 echo

@@ -537,6 +537,11 @@ async def stream_video(request: Request, file_path: str):
             status_code=404,
             message=f"{request_id}: file no longer exists",
         ) from exc
+    # 这条路由原本只服务视频，类型是写死的 video/mp4。审片和时间线也要从这里
+    # 取旁白音频，而把 mp3 标成 video/mp4 会让浏览器的 <audio> 拒绝解码。
+    # 猜不出来时仍然回落到 video/mp4，所以既有的视频行为一个字节都不变。
+    guessed_type, _ = mimetypes.guess_type(video_path)
+    stream_media_type = guessed_type or "video/mp4"
     try:
         video_size = os.fstat(video_file.fileno()).st_size
         if request.method == "HEAD":
@@ -544,7 +549,7 @@ async def stream_video(request: Request, file_path: str):
             # generator or deferred background cleanup is needed for HEAD.
             video_file.close()
             return Response(
-                media_type="video/mp4",
+                media_type=stream_media_type,
                 headers={"Accept-Ranges": "bytes", "Content-Length": str(video_size)},
             )
         start, end = _parse_byte_range(range_header, video_size, request_id)
@@ -568,7 +573,7 @@ async def stream_video(request: Request, file_path: str):
 
     response = StreamingResponse(
         file_iterator(),
-        media_type="video/mp4",
+        media_type=stream_media_type,
         background=BackgroundTask(video_file.close),
     )
     response.headers["Accept-Ranges"] = "bytes"

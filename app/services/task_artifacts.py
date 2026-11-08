@@ -70,6 +70,35 @@ def write_script_data(task_id: str, payload: Mapping[str, Any]) -> None:
         _write_json_atomic(_script_file(task_id), payload)
 
 
+def read_script_data(task_id: str) -> dict:
+    """
+    读取任务清单；缺失、损坏或不是 JSON 对象时返回空字典。
+
+    恢复渲染和场景审片都从这个清单读回上一次的产物。读取失败返回空值而不是
+    抛出，调用方才能给出"没有可恢复的产物"这类明确错误，而不是把 JSON 解析
+    异常透给 HTTP 调用方。读取与写入共用同一把锁，避免读到写入中的半个文件。
+    """
+    try:
+        with _script_lock(task_id):
+            with _script_file(task_id).open("r", encoding="utf-8") as script_file:
+                payload = json.load(script_file)
+    except FileNotFoundError:
+        return {}
+    except Exception as exc:
+        logger.warning(
+            "failed to read task script data: "
+            f"task_id={task_id}, error={type(exc).__name__}, detail={exc}"
+        )
+        return {}
+
+    if not isinstance(payload, dict):
+        logger.warning(
+            f"task script data is not a JSON object, ignoring it: task_id={task_id}"
+        )
+        return {}
+    return payload
+
+
 def patch_script_data(task_id: str, **updates: Any) -> bool:
     """
     在保留原有字段的前提下补充任务清单，失败时返回 ``False``。

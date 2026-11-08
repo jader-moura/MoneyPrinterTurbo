@@ -30,6 +30,7 @@ from app.services import (
     metaso_minimax,
     muapi,
     ofox,
+    scene_manifest,
     sonilo,
     subtitle,
     task_artifacts,
@@ -359,6 +360,38 @@ def _stage_progress_reporter(task_id: str, stage_start: float, stage_end: float)
             )
 
     return report
+
+
+def _resumed_audio(task_id, resumed: dict, start_from: str) -> tuple[str, float]:
+    """
+    从任务清单读回配音文件与时长，供 ``start_from`` 跳过配音阶段时使用。
+
+    时长以文件为准：清单里的数字可能来自上一轮，而用户完全可以在审片期间
+    把配音换掉。文件探测失败时才退回清单值，两者都拿不到就返回 0，由调用方
+    给出明确错误而不是带着错误的时间基准去渲染。
+    """
+    try:
+        audio_file = scene_manifest.resolve_task_file(task_id, resumed.get("audio_file"))
+    except scene_manifest.SceneError as exc:
+        logger.warning(
+            f"cannot resume at {start_from!r}, task_id: {task_id}, audio: {exc}"
+        )
+        return "", 0.0
+
+    duration = 0.0
+    try:
+        duration = float(voice.get_audio_duration(audio_file) or 0.0)
+    except Exception as exc:
+        logger.warning(f"failed to measure resumed narration duration: {exc}")
+    if duration <= 0:
+        try:
+            duration = float(resumed.get("audio_duration") or 0.0)
+        except (TypeError, ValueError):
+            duration = 0.0
+    if duration <= 0:
+        logger.warning(f"resumed narration has no usable duration: {audio_file}")
+        return "", 0.0
+    return audio_file, duration
 
 
 def _llm_override_kwargs(params) -> dict:
@@ -1033,9 +1066,13 @@ def _get_material_source_groups(task_id: str, video_paths: list[str]) -> dict[st
 
 def generate_final_videos(
     task_id, params, downloaded_videos, audio_file, subtitle_path, audio_duration,
-    *, partial_results: dict | None = None,
+    *, partial_results: dict | None = None, edit_list: list[dict] | None = None,
 ):
-    """Record completed outputs even if a later clip raises before returning."""
+    """Record completed outputs even if a later clip raises before returning.
+
+    ``edit_list`` 是时间线编辑的可选剪辑表；为空时拼接逻辑与本功能上线前
+    完全一致。参数带默认值，既有调用方和测试都不需要改。
+    """
     final_video_paths = []
     combined_video_paths = []
     warnings = []
@@ -1106,6 +1143,8 @@ def generate_final_videos(
             progress_callback=_stage_progress_reporter(
                 task_id, _progress, _progress + combine_share
             ),
+            # 空列表时 combine_videos 走原来那条路，行为与本功能上线前一致。
+            edit_list=edit_list or None,
             **batch_options,
         )
         if allocate_batch_materials:
@@ -1574,6 +1613,7 @@ def _run_pipeline(
     task_id,
     params: VideoParams,
     stop_at: str = "video",
+    start_from: str = "script",
     voice_preview: dict | None = None,
     loomloom_video_request: loomloom.LoomLoomConfirmedVideoRequest | None = None,
     allow_server_file_input: bool = False,
@@ -1583,7 +1623,36 @@ def _run_pipeline(
     jalapeno_video_endpoint: volcengine_seedance.SeedanceEndpoint | None = None,
     codex_image_context: codex_image.CodexImageContext | None = None,
 ):
-    logger.info(f"start task: {task_id}, stop_at: {stop_at}")
+    logger.info(
+        f"start task: {task_id}, stop_at: {stop_at}, start_from: {start_from}"
+    )
+
+    # 审片后恢复渲染：从清单读回上一轮已经做好的产物，而不是重做一遍。
+    # ``start_from`` 是 ``stop_at`` 的镜像，两者共用同一份阶段顺序定义。
+    # 默认值 "script" 走的是和以前完全一样的路径——下面每个 runs() 都为真，
+    # 没有任何分支被改变。
+    # Resuming after a review: earlier stages are read back from the manifest
+    # instead of being redone. ``start_from`` mirrors the ``stop_at`` that
+    # already exists and shares its stage order. The default "script" makes
+    # every runs() below true, so the untouched path behaves exactly as before.
+    try:
+        start_index = scene_manifest.stage_index(start_from, field="start_from")
+        stop_index = scene_manifest.stage_index(stop_at, field="stop_at")
+    except scene_manifest.SceneError as exc:
+        return _mark_task_failed(task_id, "preflight", str(exc))
+    if start_index > stop_index:
+        return _mark_task_failed(
+            task_id,
+            "preflight",
+            f"start_from {start_from!r} is after stop_at {stop_at!r}",
+        )
+
+    def runs(stage: str) -> bool:
+        return scene_manifest.stage_index(stage) >= start_index
+
+    # 只有真的要跳过阶段时才读清单，普通一次性生成完全不碰磁盘。
+    resumed = scene_manifest.load(task_id) if start_index > 0 else {}
+
     sm.state.update_task(
         task_id, state=const.TASK_STATE_PROCESSING, progress=5,
         failed_stage=None, error=None, error_key=None, error_params=None,
@@ -1599,9 +1668,16 @@ def _run_pipeline(
     # that starts mid-run must not be able to change this one's.
     # getattr throughout: this runs for AudioRequest and SubtitleRequest as
     # well as VideoParams, and those two carry no video_terms at all.
-    llm_needs_script = not (getattr(params, "video_script", "") or "").strip()
+    # 恢复渲染时脚本和关键词都已在清单里，不能再要求 LLM 凭据：审片后点"渲染"
+    # 的用户可能早已把 Ollama 关掉了。
+    # On resume both are already in the manifest, so no LLM credential is
+    # required: whoever clicks Render after a review may have shut Ollama down.
+    llm_needs_script = (
+        runs("script") and not (getattr(params, "video_script", "") or "").strip()
+    )
     llm_needs_terms = (
-        not getattr(params, "video_terms", None)
+        runs("terms")
+        and not getattr(params, "video_terms", None)
         and stop_at in {"terms", "materials", "video"}
         and getattr(params, "video_source", "") != "local"
     )
@@ -1625,13 +1701,20 @@ def _run_pipeline(
         except ValueError as exc:
             return _mark_task_failed(task_id, "preflight", str(exc))
 
-    if stop_at in {"materials", "video"} and params.video_source not in _SUPPORTED_VIDEO_SOURCES:
+    # 只有真的要去取素材时才检查素材供应商。恢复渲染用的是清单里已有的文件，
+    # 不碰任何供应商，自然也不该要求它的 Key 或登录态仍然有效。
+    # Only check material providers when materials will actually be fetched. A
+    # resumed render reuses files already on disk, so it must not demand that
+    # the provider's key or login still be valid.
+    prepares_materials = stop_at in {"materials", "video"} and runs("materials")
+
+    if prepares_materials and params.video_source not in _SUPPORTED_VIDEO_SOURCES:
         return _mark_task_failed(
             task_id, "preflight", f"unsupported video source: {params.video_source!r}"
         )
 
     if (
-        stop_at in {"materials", "video"}
+        prepares_materials
         and params.video_source == "volcengine_seedance"
         and not volcengine_seedance.is_enabled()
     ):
@@ -1641,7 +1724,7 @@ def _run_pipeline(
             "Volcano Engine Seedance requires an Ark API key",
         )
 
-    if stop_at in {"materials", "video"} and params.video_source == "codex_image":
+    if prepares_materials and params.video_source == "codex_image":
         try:
             if codex_image_context is None:
                 codex_image_context = codex_image.capture_context()
@@ -1654,7 +1737,7 @@ def _run_pipeline(
                 details={"error_key": exc.key, "error_params": exc.params},
             )
 
-    if stop_at in {"materials", "video"} and params.video_source == "jalapeno":
+    if prepares_materials and params.video_source == "jalapeno":
         try:
             # WebUI 已确认的配置跟随任务；其它入口在预检时冻结一次，避免
             # 后续素材提交重新读取被别的请求改写的 Key、模型或规格。
@@ -1663,7 +1746,7 @@ def _run_pipeline(
         except jalapeno_video.JalapenoVideoError as exc:
             return _mark_task_failed(task_id, "preflight", str(exc))
 
-    if stop_at in {"materials", "video"} and params.video_source == "infistar":
+    if prepares_materials and params.video_source == "infistar":
         try:
             if not infistar_video.is_enabled():
                 raise infistar_video.InfistarVideoError("Infistar video generation requires an API key")
@@ -1674,7 +1757,7 @@ def _run_pipeline(
             return _mark_task_failed(task_id, "preflight", str(exc))
 
     if (
-        stop_at in {"materials", "video"}
+        prepares_materials
         and params.video_source == "ofox"
         and not ofox.is_enabled()
     ):
@@ -1685,7 +1768,7 @@ def _run_pipeline(
         )
 
     if (
-        stop_at in {"materials", "video"}
+        prepares_materials
         and params.video_source == "metaso_minimax"
         and not metaso_minimax.is_enabled()
     ):
@@ -1696,7 +1779,7 @@ def _run_pipeline(
         )
 
     if (
-        stop_at in {"materials", "video"}
+        prepares_materials
         and params.video_source == "muapi"
         and not muapi.is_enabled()
     ):
@@ -1707,7 +1790,7 @@ def _run_pipeline(
         )
 
     if (
-        stop_at in {"materials", "video"}
+        prepares_materials
         and params.video_source == "openai_image"
         and not material.is_openai_image_enabled(
             config.snapshot_config_with_pending(config.app)
@@ -1773,23 +1856,32 @@ def _run_pipeline(
         )
 
     # 1. Generate script
-    generation_progress.stage("script")
-    video_script = generate_script(task_id, params)
-    # The LLM adapter uses a leading "Error: " as its failure sentinel. A
-    # user-provided script may legitimately quote that text anywhere, including
-    # at the beginning, so only interpret it for an LLM-generated script.
-    is_provider_error = (
-        not (params.video_script or "").strip()
-        and isinstance(video_script, str)
-        and video_script.startswith("Error: ")
-    )
-    if not video_script or is_provider_error:
-        error = (
-            video_script.removeprefix("Error: ").strip()
-            if is_provider_error
-            else "failed to generate video script"
+    if runs("script"):
+        generation_progress.stage("script")
+        video_script = generate_script(task_id, params)
+        # The LLM adapter uses a leading "Error: " as its failure sentinel. A
+        # user-provided script may legitimately quote that text anywhere, including
+        # at the beginning, so only interpret it for an LLM-generated script.
+        is_provider_error = (
+            not (params.video_script or "").strip()
+            and isinstance(video_script, str)
+            and video_script.startswith("Error: ")
         )
-        return _mark_task_failed(task_id, "script", error)
+        if not video_script or is_provider_error:
+            error = (
+                video_script.removeprefix("Error: ").strip()
+                if is_provider_error
+                else "failed to generate video script"
+            )
+            return _mark_task_failed(task_id, "script", error)
+    else:
+        video_script = str(resumed.get("script") or "").strip()
+        if not video_script:
+            return _mark_task_failed(
+                task_id,
+                "script",
+                f"cannot start from {start_from!r}: this task has no saved script",
+            )
 
     sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=10)
 
@@ -1801,17 +1893,30 @@ def _run_pipeline(
         )
         return {"script": video_script}
 
-    generation_progress.stage("terms")
     # 2. Generate terms
     video_terms = ""
-    if stop_at in {"terms", "materials", "video"} and params.video_source != "local":
-        video_terms = generate_terms(task_id, params, video_script)
-        if not video_terms:
-            return _mark_task_failed(
-                task_id,
-                "terms",
-                "failed to generate video search terms",
-            )
+    if not runs("terms"):
+        # 关键词只用于取素材。恢复渲染时素材已经在清单里，读回来只是为了让
+        # 场景列表和返回值保持完整，取不到也不该让渲染失败。
+        # Keywords only drive material search. On resume the materials already
+        # exist, so these are read back for completeness and their absence is
+        # not a render failure.
+        video_terms = resumed.get("search_terms") or ""
+    else:
+        # stage() 保持无条件调用：本地素材来源本来也会推进到这一步，把它挪进
+        # 下面的 if 会悄悄改掉进度显示。
+        # stage() stays unconditional: a local material source advanced to this
+        # step before too, and moving it inside the if below would quietly
+        # change the progress display.
+        generation_progress.stage("terms")
+        if stop_at in {"terms", "materials", "video"} and params.video_source != "local":
+            video_terms = generate_terms(task_id, params, video_script)
+            if not video_terms:
+                return _mark_task_failed(
+                    task_id,
+                    "terms",
+                    "failed to generate video search terms",
+                )
 
     # 2b. Nothing after this point asks a model for words, and the stages that
     # follow want the card: a local image model needs about 13 GB resident and
@@ -1820,7 +1925,14 @@ def _run_pipeline(
     # nothing here, so a Claude run skips it.
     llm.unload_ollama_model(llm_app_config)
 
-    save_script_data(task_id, video_script, video_terms, params)
+    # ``save_script_data`` 整体替换 script.json。恢复渲染时清单里已经有审片
+    # 过的场景列表，再整体写一次会把它们连带清空，所以只有真正重新生成了
+    # 脚本或关键词时才写。
+    # ``save_script_data`` replaces script.json wholesale. On resume the
+    # manifest already holds the reviewed scene list, and rewriting it would
+    # take that list with it, so only write when script or terms were remade.
+    if runs("terms"):
+        save_script_data(task_id, video_script, video_terms, params)
 
     if stop_at == "terms":
         sm.state.update_task(
@@ -1830,29 +1942,52 @@ def _run_pipeline(
 
     sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=20)
 
-    generation_progress.stage("audio")
     # 3. Generate audio
-    generate_audio_kwargs = {
-        "voice_preview": voice_preview,
-        "allow_server_file_input": allow_server_file_input,
-    }
-    if voxcpm_reference_audio is not None:
-        generate_audio_kwargs["voxcpm_reference_audio"] = voxcpm_reference_audio
-    if voxcpm_prompt_audio is not None:
-        generate_audio_kwargs["voxcpm_prompt_audio"] = voxcpm_prompt_audio
-        generate_audio_kwargs["voxcpm_prompt_text"] = voxcpm_prompt_text
-    audio_file, audio_duration, sub_maker = generate_audio(
-        task_id,
-        params,
-        video_script,
-        **generate_audio_kwargs,
-    )
-    if not audio_file:
-        return _mark_task_failed(
+    sub_maker = None
+    if runs("audio"):
+        generation_progress.stage("audio")
+        generate_audio_kwargs = {
+            "voice_preview": voice_preview,
+            "allow_server_file_input": allow_server_file_input,
+        }
+        if voxcpm_reference_audio is not None:
+            generate_audio_kwargs["voxcpm_reference_audio"] = voxcpm_reference_audio
+        if voxcpm_prompt_audio is not None:
+            generate_audio_kwargs["voxcpm_prompt_audio"] = voxcpm_prompt_audio
+            generate_audio_kwargs["voxcpm_prompt_text"] = voxcpm_prompt_text
+        audio_file, audio_duration, sub_maker = generate_audio(
             task_id,
-            "audio",
-            "failed to prepare narration audio",
+            params,
+            video_script,
+            **generate_audio_kwargs,
         )
+        if not audio_file:
+            return _mark_task_failed(
+                task_id,
+                "audio",
+                "failed to prepare narration audio",
+            )
+    else:
+        # 配音是渲染的时间基准，缺了它无法继续，也绝不悄悄重新合成一遍：
+        # 换一次声音意味着字幕时间轴全部失效。
+        # Narration is the render's time base. Without it there is nothing to
+        # continue from, and it is never quietly re-synthesised: a new take
+        # would invalidate every subtitle timing.
+        audio_file, audio_duration = _resumed_audio(task_id, resumed, start_from)
+        if not audio_file:
+            return _mark_task_failed(
+                task_id,
+                "audio",
+                f"cannot start from {start_from!r}: this task has no prepared "
+                "narration audio on disk",
+            )
+        if resumed.get("audio_stale"):
+            return _mark_task_failed(
+                task_id,
+                "audio",
+                "the narration no longer matches the edited script; "
+                "regenerate the audio before rendering",
+            )
 
     sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=30)
 
@@ -1885,11 +2020,23 @@ def _run_pipeline(
         )
         return {"audio_file": audio_file, "audio_duration": audio_duration}
 
-    generation_progress.stage("subtitle")
     # 4. Generate subtitle
-    subtitle_path = generate_subtitle(
-        task_id, params, video_script, sub_maker, audio_file
-    )
+    if runs("subtitle"):
+        generation_progress.stage("subtitle")
+        subtitle_path = generate_subtitle(
+            task_id, params, video_script, sub_maker, audio_file
+        )
+    else:
+        # 字幕可以合法地不存在（用户关掉了字幕）。所以这里只做"有就限定路径、
+        # 没有就当作没有字幕"，不把缺失当成错误。
+        # Subtitles may legitimately be absent because the user turned them
+        # off, so a missing file here means "no subtitles", not a failure.
+        try:
+            subtitle_path = scene_manifest.resolve_task_file(
+                task_id, resumed.get("subtitle_path")
+            )
+        except scene_manifest.SceneError:
+            subtitle_path = ""
 
     if stop_at == "subtitle":
         if not subtitle_path:
@@ -1897,6 +2044,21 @@ def _run_pipeline(
                 task_id,
                 "subtitle",
                 "failed to generate subtitles; verify the subtitle provider and timeline",
+            )
+        # 审片中"改台词后重新配音"走的就是 start_from="audio" + stop_at="subtitle"。
+        # 素材阶段不会执行，所以新的配音和字幕必须在这里写回清单，否则界面
+        # 还显示旧配音，渲染也会继续被 audio_stale 拦住。
+        # Re-narrating during a review is start_from="audio" with
+        # stop_at="subtitle". The materials stage never runs, so the new audio
+        # and subtitles are recorded here or the review would keep showing the
+        # old take and the render would stay blocked on audio_stale.
+        if runs("audio") and scene_manifest.load(task_id)["scenes"]:
+            scene_manifest.record_audio_artifacts(
+                task_id,
+                audio_file=audio_file,
+                audio_duration=audio_duration,
+                subtitle_path=subtitle_path,
+                script=video_script,
             )
         sm.state.update_task(
             task_id,
@@ -1908,27 +2070,78 @@ def _run_pipeline(
 
     sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=40)
 
-    generation_progress.stage("materials")
     # 5. Get video materials
-    downloaded_videos = get_video_materials(
-        task_id,
-        params,
-        video_terms,
-        audio_duration,
-        loomloom_video_request=loomloom_video_request,
-        **({"codex_image_context": codex_image_context}
-           if codex_image_context is not None else {}),
-        **({"jalapeno_video_endpoint": jalapeno_video_endpoint}
-           if jalapeno_video_endpoint is not None else {}),
-    )
-    if not downloaded_videos:
-        return _mark_task_failed(
+    if not runs("materials"):
+        # 恢复渲染必须按场景顺序读清单，而不是读上一轮的 ``materials``：
+        # 用户在审片里换掉或重排过的结果只存在于场景列表里，读旧列表会把
+        # 所有编辑悄悄丢掉——这正是这个功能要避免的事。
+        # A resumed render reads the scene list, never the previous
+        # ``materials``: replacements and reordering live only in the scenes,
+        # and rendering from the old list would silently discard every edit.
+        try:
+            downloaded_videos = scene_manifest.materials_for_render(task_id)
+            # 时间线上拖过入出点的任务会留下一张剪辑表。没拖过时它是空的，
+            # 渲染器照旧自己按旁白时长切片。
+            render_edit_list = scene_manifest.edit_list_for_render(task_id)
+        except scene_manifest.SceneError as exc:
+            return _mark_task_failed(task_id, "materials", str(exc))
+        logger.info(
+            f"resuming with {len(downloaded_videos)} reviewed scenes, "
+            f"task_id: {task_id}"
+        )
+        if render_edit_list:
+            logger.info(
+                f"rendering a timeline of {len(render_edit_list)} clips, "
+                f"task_id: {task_id}"
+            )
+    else:
+        # 新生成的素材不存在时间线编辑，渲染走原来的自动切片逻辑。
+        render_edit_list = []
+        generation_progress.stage("materials")
+        downloaded_videos = get_video_materials(
             task_id,
-            "materials",
-            "failed to prepare video materials",
+            params,
+            video_terms,
+            audio_duration,
+            loomloom_video_request=loomloom_video_request,
+            **({"codex_image_context": codex_image_context}
+               if codex_image_context is not None else {}),
+            **({"jalapeno_video_endpoint": jalapeno_video_endpoint}
+               if jalapeno_video_endpoint is not None else {}),
+        )
+        if not downloaded_videos:
+            return _mark_task_failed(
+                task_id,
+                "materials",
+                "failed to prepare video materials",
+            )
+
+        # 素材齐了就落盘一份场景清单。完整一次性生成也写，因为写了之后这次
+        # 任务才可以被重新审片和重新渲染；失败只记警告，不能让一次已经花掉
+        # 算力的生成因为写不了辅助清单而判负。
+        # Record the scene list as soon as the materials exist. A one-click run
+        # writes it too, because that is what later makes the run reviewable
+        # and re-renderable. A failure only warns: a generation that already
+        # spent the compute must not be failed over an auxiliary manifest.
+        scene_manifest.record_prepared_artifacts(
+            task_id,
+            video_script=video_script,
+            video_terms=video_terms,
+            materials=downloaded_videos,
+            audio_file=audio_file,
+            audio_duration=audio_duration,
+            subtitle_path=subtitle_path,
+            video_source=getattr(params, "video_source", "") or "",
+            clip_duration=getattr(params, "video_clip_duration", None),
         )
 
     if stop_at == "materials":
+        # 返回值和任务状态都保持原样。恢复渲染需要的配音、字幕和场景顺序
+        # 已经由上面的 record_prepared_artifacts 写进了任务清单，那里才是
+        # 跨进程、跨 WebUI 重启都还在的那一份。
+        # The return value and task state stay as they were: everything a
+        # resumed render needs is already in the task manifest, which is the
+        # copy that survives a WebUI restart.
         sm.state.update_task(
             task_id,
             state=const.TASK_STATE_COMPLETE,
@@ -1956,6 +2169,7 @@ def _run_pipeline(
             subtitle_path,
             audio_duration,
             partial_results=partial_results,
+            edit_list=render_edit_list or None,
         )
     except Exception as exc:
         logger.exception(f"video batch failed, task_id: {task_id}, error: {exc}")
@@ -2044,6 +2258,7 @@ def start(
     task_id,
     params: VideoParams,
     stop_at: str = "video",
+    start_from: str = "script",
     voice_preview: dict | None = None,
     loomloom_video_request: loomloom.LoomLoomConfirmedVideoRequest | None = None,
     allow_server_file_input: bool = False,
@@ -2065,6 +2280,7 @@ def start(
                 task_id,
                 params,
                 stop_at=stop_at,
+                start_from=start_from,
                 voice_preview=voice_preview,
                 loomloom_video_request=loomloom_video_request,
                 allow_server_file_input=allow_server_file_input,

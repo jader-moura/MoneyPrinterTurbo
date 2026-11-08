@@ -48,7 +48,8 @@ def is_generation_active(task_id: str) -> bool:
 
 
 def _submission_signature(
-    params, references, request, endpoint, preview, codex_image_context=None
+    params, references, request, endpoint, preview, codex_image_context=None,
+    stages=("script", "video"),
 ):
     # 仅保留摘要，不保存凭据或上传内容。不同 Key/模型/输入是不同请求，
     # 相同内容在完成后允许再次生成；只合并仍在排队或执行的重复提交。
@@ -75,6 +76,13 @@ def _submission_signature(
     }
     if codex_image_context is not None:
         payload["codex_image"] = asdict(codex_image_context)
+    # 审片与渲染是同一组参数的两次不同提交，必须算作不同请求，否则第二次
+    # 会被当成重复点击而丢掉。
+    # Reviewing and rendering are two submissions of the same params, so the
+    # stage pair has to be part of the identity or the second one would be
+    # discarded as a double click.
+    if stages != ("script", "video"):
+        payload["stages"] = list(stages)
     if preview and not preview.get("audio_digest"):
         # 旧调用方没有内容摘要时，不能仅凭同一时长推断两个文件相同。
         # 不在校验前读取任意路径；宁可保留不同文件的独立请求。
@@ -109,6 +117,8 @@ def _run_generation(
     task_id: str,
     params: VideoParams,
     capture_logs: bool,
+    stop_at: str = "video",
+    start_from: str = "script",
     voice_preview: dict | None = None,
     loomloom_video_request: LoomLoomConfirmedVideoRequest | None = None,
     voxcpm_reference_audio: bytes | None = None,
@@ -147,6 +157,8 @@ def _run_generation(
             return tm.start(
                 task_id=task_id,
                 params=params,
+                stop_at=stop_at,
+                start_from=start_from,
                 voice_preview=voice_preview,
                 loomloom_video_request=loomloom_video_request,
                 voxcpm_reference_audio=voxcpm_reference_audio,
@@ -205,6 +217,8 @@ def submit_generation(
     voxcpm_prompt_audio: bytes | None = None,
     voxcpm_prompt_text: str = "",
     jalapeno_video_endpoint: volcengine_seedance.SeedanceEndpoint | None = None,
+    stop_at: str = "video",
+    start_from: str = "script",
 ) -> str:
     """
     登记并提交 WebUI 视频生成任务，调用后立即返回。
@@ -253,6 +267,7 @@ def submit_generation(
         jalapeno_video_endpoint,
         voice_preview_snapshot,
         codex_image_context,
+        (start_from, stop_at),
     )
     # 同一锁内查重并预占，两个标签页同时点击也只会真正入队一次。
     with _submission_lock:
@@ -274,6 +289,10 @@ def submit_generation(
             voxcpm_prompt_text_snapshot,
             jalapeno_video_endpoint,
             codex_image_context,
+            # 关键字传递：这两个参数是后加的，按位置传会把
+            # ``codex_image_context`` 从末位挤走，而既有测试正是按末位取它的。
+            stop_at=stop_at,
+            start_from=start_from,
         )
     except Exception:
         with _submission_lock:
@@ -294,6 +313,8 @@ def _enqueue_generation(
     voxcpm_prompt_text_snapshot,
     jalapeno_video_endpoint,
     codex_image_context=None,
+    stop_at="video",
+    start_from="script",
 ):
     submitted_at = time.time()
     sm.state.update_task(
@@ -311,6 +332,8 @@ def _enqueue_generation(
             task_id=task_id,
             params=task_params,
             capture_logs=capture_logs,
+            stop_at=stop_at,
+            start_from=start_from,
             voice_preview=voice_preview_snapshot,
             loomloom_video_request=loomloom_request_snapshot,
             voxcpm_reference_audio=voxcpm_reference_audio_snapshot,

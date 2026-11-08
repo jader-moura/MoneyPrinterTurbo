@@ -973,6 +973,52 @@ def _fit_clip_to_canvas(
     ).with_duration(clip.duration)
 
 
+def _subclips_from_edit_list(edit_list: List[dict]) -> List[SubClippedVideoClip]:
+    """把时间线剪辑表翻成渲染器的片段列表。
+
+    这里对每一项都重新探测尺寸并校验入出点：剪辑表可能是几小时前存下来的，
+    期间用户完全可能在审片界面换掉某个素材。一段读不出来就直接报错点名，
+    不跳过——时间线上少一段画面，用户只会以为渲染器吞了它。
+    """
+    items: List[SubClippedVideoClip] = []
+    for position, entry in enumerate(edit_list):
+        path = str((entry or {}).get("path") or "").strip()
+        if not path:
+            raise ValueError(f"edit list entry {position} has no material path")
+        clip = None
+        try:
+            clip = _open_video_clip_quietly(path)
+            source_duration = float(clip.duration)
+            clip_w, clip_h = clip.size
+        except Exception as exc:
+            raise ValueError(
+                f"edit list entry {position} cannot be read: {path} ({exc})"
+            ) from exc
+        finally:
+            close_clip(clip)
+
+        start_time = max(0.0, float(entry.get("start") or 0.0))
+        end_time = entry.get("end")
+        end_time = source_duration if end_time is None else float(end_time)
+        end_time = min(end_time, source_duration)
+        if end_time <= start_time:
+            raise ValueError(
+                f"edit list entry {position} has an empty range "
+                f"({start_time:.2f}s to {end_time:.2f}s of {path})"
+            )
+        items.append(
+            SubClippedVideoClip(
+                file_path=path,
+                start_time=start_time,
+                end_time=end_time,
+                width=clip_w,
+                height=clip_h,
+                source_file_path=path,
+            )
+        )
+    return items
+
+
 def combine_videos(
     combined_video_path: str,
     video_paths: List[str],
@@ -988,7 +1034,18 @@ def combine_videos(
     source_groups: dict[str, str] | None = None,
     used_video_paths: List[str] | None = None,
     progress_callback: Callable[[float], None] | None = None,
+    edit_list: List[dict] | None = None,
 ) -> str:
+    """把素材拼成一条与旁白同长的视频。
+
+    ``edit_list`` 是时间线编辑用的可选入口：给定时按 ``[{path, start, end}]``
+    原样渲染,跳过自动切片、去重排序、补时长和循环填充。不给时行为与以前
+    完全一致——一键出片那条路不受本参数影响。
+
+    ``edit_list`` renders exactly the clips given, in order, skipping the
+    automatic slicing, unique-source prioritisation, duration fill and clip
+    looping. Omitted, behaviour is unchanged.
+    """
     # Direct callers and persisted tasks can still supply the raw string.
     # Normalize it once for all downstream enum access.
     video_concat_mode = VideoConcatMode(video_concat_mode or VideoConcatMode.random)
@@ -1029,7 +1086,10 @@ def combine_videos(
     processed_clips = []
     subclipped_items = []
     video_duration = 0
-    for video_path in video_paths:
+    # 时间线给出的剪辑表是用户亲手拖的结果，必须原样渲染：不再按
+    # max_clip_duration 切片、不去重排序、不补时长、不循环填充。
+    render_edit_list = bool(edit_list)
+    for video_path in [] if render_edit_list else video_paths:
         clip = None
         try:
             clip = _open_video_clip_quietly(video_path)
@@ -1076,12 +1136,25 @@ def combine_videos(
             if video_concat_mode.value == VideoConcatMode.sequential.value:
                 break
 
-    subclipped_items = _prioritize_unique_source_clips(
-        subclipped_items=subclipped_items,
-        concat_mode=video_concat_mode,
-        **({"source_usage": source_usage, "source_groups": source_groups}
-           if source_usage is not None else {}),
-    )
+    if render_edit_list:
+        subclipped_items = _subclips_from_edit_list(edit_list)
+        # 进度分母改用剪辑表总长：用户排的时间线可能比旁白长也可能比它短，
+        # 继续拿旁白时长当分母会让进度条停在 60% 或者冲过 100%。
+        required_video_duration = (
+            sum(item.end_time - item.start_time for item in subclipped_items)
+            / normalized_clip_speed
+        )
+        logger.info(
+            f"rendering a timeline edit list of {len(subclipped_items)} clips, "
+            f"total {required_video_duration:.2f}s"
+        )
+    else:
+        subclipped_items = _prioritize_unique_source_clips(
+            subclipped_items=subclipped_items,
+            concat_mode=video_concat_mode,
+            **({"source_usage": source_usage, "source_groups": source_groups}
+               if source_usage is not None else {}),
+        )
         
     logger.debug(f"total subclipped items: {len(subclipped_items)}")
     
@@ -1154,7 +1227,9 @@ def combine_videos(
                 shuffle_transition = random.choice(transition_funcs)
                 clip = shuffle_transition(clip)
 
-            if clip.duration > max_clip_duration:
+            # 剪辑表里的出点就是用户拖到的位置，这里再按 max_clip_duration
+            # 截一刀会把他拖长的片段悄悄切回 5 秒。
+            if not render_edit_list and clip.duration > max_clip_duration:
                 clip = clip.subclipped(0, max_clip_duration)
 
             # Write each candidate clip to a unique temporary file. Threads must not
@@ -1207,15 +1282,21 @@ def combine_videos(
         thread_name_prefix="clip-process",
     ) as executor:
         next_candidate_index = 0
-        while (
-            next_candidate_index < len(subclipped_items)
-            and video_duration < required_video_duration
+        while next_candidate_index < len(subclipped_items) and (
+            render_edit_list or video_duration < required_video_duration
         ):
             remaining_duration = required_video_duration - video_duration
             batch = []
             batch_duration = 0.0
             candidate_index = next_candidate_index
-            while candidate_index < len(subclipped_items) and batch_duration < remaining_duration:
+            # 剪辑表要全部渲染，但仍然分批提交：一次性把几十段 4K 素材塞进
+            # 线程池会把内存顶爆，分批的意义在这里和自动模式一样。
+            batch_limit = max(1, _get_clip_processing_concurrency()) if render_edit_list else 0
+            while candidate_index < len(subclipped_items) and (
+                len(batch) < batch_limit
+                if render_edit_list
+                else batch_duration < remaining_duration
+            ):
                 subclipped_item = subclipped_items[candidate_index]
                 source_duration = subclipped_item.end_time - subclipped_item.start_time
                 output_duration = min(
@@ -1244,7 +1325,15 @@ def combine_videos(
             next_candidate_index = candidate_index
     
     # loop processed clips until the video duration covers the audio duration and the small safety margin.
-    if video_duration < required_video_duration:
+    if render_edit_list and video_duration + 0.05 < audio_duration:
+        # 时间线比旁白短是用户的选择，不替他循环补片；但旁白会被
+        # concat 之后的音频阶段按成片长度截断，这件事必须说出来。
+        logger.warning(
+            f"the timeline is {video_duration:.2f}s but the narration is "
+            f"{audio_duration:.2f}s; the narration will be cut off at the end "
+            "of the last clip"
+        )
+    if not render_edit_list and video_duration < required_video_duration:
         logger.warning(
             f"video duration ({video_duration:.2f}s) is shorter than required duration "
             f"({required_video_duration:.2f}s), looping clips to match audio length."
@@ -1277,13 +1366,17 @@ def combine_videos(
             output_file=combined_video_path,
             threads=threads,
             output_dir=output_dir,
-            max_duration=audio_duration,
+            # 自动模式下成片按旁白长度收尾(多出来的安全余量会被截掉)；
+            # 时间线模式下长度由用户决定，这里不能再按旁白截。
+            max_duration=None if render_edit_list else audio_duration,
         )
         if used_video_paths is not None:
             # Exclude safety-margin clips that FFmpeg trims entirely from the output.
             elapsed = 0.0
+            # 时间线模式不按旁白截断，所以每一段都真的进了成片。
+            usable_duration = video_duration if render_edit_list else audio_duration
             for clip in processed_clips:
-                if elapsed >= audio_duration:
+                if elapsed >= usable_duration:
                     break
                 used_video_paths.append(clip.source_file_path)
                 elapsed += clip.duration

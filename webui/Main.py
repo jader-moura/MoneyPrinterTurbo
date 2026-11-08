@@ -1533,6 +1533,39 @@ def _set_stable_widget_value(key, value):
         st.session_state[localized_widget_key(key)] = value
 
 
+def _restore_from_deep_link():
+    """用 ``?generation_task=<id>`` 打开页面时，把那条任务的参数填回表单。
+
+    URL 里只有任务 ID，不含任何配置——参数是从任务目录的 ``script.json``
+    读回来的,这一点和"不在 URL 里保存配置或凭据"并不冲突。
+
+    只在这个会话第一次见到这个 ID 时做一次。两个前提都必须满足：
+    - 会话里还没有"当前任务"。否则就是用户自己刚刚发起的那条任务,
+      页面上的表单本来就是对的,再按清单覆盖一遍会把他的改动抹掉
+      (生成成功后页面自己会把 ID 写进 URL,正是这种情况)。
+    - 必须在任何控件渲染之前调用。Streamlit 不允许修改已经实例化的控件状态,
+      所以这件事只能发生在 ``_render_application`` 的最前面。
+    """
+    try:
+        task_id = str(UUID(st.query_params.get("generation_task", "")))
+    except (ValueError, TypeError, AttributeError):
+        return
+    if st.session_state.get("deep_link_restored_task") == task_id:
+        return
+
+    # 先记下来再读盘：读不到参数时也不该每次重跑都再试一遍。
+    st.session_state["deep_link_restored_task"] = task_id
+    if st.session_state.get("current_generation_task_id"):
+        return
+
+    payload = _load_task_restore_payload(task_id)
+    if not payload:
+        logger.info(f"linked task has no restorable parameters: {task_id}")
+        return
+    st.session_state["task_restore_payload"] = payload
+    logger.info(f"restoring configuration from linked task: {task_id}")
+
+
 def _apply_pending_task_restore():
     payload = st.session_state.pop("task_restore_payload", None)
     if not payload:
@@ -2111,6 +2144,20 @@ def _render_generation_activity(task):
 def _render_generation_task_snapshot(task_id, task):
     """根据状态存储中的快照渲染进度、失败原因或最终成片。"""
     if not task:
+        # 任务状态存在进程内存里，WebUI 一重启就没了；而任务清单在磁盘上。
+        # 因此"状态里查不到"并不等于"还在生成"——用 ?generation_task=<id>
+        # 打开一条早先的任务时走的正是这条路径。清单里有场景就说明它跑到过
+        # 素材阶段，交给审片面板，而不是一直显示"正在生成"。
+        #
+        # Task state lives in this process's memory and is lost on restart,
+        # while the manifest is on disk. "Not in state" therefore does not
+        # mean "still running" — opening ?generation_task=<id> after a restart
+        # lands here. If the manifest has scenes, the task reached the
+        # materials stage, so hand it to the review panel.
+        from webui.review import render_panel
+
+        if render_panel(task_id, tr):
+            return
         st.info(tr("Generating Video"))
         _render_generation_logs(task_id)
         return
@@ -2127,6 +2174,20 @@ def _render_generation_task_snapshot(task_id, task):
         return
 
     video_files = task.get("videos") or []
+
+    # 审片：勾选"渲染前审片"的任务跑到素材阶段就正常结束，它没有成片但也
+    # 不是失败。先交给审片面板；面板接管后由它负责提交渲染。没有场景清单时
+    # 返回 False，继续走下面原本的成片或失败展示，行为与以前一致。
+    # A reviewed run finishes at the materials stage with no video, which is
+    # not a failure. Hand it to the review panel first; without a scene list
+    # the panel declines and the original result/failure display runs
+    # unchanged.
+    if state == const.TASK_STATE_COMPLETE and not video_files:
+        from webui.review import render_panel
+
+        if render_panel(task_id, tr):
+            return
+
     if state == const.TASK_STATE_FAILED:
         error = str(task.get("error") or "").strip()
         error_key = task.get("error_key")
@@ -2236,6 +2297,26 @@ def _render_generation_task_snapshot(task_id, task):
         logger.info(f"{tr('Video Generation Completed')}: task_id={task_id}")
 
 
+def _render_reviewable_without_state(task_id):
+    """状态里查不到这条任务时，看看它能不能直接进审片。
+
+    任务状态存在进程内存里，WebUI 一重启就没了；而任务清单一直在磁盘上。
+    所以"状态里没有"并不等于"这条任务不存在"——用 ``?generation_task=<id>``
+    打开一条早先跑完素材阶段的任务,走的正是这条路径。清单里有场景就说明它
+    确实跑到过素材阶段,应该把审片面板给用户,而不是只留一句"任务记录不可用"。
+
+    没有场景清单时返回 ``False``，调用方继续显示原本那句提醒——那句话是
+    关于"付费生成可能已经提交过"的风险提示，不能因为这个改动丢掉。
+    """
+    try:
+        from webui.review import render_panel
+
+        return bool(render_panel(task_id, tr))
+    except Exception as exc:  # pragma: no cover - 审片不可用不该挡住提醒
+        logger.warning(f"cannot offer review for untracked task {task_id}: {exc}")
+        return False
+
+
 @st.fragment(run_every=webui_task.TASK_LOG_REFRESH_INTERVAL_SECONDS)
 def _render_running_generation_task(task_id):
     """只在任务运行期间轮询；结束后切回静态结果，停止不必要的定时刷新。"""
@@ -2249,6 +2330,9 @@ def _render_running_generation_task(task_id):
         return
 
     if not task and not webui_task.is_generation_active(task_id):
+        # 状态丢了不代表任务没跑过：清单里有场景就直接进审片。
+        if _render_reviewable_without_state(task_id):
+            return
         st.warning(tr("Generation Task Unavailable"))
         return
     state = _normalize_task_state((task or {}).get("state"))
@@ -2287,6 +2371,9 @@ def _render_current_generation_task():
         return
 
     if not task and not webui_task.is_generation_active(task_id):
+        # 状态丢了不代表任务没跑过：清单里有场景就直接进审片。
+        if _render_reviewable_without_state(task_id):
+            return
         st.warning(tr("Generation Task Unavailable"))
         return
     state = _normalize_task_state((task or {}).get("state"))
@@ -6390,6 +6477,26 @@ def _render_video_settings(panel, params):
             )
             _set_runtime_config("ui", "video_count", params.video_count)
 
+            # 渲染前审片：勾选后生成只跑到素材阶段并停下，等用户逐个检查、
+            # 替换或重新生成场景，再手动提交渲染。默认关闭，不勾选时这条路径
+            # 完全不参与，一次点击仍然直接出片。
+            # Review before rendering: when ticked, generation stops after the
+            # materials stage so each scene can be checked, replaced or
+            # regenerated before the render is submitted by hand. Off by
+            # default; unticked, this path is not involved at all and one click
+            # still produces the finished video.
+            st.checkbox(
+                tr("Review Scenes Before Rendering"),
+                value=bool(config.ui.get("review_before_render", False)),
+                key="review_before_render",
+                help=tr("Review Scenes Before Rendering Help"),
+            )
+            _set_runtime_config(
+                "ui",
+                "review_before_render",
+                bool(st.session_state.get("review_before_render", False)),
+            )
+
             video_codec_options = [
                 (tr("Default Video Encoder"), DEFAULT_VIDEO_CODEC_OPTION),
                 ("libx264 (CPU)", "libx264"),
@@ -9489,6 +9596,10 @@ def _render_generation_controls(
                 f"task_id={task_id}, duration={reusable_voice_preview['duration']:.2f}s"
             )
 
+        # 勾选了审片就只跑到素材阶段。渲染由审片面板在用户确认后提交。
+        review_before_render = bool(
+            st.session_state.get("review_before_render", False)
+        )
         try:
             st.toast(tr("Generating Video"))
             logger.info(tr("Start Generating Video"))
@@ -9497,6 +9608,7 @@ def _render_generation_controls(
                 task_id=task_id,
                 params=params,
                 capture_logs=not config.ui.get("hide_log", False),
+                stop_at="materials" if review_before_render else "video",
                 voice_preview=reusable_voice_preview,
                 loomloom_video_request=loomloom_video_request,
                 voxcpm_reference_audio=voxcpm_reference_audio,
@@ -9540,6 +9652,10 @@ def _render_application():
 
     if _apply_pending_settings_preset():
         st.success(tr("Settings Preset Imported"))
+
+    # 用任务链接打开页面时，先把那条任务的参数排队，再交给下面统一应用。
+    # 必须在任何控件渲染之前。
+    _restore_from_deep_link()
 
     restore_applied = _apply_pending_task_restore()
     restore_candidate_id = st.session_state.get("task_restore_candidate_id")

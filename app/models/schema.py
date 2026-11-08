@@ -614,3 +614,101 @@ class VideoMaterialUploadResponse(BaseResponse):
             },
         }
     )
+
+
+# ---- SCENE REVIEW ----
+# 审片是渲染前的可选步骤：先跑到素材阶段，逐个场景检查、替换、重生成，
+# 再提交渲染。这些模型只描述"对某一个场景做什么"，场景本身存在任务清单里。
+# Reviewing is the optional step before rendering: run up to materials, check
+# and fix each scene, then render. These models describe what to do to one
+# scene; the scenes themselves live in the task manifest.
+class SceneUpdateRequest(BaseModel):
+    """改台词、关键词或锁定状态。只提交想改的字段。"""
+
+    narration: Optional[str] = None
+    keyword: Optional[str] = None
+    locked: Optional[bool] = None
+
+
+class SceneRegenerateRequest(BaseModel):
+    """重新生成这一个场景的素材。
+
+    ``keyword`` 给了就同时改写场景关键词——画面不对时要改的通常正是它。
+    """
+
+    keyword: Optional[str] = None
+
+
+class SceneReplaceRequest(BaseModel):
+    """用已上传的素材替换场景画面。``material`` 是上传接口返回的文件名。"""
+
+    material: str
+
+
+class SceneAddRequest(BaseModel):
+    """按关键词生成一段新画面并加进时间线。
+
+    ``after`` 是插入位置（插在该下标之后）；不给就追加到末尾。
+    ``narration`` 默认留空：补画面不该顺手改旁白，否则会悄悄让已录好的
+    配音失效。
+    """
+
+    keyword: str
+    narration: Optional[str] = None
+    after: Optional[int] = Field(default=None, ge=0)
+
+
+class SceneTimingRequest(BaseModel):
+    """设置这一段的入点和在成片里的停留时长。
+
+    ``trim_start`` 是**源素材上**的秒数，``duration`` 是**画面在成片里**停留
+    的秒数；变速不为 1 时两者差一个倍率，换算由服务端做。
+    ``reset`` 为真时清掉这一段的时间线设置，让它回到自动时长。
+    """
+
+    trim_start: Optional[float] = Field(default=None, ge=0)
+    duration: Optional[float] = Field(default=None, gt=0)
+    reset: bool = False
+
+
+class SceneReorderRequest(BaseModel):
+    """``order`` 必须是 0..N-1 的完整排列，不接受部分顺序。"""
+
+    order: List[int]
+
+
+class SceneData(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    index: int
+    keyword: str = ""
+    narration: str = ""
+    material: str = ""
+    kind: str = ""
+    source: str = ""
+    locked: bool = False
+    url: str = ""
+    exists: bool = False
+    # 时间线字段。``duration``/``source_duration`` 为 None 表示这一段没被
+    # 编辑过，按素材全长自动决定。
+    trim_start: float = 0.0
+    duration: Optional[float] = None
+    source_duration: Optional[float] = None
+
+
+class SceneListData(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    task_id: str
+    scenes: List[SceneData] = []
+    audio_stale: bool = False
+    audio_url: str = ""
+    script: str = ""
+
+
+class SceneListResponse(BaseResponse):
+    data: SceneListData
+
+
+class SceneResponse(BaseResponse):
+    data: SceneData

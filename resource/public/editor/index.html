@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Timeline Editor</title>
+<link rel="stylesheet" href="editor.css">
+</head>
+<body>
+<header class="bar">
+  <span class="brand">Timeline</span>
+  <input id="task" class="task" placeholder="task id" spellcheck="false" autocomplete="off">
+  <button id="load" class="btn">Load</button>
+  <span id="totals" class="totals"></span>
+  <span class="spacer"></span>
+  <button id="rerecord" class="btn" disabled>Re-record narration</button>
+  <button id="render" class="btn primary" disabled>Render video</button>
+</header>
+
+<div id="banner" class="banner" hidden></div>
+
+<main class="stage">
+  <section class="viewer">
+    <div class="screen">
+      <!-- 画面框按成片宽高比留出，视频用 object-fit: contain 填进去。
+           绝对定位 + contain 是这里唯一不会溢出的组合：靠 max-height:100%
+           去约束一个 flex 里的竖版视频，高度解析不出来就会把容器撑破。 -->
+      <div id="frame" class="frame">
+        <video id="preview" playsinline></video>
+        <!-- 画面用完、旁白还在时显示。预览继续放声音，而不是停下来，
+             否则用户既听不到剩下的旁白，也看不出缺了多少画面。 -->
+        <div id="gap" class="gap-note" hidden>
+          <strong>No picture for this part</strong>
+          <span>The narration keeps going. Add scenes with <b>+</b>, or use
+            <b>Fit to narration</b> to hold the existing pictures longer.</span>
+        </div>
+        <div id="fx" class="fx"></div>
+      </div>
+      <div id="placeholder" class="placeholder">Load a task to begin</div>
+    </div>
+    <div class="transport">
+      <button id="play" class="btn" disabled>Play</button>
+      <span id="clock" class="clock">0:00 / 0:00</span>
+      <button id="fit" class="btn small" hidden>Fit to narration</button>
+      <span id="settings" class="settings"></span>
+      <label class="zoom">Zoom
+        <input id="zoom" type="range" min="20" max="240" value="80">
+      </label>
+    </div>
+  </section>
+
+  <aside class="inspector">
+    <h2 id="insp-title">Nothing selected</h2>
+    <div id="insp-body" class="insp-body"></div>
+  </aside>
+</main>
+
+<section class="timeline">
+  <!-- 轨道名在滚动区之外：横向滚动时它们要留在原位，而且这样轨道本身
+       不需要靠 margin-left 对齐,播放头也不用加那 70px 的偏移。 -->
+  <div class="gutter">
+    <div class="gutter-cell ruler-cell"></div>
+    <div class="gutter-cell">Video</div>
+    <div class="gutter-cell short">Voice</div>
+  </div>
+  <div id="scroll" class="scroll">
+    <div id="ruler" class="ruler"></div>
+    <div id="video-track" class="track"></div>
+    <div id="audio-track" class="track short"></div>
+    <div id="playhead" class="playhead" hidden></div>
+  </div>
+</section>
+
+<audio id="narration"></audio>
+<script src="editor.js"></script>
+</body>
+</html>

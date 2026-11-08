@@ -1,0 +1,446 @@
+/* 时间线编辑器样式。没有构建步骤、没有 CDN：这是一个 Python 仓库，
+   为了一个页面引入 npm 工具链不值得。深色是剪辑软件的惯例，画面在深色
+   背景上判断曝光和构图更准。 */
+
+:root {
+  --bg: #15171c;
+  --panel: #1d2026;
+  --panel-2: #23262e;
+  --line: #31353f;
+  --text: #e6e8ec;
+  --muted: #9aa0ab;
+  --accent: #4c8dff;
+  --accent-soft: #2b4a80;
+  --warn: #e0a33a;
+  --danger: #e05c5c;
+  --clip: #2f6f58;
+  --clip-sel: #3d9c78;
+  --clip-locked: #5a5340;
+  --gutter: 74px;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+
+html, body { height: 100%; }
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+/* ---------- top bar ---------- */
+
+.bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 14px;
+  background: var(--panel);
+  border-bottom: 1px solid var(--line);
+  flex: 0 0 auto;
+}
+
+.brand { font-weight: 650; letter-spacing: .3px; }
+.spacer { flex: 1; }
+
+.task {
+  width: 270px;
+  padding: 6px 9px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--text);
+  font-family: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  font-size: 12px;
+}
+
+.totals { color: var(--muted); font-size: 12px; font-variant-numeric: tabular-nums; }
+.totals.drift { color: var(--warn); }
+
+.btn {
+  padding: 6px 12px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--text);
+  cursor: pointer;
+  font-size: 13px;
+  white-space: nowrap;
+}
+.btn:hover:not(:disabled) { border-color: var(--accent); }
+.btn:disabled { opacity: .45; cursor: not-allowed; }
+.btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.btn.danger { border-color: var(--danger); color: var(--danger); }
+.btn.small { padding: 4px 8px; font-size: 12px; }
+
+.banner {
+  padding: 8px 14px;
+  background: var(--accent-soft);
+  border-bottom: 1px solid var(--line);
+  font-size: 13px;
+  flex: 0 0 auto;
+}
+.banner.error { background: #4a2626; }
+.banner.warn { background: #4a3c1e; }
+
+/* ---------- stage: preview + inspector ---------- */
+
+.stage {
+  display: flex;
+  gap: 1px;
+  flex: 1 1 auto;
+  /* min-height:0 必须一路往下传。少了任何一层，竖版画面就会把这一列
+     撑高、溢出到时间线上——这正是"图片超出画面区域"的成因。 */
+  min-height: 0;
+  background: var(--line);
+}
+
+.viewer {
+  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  min-width: 0;
+  min-height: 0;
+}
+
+.screen {
+  flex: 1 1 auto;
+  min-height: 0;
+  position: relative;
+  display: grid;
+  place-items: center;
+  background: #07080a;
+  padding: 10px;
+  overflow: hidden;
+}
+
+/* 画面框的像素尺寸由 JS 按成片比例算好（见 fitFrame）。
+
+   这里不用 aspect-ratio + auto 尺寸：框里的 <video> 是绝对定位的，对布局
+   没有任何尺寸贡献，于是 width:auto 的框会收缩到 0，aspect-ratio 再把 0 宽
+   变成 0 高——框还在，里面什么都看不见。按像素给定尺寸不存在这个问题。 */
+.frame {
+  position: relative;
+  background: #000;
+  display: none;
+  box-shadow: 0 0 0 1px var(--line);
+  overflow: hidden;
+}
+.frame.ready { display: block; }
+
+#preview {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  /* contain 复刻渲染器的 "contain" 适配；cover 模式下 JS 会换成 cover，
+     这样预览里看到的裁切和成片一致。 */
+  object-fit: contain;
+  background: #000;
+  display: block;
+}
+
+/* 转场近似层。真正的转场是渲染时逐片段加的，没有烘进素材，
+   所以预览只能近似，并且界面上会标明这一点。 */
+.fx {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0;
+  background: #000;
+}
+.fx.fade { animation: fx-fade .45s ease-out; }
+.fx.slide { animation: fx-slide .45s ease-out; }
+.fx.zoom { animation: fx-zoom .45s ease-out; }
+@keyframes fx-fade { from { opacity: 1; } to { opacity: 0; } }
+@keyframes fx-slide {
+  from { opacity: 1; transform: translateX(0); }
+  to { opacity: 1; transform: translateX(100%); }
+}
+@keyframes fx-zoom {
+  from { opacity: .85; transform: scale(1); }
+  to { opacity: 0; transform: scale(1.35); }
+}
+
+/* 画面区里的"这里没有画面"说明。预览此时仍在放旁白。 */
+.gap-note {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 20px;
+  text-align: center;
+  background: #000;
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.gap-note strong { color: var(--warn); font-size: 14px; }
+.gap-note b { color: var(--text); }
+/* 作者样式里的 display 会压过浏览器自带的 [hidden]{display:none}，
+   不补这一条，hidden 置为 true 也还是看得见。 */
+.gap-note[hidden] { display: none; }
+
+.placeholder { color: var(--muted); font-size: 13px; }
+
+.transport {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 7px 14px;
+  background: var(--panel);
+  border-top: 1px solid var(--line);
+  flex: 0 0 auto;
+  flex-wrap: wrap;
+}
+
+.clock { font-variant-numeric: tabular-nums; color: var(--muted); font-size: 12px; }
+.settings { font-size: 11px; color: var(--muted); display: flex; gap: 6px; flex-wrap: wrap; }
+.chip {
+  padding: 2px 7px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  white-space: nowrap;
+}
+.chip.off { color: var(--warn); border-color: #4a3c1e; }
+.zoom { margin-left: auto; color: var(--muted); font-size: 12px; display: flex; gap: 8px; align-items: center; }
+
+.inspector {
+  width: 320px;
+  flex: 0 0 320px;
+  background: var(--panel);
+  padding: 14px;
+  overflow-y: auto;
+}
+.inspector h2 {
+  margin: 0 0 12px;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: .6px;
+  color: var(--muted);
+}
+
+.insp-body { display: flex; flex-direction: column; gap: 11px; }
+.field { display: flex; flex-direction: column; gap: 5px; }
+.field label { font-size: 12px; color: var(--muted); }
+.field input, .field textarea {
+  padding: 6px 8px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  width: 100%;
+}
+.field textarea { resize: vertical; min-height: 66px; }
+.row { display: flex; gap: 8px; }
+.row > * { flex: 1; min-width: 0; }
+.hint { font-size: 12px; color: var(--muted); margin: 0; }
+.hint.warn { color: var(--warn); }
+
+/* ---------- timeline ---------- */
+
+.timeline {
+  flex: 0 0 auto;
+  display: flex;
+  background: var(--panel);
+  border-top: 1px solid var(--line);
+  user-select: none;
+}
+
+/* 轨道名固定在左侧，不随横向滚动移动。 */
+.gutter {
+  flex: 0 0 var(--gutter);
+  width: var(--gutter);
+  border-right: 1px solid var(--line);
+  padding-bottom: 12px;
+}
+.gutter-cell {
+  height: 64px;
+  display: flex;
+  align-items: center;
+  padding: 0 10px;
+  font-size: 11px;
+  color: var(--muted);
+}
+.gutter-cell.short { height: 30px; }
+.gutter-cell.ruler-cell { height: 23px; border-bottom: 1px solid var(--line); }
+
+.scroll {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding-bottom: 12px;
+}
+
+.ruler {
+  position: relative;
+  height: 23px;
+  border-bottom: 1px solid var(--line);
+}
+.tick {
+  position: absolute;
+  top: 0;
+  height: 100%;
+  border-left: 1px solid var(--line);
+  padding-left: 4px;
+  font-size: 10px;
+  color: var(--muted);
+  line-height: 22px;
+}
+
+.track { position: relative; height: 64px; }
+.track.short { height: 30px; }
+
+.clip {
+  position: absolute;
+  top: 3px;
+  bottom: 3px;
+  background: var(--clip);
+  border: 1px solid rgba(0, 0, 0, .5);
+  border-radius: 5px;
+  overflow: hidden;
+  cursor: grab;
+}
+.clip.selected { background: var(--clip-sel); border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.clip.locked { background: var(--clip-locked); }
+.clip.dragging { opacity: .5; cursor: grabbing; z-index: 5; }
+.clip.missing { background: #5a2b2b; }
+
+/* 画面用完、旁白还在的那一段。 */
+.gap-block {
+  position: absolute;
+  top: 3px;
+  bottom: 3px;
+  border: 1px dashed #6b5a3a;
+  border-radius: 5px;
+  background: repeating-linear-gradient(
+    45deg, rgba(224, 163, 58, .10), rgba(224, 163, 58, .10) 7px,
+    transparent 7px, transparent 14px
+  );
+  color: var(--warn);
+  font-size: 11px;
+  padding: 4px 8px;
+  white-space: nowrap;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+/* 时间线末尾的加号。z-index 让它压在空档块上面，不被盖住。 */
+.clip.add {
+  z-index: 7;
+  background: var(--panel-2);
+  border: 1px dashed var(--line);
+  color: var(--muted);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 20px;
+  cursor: pointer;
+}
+.clip.add:hover { border-color: var(--accent); color: var(--accent); }
+.clip.add.selected { border-color: var(--accent); color: var(--accent); border-style: solid; }
+
+.clip-thumb {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  opacity: .5;
+  pointer-events: none;
+}
+.clip-text {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  padding: 2px 6px;
+  font-size: 11px;
+  line-height: 1.3;
+  text-shadow: 0 1px 3px rgba(0, 0, 0, .95);
+  pointer-events: none;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.handle {
+  position: absolute;
+  top: 0;
+  width: 10px;
+  height: 100%;
+  cursor: ew-resize;
+  background: linear-gradient(rgba(255, 255, 255, .14), rgba(255, 255, 255, .06));
+  z-index: 3;
+}
+.handle:hover { background: var(--accent); }
+.handle.left { left: 0; border-right: 1px solid rgba(0, 0, 0, .4); }
+.handle.right { right: 0; border-left: 1px solid rgba(0, 0, 0, .4); }
+
+.voice-bar {
+  position: absolute;
+  top: 3px;
+  bottom: 3px;
+  background: #35507a;
+  border: 1px solid #44639b;
+  border-radius: 5px;
+  font-size: 11px;
+  color: #cfd8e8;
+  padding: 3px 8px;
+  white-space: nowrap;
+  overflow: hidden;
+}
+
+/* 逐句的旁白块。窄的时候文字会被裁掉，所以完整内容放在 title 里。 */
+.voice-bar.line {
+  padding: 3px 5px;
+  cursor: pointer;
+  text-overflow: ellipsis;
+}
+.voice-bar.line:hover { background: #3f5f90; border-color: var(--accent); }
+
+.drop-marker { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--accent); z-index: 6; }
+
+.playhead {
+  position: absolute;
+  top: 0;
+  bottom: 12px;
+  width: 1px;
+  background: var(--danger);
+  pointer-events: none;
+  z-index: 8;
+}
+.playhead::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  left: -4px;
+  width: 9px;
+  height: 9px;
+  background: var(--danger);
+  clip-path: polygon(0 0, 100% 0, 50% 100%);
+}
+
+/* 嵌在 WebUI 里时宽度由那一列决定，窄下来就把检视面板挪到画面下方，
+   而不是让 320px 的固定宽度把预览挤成一条。 */
+@media (max-width: 900px) {
+  .stage { flex-direction: column; }
+  .inspector { width: auto; flex: 0 0 auto; max-height: 240px; }
+  .task { width: 140px; }
+  .bar { flex-wrap: wrap; }
+}
