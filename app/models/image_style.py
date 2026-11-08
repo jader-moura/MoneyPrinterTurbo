@@ -56,13 +56,33 @@ class ImageStyle:
 # The first entry must match the shipped default template verbatim, or a fresh
 # install would open the selector showing "Custom". Asserted in the tests.
 #
-# “stickman”是唯一把 {term} 放在开头的预设,这不是笔误：它的风格描述很长,
-# 把场景留到最后时模型会忽略动作——实测“农民播种”只画出一个站在空地上的
-# 人,既没有种子也没有道具。把 {term} 提前后,同一个关键词画出了弯腰栽种
-# 幼苗、旁边还有一排土坑的画面。
-# "stickman" is the one preset that leads with {term}, and that is deliberate:
-# its style description is long, and with the scene left until the end the
-# model dropped the action entirely. Measured, not guessed.
+# “stickman”的措辞是逐张比对出来的,不要随手改长。实测十余张图说明：模型
+# 画这类角色时有很强的固有偏好,再怎么写“细黑线四肢”也只会得到圆头白身的
+# 吉祥物;真正会丢的是动作和道具。所以“手里拿着与动作相关的物体、充满动感
+# 的姿势”放在前面,背景描述放在最后——把词都花在背景上的那一版画出了漂亮的
+# 风景和一个呆站着的角色。另外“whiteboard”不能用,模型会真的画一块白板。
+# The wording here was arrived at by comparing frames, not by writing prose.
+# The test images showed the model has a strong prior for this round-headed
+# mascot and ignores limb geometry however it is described -- what it actually
+# drops is the action and the prop. So the action clause comes first and the
+# background clause last: the variant that spent its words on scenery drew a
+# beautiful landscape with a figure standing in it doing nothing. "objects of
+# the action" beats "tools of the action", which biases towards implements and
+# got a spatula for a keyword about two bottles. "whiteboard" is unusable --
+# the model draws an actual whiteboard, frame and all.
+#
+# 两个已知局限,不必再去调措辞：一是“贴地”的动作(弯腰、蹲下、在地面操作)
+# 大约一半的出图会丢掉道具,换过的每一种写法都这样,是模型本身的问题;二是
+# “expressive eyebrows”偶尔会画成皱眉,因为斜眉在模型眼里就是生气。想改表
+# 情只能连带牺牲别的,实测把它换成“与内容相称的表情”后,“存钱”这个词画出了
+# 一张哭丧脸。
+# Two known limits, so nobody burns another afternoon on the wording. Actions
+# at ground level -- bending, crouching, working on the floor -- drop the prop
+# in roughly half the draws, and did so in every wording tried; that is the
+# model, not the prompt. And "expressive eyebrows" occasionally lands as a
+# frown, because angled brows read as anger. Replacing it with "an expression
+# that matches what is happening" was tested and is worse: it drew a
+# miserable face for a keyword about saving money.
 IMAGE_STYLE_PRESETS = (
     ImageStyle(
         "photorealistic",
@@ -127,16 +147,12 @@ IMAGE_STYLE_PRESETS = (
     ImageStyle(
         "stickman",
         "Image Style Stickman",
-        "{term}. Drawn as a simple 2D stickman cartoon illustration in flat"
-        " vector style: one stick figure character with a large perfectly round"
-        " white head, a thin black outline, dot eyes, a small curved mouth and"
-        " emotive eyebrows, and thin clean black lines of even weight for arms"
-        " and legs. The character holds or wears one simple prop that shows its"
-        " role, and is clearly performing the action. Bright cheerful saturated"
-        " flat colour fills, crisp solid shapes, minimal soft shadow."
-        " Uncluttered background of a few simple flat shapes that set the"
-        " scene, with generous clean empty space. Centred, clearly readable,"
-        " lighthearted humorous educational explainer look, 16:9 widescreen.",
+        "{term}, cute stick figure cartoon, round white head, dot eyes,"
+        " expressive eyebrows, big happy smile, thin black line arms and legs,"
+        " clearly holding the objects of the action, mid-action pose full of"
+        " energy, bright flat vector colours, simple flat background showing"
+        " where this happens, full body centred, clean uncluttered composition,"
+        " wide 16:9 explainer illustration",
     ),
     ImageStyle(
         "comic",
