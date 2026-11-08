@@ -32,6 +32,9 @@ GEN_URL="${GEN_URL:-http://127.0.0.1:8730}"
 KOKORO_URL="${KOKORO_URL:-http://127.0.0.1:8880}"
 KOKORO_CONTAINER="${KOKORO_CONTAINER:-docreel-kokoro}"
 GEN_STARTUP_TIMEOUT="${GEN_STARTUP_TIMEOUT:-120}"
+# Appended to, not truncated: a crash is usually understood by comparing the
+# run that died with the one before it.
+GEN_LOG="${GEN_LOG:-$CURRENT_DIR/storage/logs/genserver.log}"
 
 # Keep the model loaded. This used to default to 600, to hand back the ~16 GB
 # of *host* RAM that CPU offload holds while a model is resident, and that was
@@ -295,23 +298,33 @@ else
     FAILED=1
   else
     warn "starting genserver (importing torch takes a moment)"
+    # Keep the output. This used to go to /dev/null, and when the server died
+    # mid-request there was no traceback, no exit code and no last line to
+    # work from -- for a process whose failure modes so far are a segfault and
+    # an out-of-memory during the model load, that is the one thing worth
+    # having. storage/ is gitignored, so the log stays out of commits.
+    mkdir -p storage/logs
+    printf '\n===== started %s =====\n' "$(date '+%Y-%m-%d %H:%M:%S')" \
+      >> "$GEN_LOG"
     # expandable_segments is not optional: a model that is offloaded and
     # reloaded every call otherwise leaves the allocator holding blocks of the
     # wrong shape, and a later generation dies on a small allocation.
     PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True \
-      "$GEN_PYTHON" local_services/genserver/server.py >/dev/null 2>&1 &
+      "$GEN_PYTHON" local_services/genserver/server.py >> "$GEN_LOG" 2>&1 &
     GEN_PID=$!
     STARTED_PIDS="$STARTED_PIDS $GEN_PID"
     if wait_for "$GEN_URL/health" "$GEN_STARTUP_TIMEOUT"; then
       ok "genserver     $GEN_URL"
+      detail "log: $GEN_LOG"
     else
       # Stop it here rather than leaving it to the exit trap: a half-started
       # genserver may already hold gigabytes, and when the WebUI starts below
       # this script stays alive for as long as the session lasts.
       stop_pid "$GEN_PID"
       fail "genserver did not come up within ${GEN_STARTUP_TIMEOUT}s"
-      detail "run it by hand to see the error:"
-      detail "  $GEN_PYTHON local_services/genserver/server.py"
+      detail "the last lines it wrote:"
+      tail -n 15 "$GEN_LOG" 2>/dev/null | sed "s/^/       ${DIM}/;s/$/${OFF}/"
+      detail "full log: $GEN_LOG"
       FAILED=1
     fi
   fi

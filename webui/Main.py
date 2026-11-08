@@ -36,6 +36,7 @@ from app.models.llm_provider import (
     get_llm_provider,
     normalize_provider_override,
 )
+from app.models import image_style as image_style_model
 from app.models.schema import (
     ImageMotion,
     MaterialInfo,
@@ -6264,6 +6265,62 @@ def _render_video_settings(panel, params):
                     )
                 )
                 _set_runtime_config("ui", "image_motion", params.image_motion.value)
+
+            # 风格只对“按关键词作图”的来源有意义，所以这里比上面的图片动效
+            # 少一个 local：本地素材是用户自己的文件，提示词模板用不到。
+            if params.video_source in image_style_model.IMAGE_STYLE_SOURCES:
+                image_style_labels = {
+                    style.style_id: tr(style.label_key)
+                    for style in image_style_model.IMAGE_STYLE_PRESETS
+                }
+                image_style_labels[image_style_model.IMAGE_STYLE_CUSTOM] = tr(
+                    "Image Style Custom"
+                )
+
+                # 当前风格由模板文本反推，不另存一份 ui.image_style。用户在
+                # 素材设置里直接改过模板后，这里会立刻显示“自定义”，而不是
+                # 继续显示一个早已不生效的预设名。
+                saved_template = str(
+                    config.snapshot_config_with_pending(config.app).get(
+                        "openai_image_prompt_template", ""
+                    )
+                    or ""
+                ).strip()
+
+                selected_style = stable_selectbox(
+                    tr("Image Style"),
+                    options=list(image_style_labels),
+                    default_value=image_style_model.style_for_template(saved_template),
+                    key="image_style_select",
+                    format_func=image_style_labels.get,
+                    help=tr("Image Style Help"),
+                )
+
+                # 选中预设时写回模板；选“自定义”时什么都不写，让素材设置里
+                # 的模板保持原样——否则切到“自定义”会清空用户写好的提示词。
+                if selected_style != image_style_model.IMAGE_STYLE_CUSTOM:
+                    style_template = image_style_model.template_for_style(
+                        selected_style
+                    )
+                    if style_template and style_template != saved_template:
+                        _set_runtime_config(
+                            "app", "openai_image_prompt_template", style_template
+                        )
+                        # 素材设置对话框里的模板输入框只在首次创建时读取
+                        # value=，之后由 session_state 决定。这里一并更新，
+                        # 否则再打开对话框会看到风格切换前的旧模板。
+                        if "openai_image_prompt_template_input" in st.session_state:
+                            st.session_state[
+                                "openai_image_prompt_template_input"
+                            ] = style_template
+                        saved_template = style_template
+
+                # 显示真正会发出去的提示词。风格名只是概括，模板才是事实，
+                # 二者不一致时用户应当看得见。
+                if saved_template:
+                    st.caption(
+                        saved_template.replace("{term}", tr("Image Style Term"))
+                    )
 
             # MiniMax H3 的远端时长范围是 4～15 秒。选择秘塔时使用完整能力
             # 范围，既避免 2/3 秒被按 4 秒计费，也让 WebUI 与 CLI、服务层一致。
