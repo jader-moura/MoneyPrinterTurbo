@@ -63,3 +63,9 @@ htmlcov/
 # config.toml 的时间戳备份：里面是真实配置，含 API Key 与令牌，禁止提交。
 # scripts/start-local.sh 与手动切换配置时都会产生这类文件。
 /config.toml.backup-*
+
+# resource/songs/：项目自带的 output###.mp3 是跟踪的，自己往这个目录里丢的
+# 曲子不跟踪——一首就好几兆，而且版权不在我们手上，不该跟着仓库走。
+# 真要提交某一首，git add -f 它。
+/resource/songs/*
+!/resource/songs/output[0-9][0-9][0-9].mp3
