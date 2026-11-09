@@ -416,11 +416,23 @@ def realign_narration(task_id: str) -> bool:
         logger.warning(f"cannot re-pair narration for {task_id}: {exc}")
         return False
 
-    texts = scene_manifest.distribute_narration(
-        windows,
+    # 画面铺不满旁白时整组会轮播，所以要按轮播后的真实时间线分配，再把
+    # 同一个场景的几次出现合回一条。只按第一轮分配的话，第一轮之后的每一
+    # 句都会堆到最后一个场景上。
+    cycled = timeline.cycle_windows(
+        windows, float(manifest.get("audio_duration") or 0.0)
+    )
+    blocks = scene_manifest.distribute_narration(
+        [{"start": item["start"], "end": item["end"]} for item in cycled],
         segments=scene_manifest.narration_segments(task_id),
         lines=lines,
     )
+    texts = ["" for _ in windows]
+    for item, block in zip(cycled, blocks):
+        if not block:
+            continue
+        index = item["scene"]
+        texts[index] = "\n".join(filter(None, (texts[index], block))).strip()
     scene_manifest.apply_narration_pairing(task_id, texts)
     logger.info(
         f"re-paired {len(lines)} narration lines across {len(scenes)} scenes "
@@ -491,6 +503,11 @@ def describe(task_id: str, endpoint: str = "", *, with_timing: bool = False) -> 
         "script": manifest["script"],
     }
     payload["planned_total"] = round(windows[-1]["end"], 3) if windows else 0.0
+    # 旁白总长无条件带上：审片列表要靠它说清楚"画面铺不满旁白,所以会轮播"。
+    # 这只是读一次清单，不探测素材，所以不必等 with_timing。
+    payload["narration_total"] = round(
+        float(manifest.get("audio_duration") or 0.0), 3
+    )
     if with_timing:
         if params is None:
             params = load_params(task_id)

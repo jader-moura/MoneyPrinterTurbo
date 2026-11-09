@@ -63,16 +63,27 @@ def render_panel(task_id: str, tr) -> bool:
     # 画面张数由关键词个数决定，旁白句数由脚本决定，两者几乎从不相等。
     # 不说出来的话，"28 句旁白只有 12 段画面"看起来像是列表被截断了。
     lines = scene_manifest.split_narration(described.get("script"))
-    total = described.get("planned_total") or 0.0
+    covered = described.get("planned_total") or 0.0
+    narration = described.get("narration_total") or 0.0
     if scenes and lines:
         st.caption(
             tr("Review Scene Coverage").format(
                 scenes=len(scenes),
-                total=f"{total:.1f}",
+                covered=f"{covered:.1f}",
+                total=f"{narration or covered:.1f}",
                 lines=len(lines),
-                each=f"{total / len(scenes):.1f}" if total else "0.0",
+                each=f"{covered / len(scenes):.1f}" if covered else "0.0",
             )
         )
+        # 画面在"一张图最多停多久"的上限之内铺不满旁白时会整组轮播。不说
+        # 出来的话，下面每行写的时间段只是它第一次出现的位置，用户会以为
+        # 渲染器又换了图。
+        if narration > covered + 0.05 and covered > 0:
+            st.warning(
+                tr("Review Scene Repeats").format(
+                    times=f"{narration / covered:.1f}",
+                )
+            )
 
     if described["audio_stale"]:
         st.warning(tr("Narration Out Of Date"))
@@ -310,10 +321,15 @@ def _render_preview(task_id: str, scene: dict, tr) -> None:
 
 def _render_controls(task_id: str, scene: dict, total: int, tr) -> None:
     index = scene["index"]
-    keyword = st.text_input(
+    # 文生图那条路里这段文字就是发给模型的提示词原文，一句完整的画面描述
+    # 塞不进单行输入框。用多行框显示，用户读到的就是真正生成这张图的那段
+    # 文字，改完重生成也不会有"我改的和它用的不是一回事"。
+    keyword = st.text_area(
         tr("Scene Keyword"),
         value=scene["keyword"],
         key=f"review_keyword_{task_id}_{index}",
+        height=68,
+        help=tr("Scene Keyword Help"),
     )
     narration = st.text_area(
         tr("Scene Narration"),
