@@ -420,6 +420,53 @@ def _natural_length(
     return max(MIN_CLIP_DURATION, held)
 
 
+def cycle_windows(windows: list[dict], target: Any = 0.0) -> list[dict]:
+    """把一组时间段按顺序重播到铺满旁白，每一项带上它属于哪个场景。
+
+    画面在"一张图最多停多久"的上限之内铺不满旁白时会整组轮播，于是第 i
+    段画面在成片里出现不止一次。旁白分配必须按这条真实时间线来做：只看
+    第一轮的话，第一轮之后的每一句都没有任何时间段与之重叠，会全部堆到
+    最后一个场景上——用户看到的就是最后一段画面挂着半篇旁白。
+
+    When the pictures cycle, scene *i* appears more than once, and narration
+    has to be split over that real timeline. Looking only at the first pass
+    leaves every later line with no overlapping window, so they all pile onto
+    the last scene.
+    """
+    windows = list(windows or [])
+    if not windows:
+        return []
+    try:
+        limit = max(0.0, float(target or 0.0))
+    except (TypeError, ValueError):
+        limit = 0.0
+
+    cycled: list[dict] = []
+    elapsed = float(windows[0]["start"])
+    position = 0
+    # 每段至少 MIN_CLIP_DURATION，所以轮数有限；这里再加一道硬上限，
+    # 防止某段算出 0 长度时转不出去。
+    guard = max(len(windows) * 100, len(windows))
+    while position < guard:
+        source = windows[position % len(windows)]
+        length = max(0.0, float(source["end"]) - float(source["start"]))
+        cycled.append(
+            {
+                "start": round(elapsed, 3),
+                "end": round(elapsed + length, 3),
+                "scene": position % len(windows),
+            }
+        )
+        elapsed += length
+        position += 1
+        covered = not limit or elapsed >= limit - MIN_CLIP_DURATION
+        if position >= len(windows) and covered:
+            break
+        if length <= 0 and position >= len(windows):
+            break
+    return cycled
+
+
 def plan_windows(
     task_id: str,
     scenes: Iterable[dict],
@@ -473,10 +520,26 @@ def plan_windows(
     ]
 
     # 拖过时间线的任务按它拖出来的长度渲染，不缩放；没拖过的按比例铺满旁白。
+    #
+    # 放大时绝不越过 ``max_clip_duration``。那是用户填的"一张图最多停多久"
+    # 的上限,不是起点：12 张图配 72 秒旁白时按比例要停 6 秒,而用户明明填的
+    # 是 3 秒。铺不满就让它铺不满——缺口由 ``auto_fit_edit_list`` 轮播补齐,
+    # 界面也会如实说"每张图播了两遍",这比悄悄把 3 秒变成 6 秒诚实。
+    # 缩小不受此限：28 张图配 72 秒旁白时每张 2.57 秒,本来就在上限以内。
+    #
+    # Scaling up never crosses max_clip_duration. It is the ceiling the user
+    # typed for how long one picture may hold, not a starting point: twelve
+    # pictures across a 72s narration want six seconds each when the user
+    # asked for three. Falling short is the honest outcome — the gap is
+    # covered by cycling in ``auto_fit_edit_list`` and stated in the UI.
+    # Scaling down is unaffected; it stays under the ceiling by definition.
     total = sum(lengths)
     if not scene_manifest.has_timing_edits(scenes) and target > 0 and total > 0:
         factor = target / total
-        lengths = [length * factor for length in lengths]
+        lengths = [
+            min(length * factor, cap) if cap and factor > 1 else length * factor
+            for length in lengths
+        ]
 
     windows: list[dict] = []
     elapsed = 0.0
@@ -484,6 +547,39 @@ def plan_windows(
         windows.append({"start": round(elapsed, 3), "end": round(elapsed + length, 3)})
         elapsed += length
     return windows
+
+
+def _cycle_to_cover(
+    edit_list: list[dict], target: float, speed: float
+) -> list[dict]:
+    """按顺序重播这组片段，直到铺满旁白；最后一段裁到正好收尾。
+
+    返回的仍然是一张"所见即所得"的剪辑表：界面上有几张图,成片里就是这几
+    张图按顺序轮播,而不是渲染器自己随机挑几段补。
+    """
+    covered = timeline_total(edit_list, clip_speed=speed)
+    if covered <= 0:
+        return edit_list
+
+    filled = list(edit_list)
+    position = 0
+    while target - covered > MIN_CLIP_DURATION:
+        item = dict(edit_list[position % len(edit_list)])
+        length = (float(item["end"]) - float(item["start"])) / speed
+        remaining = target - covered
+        if length > remaining:
+            item["end"] = round(float(item["start"]) + remaining * speed, 3)
+            length = remaining
+        filled.append(item)
+        covered += length
+        position += 1
+
+    logger.info(
+        f"{len(edit_list)} scenes cover {timeline_total(edit_list, clip_speed=speed):.2f}s "
+        f"of a {target:.2f}s narration at the configured clip length; "
+        f"cycling them to {len(filled)} clips rather than holding each longer"
+    )
+    return filled
 
 
 def auto_fit_edit_list(
@@ -526,10 +622,27 @@ def auto_fit_edit_list(
         target = max(0.0, float(audio_duration or 0.0))
     except (TypeError, ValueError):
         target = 0.0
+    try:
+        cap = float(clip_duration) if clip_duration else None
+    except (TypeError, ValueError):
+        cap = None
 
     edit_list = build_edit_list(task_id, planned, clip_speed=speed)
     if not target or not planned:
         return edit_list
+
+    # 上限之内铺不满旁白时轮播，而不是把每张图停得更久。
+    #
+    # 用户把"一张图最多停多久"填成 3 秒,12 张图就只有 36 秒,旁白却有 72
+    # 秒。把每张拉到 6 秒等于无视他填的数字；轮播则是旧渲染器一直以来的做
+    # 法,区别只在于现在这件事会被明说出来,而不是悄悄多出一段。
+    #
+    # When the pictures cannot cover the narration within the ceiling, cycle
+    # them rather than holding each one longer. Three seconds times twelve is
+    # thirty-six against a seventy-two second narration; stretching to six
+    # would ignore the number the user typed.
+    if sum(float(item.get("duration") or 0.0) for item in planned) + MIN_CLIP_DURATION < target:
+        return _cycle_to_cover(edit_list, target, speed)
 
     # 把差额补在最后一段上。
     #
@@ -546,6 +659,9 @@ def auto_fit_edit_list(
             break
         held = float(planned[-1].get("duration") or 0.0)
         adjusted = round(max(MIN_CLIP_DURATION, held + gap), 3)
+        if cap and adjusted > cap:
+            # 补误差也不能越过用户填的上限。
+            adjusted = round(float(cap), 3)
         if abs(adjusted - held) < 1e-3:
             break
         planned[-1] = {**planned[-1], "duration": adjusted}

@@ -24,10 +24,11 @@ from app.services import scene_manifest, timeline
 
 @pytest.fixture
 def twelve_scenes(tmp_path, monkeypatch):
-    """12 段素材的任务目录，对应 12 个关键词那种典型生成结果。"""
+    """素材齐备的任务目录：12 段是"固定条数关键词"那种典型结果，逐句生成
+    时会多到脚本的句子数，所以这里备足 40 段。"""
     directory = tmp_path / "t1"
     directory.mkdir()
-    for index in range(12):
+    for index in range(40):
         (directory / f"{index}.mp4").write_bytes(b"x")
 
     def fake_task_dir(sub_dir: str = ""):
@@ -48,8 +49,13 @@ def scenes_of(count: int, **extra) -> list[dict]:
 class TestPlanWindows:
     """每段画面在成片里的起止时间。"""
 
-    def test_scenes_are_spread_across_the_whole_narration(self, twelve_scenes):
-        """12 段 5 秒画面配 64 秒旁白时每段 5.33 秒，而不是 5 秒加一段重复。"""
+    def test_scaling_up_stops_at_the_clip_duration_ceiling(self, twelve_scenes):
+        """铺不满就让它铺不满，不能把每段拉过"一张图最多停多久"的上限。
+
+        12 段配 64 秒旁白按比例要停 5.33 秒,但用户填的上限是 5 秒。悄悄停
+        5.33 秒等于无视他填的数字——上限填 3 秒时这个差距会变成 3 秒对 6 秒,
+        一眼就能看出来。缺口由 ``auto_fit_edit_list`` 轮播补齐。
+        """
         with patch.object(timeline, "probe_duration", return_value=5.0):
             windows = timeline.plan_windows(
                 twelve_scenes,
@@ -59,9 +65,22 @@ class TestPlanWindows:
             )
         assert len(windows) == 12
         assert windows[0]["start"] == 0.0
+        for window in windows:
+            assert window["end"] - window["start"] == pytest.approx(5.0, abs=0.01)
+        assert windows[-1]["end"] == pytest.approx(60.0, abs=0.01)
+
+    def test_plenty_of_scenes_are_shrunk_to_fit_the_narration(self, twelve_scenes):
+        """画面够多时按比例缩小铺满旁白：缩小本来就在上限以内，不受限制。"""
+        with patch.object(timeline, "probe_duration", return_value=5.0):
+            windows = timeline.plan_windows(
+                twelve_scenes,
+                scenes_of(32),
+                audio_duration=64.0,
+                clip_duration=5,
+            )
         assert windows[-1]["end"] == pytest.approx(64.0, abs=0.01)
         for window in windows:
-            assert window["end"] - window["start"] == pytest.approx(64 / 12, abs=0.01)
+            assert window["end"] - window["start"] == pytest.approx(2.0, abs=0.01)
 
     def test_the_windows_never_leave_a_gap_or_overlap(self, twelve_scenes):
         with patch.object(timeline, "probe_duration", return_value=5.0):
@@ -112,7 +131,7 @@ class TestPlanWindows:
                 probe=False,
             )
         assert probe.call_count == 0
-        assert windows[-1]["end"] == pytest.approx(64.0, abs=0.01)
+        assert windows[-1]["end"] == pytest.approx(60.0, abs=0.01)
 
     def test_an_unreadable_material_does_not_break_the_plan(self, twelve_scenes):
         """一段素材读不出来时按请求时长估算，而不是让整个界面打不开。"""
@@ -128,7 +147,26 @@ class TestPlanWindows:
 class TestAutoFitEditList:
     """没人拖过时间线时，渲染器照场景列表铺满旁白。"""
 
-    def test_one_clip_per_scene_with_nothing_repeated(self, twelve_scenes):
+    def test_enough_scenes_render_once_each_in_order(self, twelve_scenes):
+        """画面够铺满旁白时，一段画面就是一段片段，没有重复。"""
+        with patch.object(timeline, "probe_duration", return_value=5.0):
+            with patch.object(timeline, "ensure_image_length") as extend:
+                extend.side_effect = lambda task_id, material, needed: material
+                edit_list = timeline.auto_fit_edit_list(
+                    twelve_scenes,
+                    scenes_of(32),
+                    audio_duration=64.0,
+                    clip_duration=5,
+                )
+        assert len(edit_list) == 32
+        assert len({item["path"] for item in edit_list}) == 32
+
+    def test_scenes_are_cycled_rather_than_held_past_the_ceiling(self, twelve_scenes):
+        """上限之内铺不满时整组轮播，而不是把每张图停得更久。
+
+        这是用户显式填过的数字：填 3 秒就该停 3 秒。旧渲染器也是轮播的,
+        区别只在于现在这件事会被说出来,而不是悄悄多出一段。
+        """
         with patch.object(timeline, "probe_duration", return_value=5.0):
             with patch.object(timeline, "ensure_image_length") as extend:
                 extend.side_effect = lambda task_id, material, needed: material
@@ -138,8 +176,12 @@ class TestAutoFitEditList:
                     audio_duration=64.0,
                     clip_duration=5,
                 )
-        assert len(edit_list) == 12
-        assert len({item["path"] for item in edit_list}) == 12
+        assert len(edit_list) == 13
+        assert timeline.timeline_total(edit_list) == pytest.approx(64.0, abs=0.05)
+        for item in edit_list:
+            assert item["end"] - item["start"] <= 5.0 + 1e-6
+        # 轮播按顺序从头开始，所以补上的那一段就是第一段。
+        assert edit_list[12]["path"] == edit_list[0]["path"]
 
     def test_the_total_covers_the_narration(self, twelve_scenes):
         """素材能拉长时总长必须等于旁白长，否则最后半句会被切掉。"""
@@ -165,22 +207,22 @@ class TestAutoFitEditList:
                 ):
                     edit_list = timeline.auto_fit_edit_list(
                         twelve_scenes,
-                        scenes_of(12),
+                        scenes_of(32),
                         audio_duration=64.0,
                         clip_duration=5,
                     )
         assert timeline.timeline_total(edit_list) == pytest.approx(64.0, abs=0.05)
 
-    def test_material_that_cannot_be_held_longer_is_not_looped(self, twelve_scenes):
-        """视频素材拉不长时就是短，但也不会被循环补成 13 段。"""
-        with patch.object(timeline, "probe_duration", return_value=5.0):
+    def test_no_clip_is_ever_longer_than_the_ceiling(self, twelve_scenes):
+        """上限是上限：补齐帧率误差也好，铺满旁白也好，都不能越过它。"""
+        with patch.object(timeline, "probe_duration", return_value=9.0):
             with patch.object(timeline, "ensure_image_length") as extend:
                 extend.side_effect = lambda task_id, material, needed: material
                 edit_list = timeline.auto_fit_edit_list(
-                    twelve_scenes, scenes_of(12), audio_duration=64.0, clip_duration=5
+                    twelve_scenes, scenes_of(12), audio_duration=64.0, clip_duration=3
                 )
-        assert len(edit_list) == 12
-        assert timeline.timeline_total(edit_list) == pytest.approx(60.0, abs=0.05)
+        for item in edit_list:
+            assert item["end"] - item["start"] <= 3.0 + 1e-6
 
 
 class TestDistributeNarration:

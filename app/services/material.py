@@ -11,7 +11,7 @@ import time
 import uuid
 import warnings
 from pathlib import Path
-from typing import Any, Callable, List
+from typing import Any, Callable, Iterator, List
 from urllib.parse import quote_plus, urlencode, urlsplit, urlunsplit
 
 import requests
@@ -46,6 +46,13 @@ _api_key_lock = threading.Lock()
 # A provider URL can point to an unexpectedly large object or never-ending stream.
 # Short stock and generated clips should stay well below this conservative cap.
 MAX_VIDEO_DOWNLOAD_BYTES = 512 * 1024 * 1024
+
+# 画面是现画出来的，不是搜出来的。这两种源吃的"关键词"其实是提示词原文，
+# 所以上游要给它们一整句画面描述，而不是拿去搜索的短查询。
+# These sources draw the picture instead of searching for one, so the
+# "keyword" they receive is the prompt itself and wants to be a full visual
+# sentence rather than a short search query.
+GENERATED_IMAGE_SOURCES = frozenset({"openai_image", "codex_image"})
 
 # 默认保持串行，与旧版行为一致；有需要时可在配置中提高库存素材并发数。
 _DEFAULT_MATERIAL_CONCURRENCY = 1
@@ -1932,6 +1939,39 @@ def _render_openai_image_video(
         return ""
 
 
+def _terms_to_cover(
+    search_terms: List[str], required_duration: float, max_clip_duration: int
+) -> Iterator[str]:
+    """按顺序吐出关键词；一轮不够铺满旁白时从头再来一轮。
+
+    产出总数封顶在"铺满旁白所需的张数"，也就是
+    ``ceil(旁白时长 / 单段时长)``。调用方仍然在累计到足够时长时就 break,
+    所以这里只是把上限放开到真正需要的张数,不会凭空多生成。
+
+    ``max_clip_duration`` 读不出来时按 1 秒算：宁可多绕几轮由调用方的
+    时长判断收住，也不要除零。
+    """
+    terms = [term for term in (search_terms or []) if str(term).strip()]
+    if not terms:
+        return
+    try:
+        hold = max(1.0, float(max_clip_duration))
+    except (TypeError, ValueError):
+        hold = 1.0
+    try:
+        needed = max(1, math.ceil(float(required_duration) / hold))
+    except (TypeError, ValueError, ZeroDivisionError):
+        needed = len(terms)
+    if needed > len(terms):
+        logger.info(
+            f"{len(terms)} keywords hold {len(terms) * hold:.0f}s but the "
+            f"narration needs {required_duration:.0f}s; generating "
+            f"{needed} pictures by cycling the keywords"
+        )
+    for position in range(max(needed, len(terms))):
+        yield terms[position % len(terms)]
+
+
 def _download_videos_openai_image_on_demand(
     *,
     task_id: str,
@@ -1993,7 +2033,28 @@ def _download_videos_openai_image_on_demand(
             raise CodexImageMaterialError(error) from None
         generation_options["context"] = codex_image_context
 
-    for search_term in search_terms:
+    # 关键词用完但旁白还没铺满时再绕一圈。
+    #
+    # 12 个关键词、每段 2 秒只有 24 秒画面，而旁白有 72 秒。以前这里到这
+    # 就收工，缺口留给渲染器循环播放——于是成片从第 13 段起全是前面画面的
+    # 重播。需要几张图应该由"旁白多长、一张图停多久"决定，而不是由模型
+    # 一次吐了几个关键词决定。
+    #
+    # 同一个关键词再生成一次得到的是另一张图（随机种子不同），所以补出来
+    # 的是新画面，不是同一张图播两遍。
+    #
+    # How many pictures are needed follows from the narration length and how
+    # long one picture holds, not from how many keywords the model happened
+    # to return. Twelve keywords at two seconds cover 24s of a 72s narration;
+    # the renderer used to paper over the rest by replaying earlier pictures.
+    # Generating from the same keyword again yields a different image, so the
+    # gap is filled with new pictures rather than repeats.
+    #
+    # 这会比以前多发若干次付费请求，上限是"铺满旁白所需的张数"——也就是
+    # 本来就该生成的张数，不会超出。
+    for search_term in _terms_to_cover(
+        search_terms, required_duration, max_clip_duration
+    ):
         try:
             items = image_generator(
                 search_term=search_term,
@@ -2479,7 +2540,7 @@ def download_videos(
             max_clip_duration=max_clip_duration,
             material_directory=material_directory,
         )
-    if source in {"openai_image", "codex_image"}:
+    if source in GENERATED_IMAGE_SOURCES:
         # 与 WaveSpeed 相同的按需付费语义：文生图按张计费，逐段生成、凑够
         # 所需时长立即停止。生成结果是一次性的本地图片文件，也不参与 24
         # 小时搜索缓存——缓存会让不同任务反复拿到同一张图。
