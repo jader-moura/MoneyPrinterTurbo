@@ -154,3 +154,188 @@ class TestPipelineWiring:
                 assert tm.generate_terms("t", params, "One. Two.") is None
         assert failed.call_count == 1
         assert "terms" in failed.call_args.args
+
+
+class TestVisualPromptMode:
+    """文生图要的是一整句画面描述，库存素材要的是短查询。
+
+    文生图模型看到的就是这段文字本身。只给它"dry eye"加一串风格词时，它既
+    不知道这一句在讲什么，也不知道整条片子在讲什么，于是画出来的东西经常
+    属于片子的别处——这正是用户反复遇到的那个问题。
+    """
+
+    def _captured_prompt(self, **kwargs):
+        seen = {}
+
+        def fake(prompt, **_ignored):
+            seen["prompt"] = prompt
+            return '["a close-up of a human eye glossy with tears"]'
+
+        with patch.object(llm, "_generate_response", side_effect=fake):
+            llm.generate_terms_per_line("what if you never blink", ["one"], **kwargs)
+        return seen["prompt"]
+
+    def test_the_visual_mode_asks_for_a_full_sentence(self):
+        prompt = self._captured_prompt(visual_prompt=True)
+        assert "Scene Image Prompt Writer" in prompt
+        assert "12-30 words" in prompt
+        assert "2-6 words" not in prompt
+
+    def test_the_search_mode_still_asks_for_a_short_query(self):
+        """库存素材源拿它去搜索：一整句描述在 Pexels 上搜不到东西。"""
+        prompt = self._captured_prompt()
+        assert "2-6 words" in prompt
+        assert "Scene Image Prompt Writer" not in prompt
+
+    def test_the_subject_and_the_line_both_reach_the_model(self):
+        """主题是上下文，旁白是这一刻在讲什么，缺一个画面就会跑偏。"""
+        prompt = self._captured_prompt(visual_prompt=True)
+        assert "what if you never blink" in prompt
+        assert "1. one" in prompt
+
+    def test_the_visual_mode_forbids_text_in_the_picture(self):
+        prompt = self._captured_prompt(visual_prompt=True)
+        assert "never ask for text" in prompt
+
+    def test_the_visual_mode_handles_lines_that_cannot_be_drawn(self):
+        """"Left untreated" 本身画不出来，要结合主题推断出一个具体场面。"""
+        prompt = self._captured_prompt(visual_prompt=True)
+        assert "cannot be drawn on its own" in prompt
+
+    def test_the_length_guarantee_holds_in_visual_mode(self):
+        lines = ["one", "two", "three"]
+        with patch.object(llm, "_generate_response", return_value='["a scene"]'):
+            prompts = llm.generate_terms_per_line(
+                "my subject", lines, visual_prompt=True
+            )
+        assert len(prompts) == 3
+        assert prompts[0] == "a scene"
+
+
+class TestGeneratedImageSources:
+    """哪些素材源吃提示词原文，由一处定义说了算。"""
+
+    def test_the_image_sources_are_the_ones_that_draw_the_picture(self):
+        from app.services import material
+
+        assert "openai_image" in material.GENERATED_IMAGE_SOURCES
+        assert "codex_image" in material.GENERATED_IMAGE_SOURCES
+        assert "pexels" not in material.GENERATED_IMAGE_SOURCES
+
+    def test_a_generated_image_task_asks_for_visual_prompts(self):
+        from app.services import task as tm
+
+        params = VideoParams(
+            video_subject="what if you never blink",
+            video_script="",
+            video_source="openai_image",
+            align_terms_to_narration=True,
+        )
+        with patch.object(tm.llm, "generate_terms_per_line", return_value=["a"]) as gen:
+            tm.generate_terms("task-id", params, "You blink often")
+        assert gen.call_args.kwargs["visual_prompt"] is True
+
+    def test_a_stock_footage_task_still_asks_for_search_terms(self):
+        from app.services import task as tm
+
+        params = VideoParams(
+            video_subject="what if you never blink",
+            video_script="",
+            video_source="pexels",
+            align_terms_to_narration=True,
+        )
+        with patch.object(tm.llm, "generate_terms_per_line", return_value=["a"]) as gen:
+            with patch.object(tm.twelvelabs, "rerank_terms_by_subject",
+                              side_effect=lambda **kw: kw["search_terms"]):
+                tm.generate_terms("task-id", params, "You blink often")
+        assert gen.call_args.kwargs["visual_prompt"] is False
+
+
+class TestStyleAwareDescriptions:
+    """风格词是拼在描述后面的，所以写描述时就得知道最终是什么画风。
+
+    火柴人那套预设要的是"一个小人正在做某件事"（round white head, thin black
+    line arms and legs, clearly holding the objects of the action）。描述如果
+    写的是"大脑扫描图高亮视觉皮层"，两半就在互相打架。
+    """
+
+    STICK = (
+        "{term}, cute stick figure cartoon, round white head, dot eyes, "
+        "thin black line arms and legs, clearly holding the objects of the "
+        "action, mid-action pose full of energy"
+    )
+
+    def _captured_prompt(self, style):
+        seen = {}
+
+        def fake(prompt, **_ignored):
+            seen["prompt"] = prompt
+            return '["a scene"]'
+
+        with patch.object(llm, "_generate_response", side_effect=fake):
+            llm.generate_terms_per_line(
+                "never blinking", ["one"], visual_prompt=True, image_style=style
+            )
+        return seen["prompt"]
+
+    def test_the_chosen_style_is_shown_to_the_model(self):
+        prompt = self._captured_prompt(self.STICK)
+        assert "Picture Style" in prompt
+        assert "cute stick figure cartoon" in prompt
+
+    def test_the_placeholder_is_not_shown_as_style(self):
+        """``{term}`` 是模板占位符，不是风格描述，不该出现在提示词里。"""
+        assert "{term}" not in self._captured_prompt(self.STICK)
+
+    def test_drawn_figure_styles_ask_for_a_person_doing_something(self):
+        prompt = self._captured_prompt(self.STICK)
+        assert "put a person in frame doing something visible" in prompt
+
+    def test_the_model_is_told_not_to_repeat_the_style_words(self):
+        prompt = self._captured_prompt(self.STICK)
+        # 这句在提示词里是折行的，所以只断言不跨行的那一段。
+        assert "Do not repeat these style" in prompt
+
+    def test_no_style_configured_adds_no_style_section(self):
+        """没配风格模板时不该凭空多出一段空的风格说明。"""
+        prompt = self._captured_prompt("")
+        assert "Picture Style" not in prompt
+
+    def test_a_template_that_is_only_the_placeholder_adds_nothing(self):
+        assert "Picture Style" not in self._captured_prompt("{term}")
+
+    def test_the_style_never_reaches_the_search_term_mode(self):
+        """库存素材那条路搜的是短查询，风格词与它无关。"""
+        seen = {}
+
+        def fake(prompt, **_ignored):
+            seen["prompt"] = prompt
+            return '["a"]'
+
+        with patch.object(llm, "_generate_response", side_effect=fake):
+            llm.generate_terms_per_line("subject", ["one"], image_style=self.STICK)
+        assert "Picture Style" not in seen["prompt"]
+
+    def test_the_configured_template_is_passed_through_from_the_task(self):
+        from app.config import config as app_config
+        from app.services import task as tm
+
+        params = VideoParams(
+            video_subject="never blinking",
+            video_script="",
+            video_source="openai_image",
+            align_terms_to_narration=True,
+        )
+        previous = app_config.app.get("openai_image_prompt_template")
+        app_config.app["openai_image_prompt_template"] = self.STICK
+        try:
+            with patch.object(
+                tm.llm, "generate_terms_per_line", return_value=["a"]
+            ) as gen:
+                tm.generate_terms("task-id", params, "You blink often")
+        finally:
+            if previous is None:
+                app_config.app.pop("openai_image_prompt_template", None)
+            else:
+                app_config.app["openai_image_prompt_template"] = previous
+        assert gen.call_args.kwargs["image_style"] == self.STICK

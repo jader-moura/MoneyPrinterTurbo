@@ -456,14 +456,36 @@ def generate_terms(task_id, params, video_script):
         narration_lines = utils.split_string_by_punctuations(
             utils.remove_pause_tags(video_script)
         )
+        # 文生图的素材源直接吃这段文字当提示词，所以要的是一整句画面描述,
+        # 里面带上主题和这一句在讲什么；库存素材源拿它去搜索,要的是短查询。
+        # 用同一个函数的两种产物,而不是让文生图也只拿到两三个词——那样模型
+        # 看不到上下文,画出来的东西经常属于片子的别处。
+        #
+        # A generated-image source uses this text as the prompt itself, so it
+        # wants a full visual sentence carrying the subject and what this line
+        # is about. A stock source searches with it, so it wants a short query.
+        wants_visual_prompt = (
+            params.video_source in material.GENERATED_IMAGE_SOURCES
+        )
+        # 风格词是拼在描述后面的，所以写描述时就要知道最终是什么画风：
+        # 火柴人那套预设要的是"一个小人在做某件事"，描述却写了张大脑扫描图
+        # 的话，两半会互相打架。
+        style_template = (
+            str(config.app.get("openai_image_prompt_template", "") or "")
+            if wants_visual_prompt
+            else ""
+        )
         video_terms = llm.generate_terms_per_line(
             video_subject=params.video_subject,
             narration_lines=narration_lines,
+            visual_prompt=wants_visual_prompt,
+            image_style=style_template,
             **_llm_override_kwargs(params),
         )
         aligned_per_line = bool(video_terms)
         logger.info(
-            f"generated {len(video_terms)} per-line search terms "
+            f"generated {len(video_terms)} per-line "
+            f"{'image prompts' if wants_visual_prompt else 'search terms'} "
             f"for {len(narration_lines)} narration lines"
         )
     elif not video_terms:

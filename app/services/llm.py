@@ -1313,10 +1313,143 @@ Please note that you must use English for generating video search terms; Chinese
     return search_terms
 
 
+def _scene_search_term_request(subject: str, numbered: str, count: int) -> str:
+    """逐句要一个"拿去搜素材"的短关键词。
+
+    素材库搜索吃的是短查询：把一整句画面描述丢给 Pexels 只会搜不到东西，
+    所以库存素材那条路仍然要短词。
+    """
+    return f"""
+# Role: Scene Image Prompt Generator
+
+## Goals:
+For each numbered narration line, write one short English search term
+describing the picture that should be on screen **while that exact line is
+spoken**.
+
+## Constrains:
+1. return a json-array of strings and nothing else.
+2. the array must have exactly {count} items, in the same order as the lines.
+3. item i must depict what line i is talking about, not the video as a whole.
+4. 2-6 words, concrete and depictable: name the subject and what it is doing.
+   prefer "a woman kneading dough on a wooden table" over "food preparation".
+5. no camera directions, no text overlays, no abstract nouns on their own.
+6. english only.
+
+## Output Example:
+["a cracked human jawbone on dark soil", "a dry riverbank in northern syria"]
+
+## Context:
+### Video Subject
+{subject}
+
+### Narration Lines
+{numbered}
+""".strip()
+
+
+def _style_guidance(style: str) -> str:
+    """把用户选的画面风格告诉写描述的模型。
+
+    为什么需要它
+    ------------
+    风格词是拼在描述后面的,两边必须讲同一件事。火柴人那套预设要的是"一个
+    小人正在做某件事"——"round white head, thin black line arms and legs,
+    clearly holding the objects of the action, mid-action pose"。如果描述写
+    的是"大脑扫描图高亮视觉皮层",两半就在互相打架,画出来的东西两头不像。
+
+    这里把风格原文交给模型，而不是针对某个预设写死规则：用户自己填的模板
+    同样能被照顾到,新增预设也不需要再改这里。
+
+    The style words are appended to the description, so the two halves have to
+    describe the same picture. The stick-figure preset wants a little person
+    performing an action; a description about a brain scan fights it. Handing
+    the model the style text itself covers custom templates and new presets
+    without a rule per preset.
+    """
+    text = " ".join(str(style or "").replace("{term}", " ").split()).strip(" ,")
+    if not text:
+        return ""
+    return f"""
+### Picture Style
+Every picture is rendered in this style, which is appended to your text:
+{text}
+
+Choose what to depict so that it suits that style. If the style describes
+drawn characters or figures, put a person in frame doing something visible
+rather than a diagram, a scan or an abstract view. Do not repeat these style
+words in your own text.
+"""
+
+
+def _scene_image_prompt_request(
+    subject: str, numbered: str, count: int, style: str = ""
+) -> str:
+    """逐句写一句完整的画面描述，直接拿去给文生图模型。
+
+    为什么不是短关键词
+    ------------------
+    短关键词是为素材库搜索准备的。文生图模型拿到的如果只有 "dry eye" 加一串
+    风格词，它既看不到这一句在讲什么，也看不到整条片子在讲什么，于是画出来
+    的东西经常属于别的段落。这里把"视频主题"和"这一句旁白"直接交给模型，让
+    它写出这一刻该看到的画面，那句描述就是最终提示词。
+
+    断句是按标点切的，所以不少句子本身画不出来——"Left untreated"、
+    "Keep going for hours"。因此这里明确要求：画不出来的句子要结合主题推断
+    出一个具体场面，而不是把那几个字直接当画面。
+
+    Short keywords exist for stock-footage search. An image model given only
+    "dry eye" plus style words cannot see what this line says or what the
+    video is about, so it draws something belonging to another section. The
+    subject and the line go to the model directly, and the sentence it writes
+    becomes the prompt. Punctuation-split lines are often not depictable on
+    their own, so the model is told to infer a concrete scene from the subject
+    rather than illustrate the words literally.
+    """
+    return f"""
+# Role: Scene Image Prompt Writer
+
+## Goals:
+For each numbered narration line, write one English image-generation prompt
+describing exactly what the viewer should see on screen **while that line is
+spoken**, in a video about the subject below.
+
+## Constrains:
+1. return a json-array of strings and nothing else.
+2. the array must have exactly {count} items, in the same order as the lines.
+3. item i must show what line i is saying, read in the context of the subject
+   and of the lines around it - not the video as a whole.
+4. one sentence, roughly 12-30 words. name the subject of the picture, what it
+   is doing, and where. concrete and physically depictable.
+5. a line that cannot be drawn on its own ("Left untreated", "Keep going for
+   hours", "Now stop blinking") still gets a concrete scene: infer from the
+   subject what is happening at that moment and describe that.
+6. do not quote or spell out the narration, and never ask for text, captions,
+   numbers or letters inside the picture.
+7. no camera directions, no style words, no lighting or render instructions -
+   those are appended separately from the user's chosen style.
+8. english only.
+
+## Output Example:
+["a close-up of a human eye with a glistening film of tears across its surface",
+ "a reddened irritated eye with dry patches, the lids held wide open"]
+
+## Context:
+### Video Subject
+{subject}
+{_style_guidance(style)}
+### Narration Lines
+{numbered}
+""".strip()
+
+
 def generate_terms_per_line(
     video_subject: str,
     narration_lines: List[str],
     app_config=None,
+    *,
+    visual_prompt: bool = False,
+    image_style: str = "",
 ) -> List[str]:
     """为每一句旁白各生成一个画面关键词，返回长度与入参一致的列表。
 
@@ -1349,35 +1482,18 @@ def generate_terms_per_line(
         f"{index + 1}. {utils.remove_pause_tags(line)}"
         for index, line in enumerate(lines)
     )
-    prompt = f"""
-# Role: Scene Image Prompt Generator
+    # 文生图那条路要的是一整句画面描述，库存素材那条路要的是短查询。
+    # 同一个函数两种产物，是因为"每句一条、条数对齐"这套保证两边都要。
+    prompt = (
+        _scene_image_prompt_request(subject, numbered, len(lines), image_style)
+        if visual_prompt
+        else _scene_search_term_request(subject, numbered, len(lines))
+    )
 
-## Goals:
-For each numbered narration line, write one short English search term
-describing the picture that should be on screen **while that exact line is
-spoken**.
-
-## Constrains:
-1. return a json-array of strings and nothing else.
-2. the array must have exactly {len(lines)} items, in the same order as the lines.
-3. item i must depict what line i is talking about, not the video as a whole.
-4. 2-6 words, concrete and depictable: name the subject and what it is doing.
-   prefer "a woman kneading dough on a wooden table" over "food preparation".
-5. no camera directions, no text overlays, no abstract nouns on their own.
-6. english only.
-
-## Output Example:
-["a cracked human jawbone on dark soil", "a dry riverbank in northern syria"]
-
-## Context:
-### Video Subject
-{subject}
-
-### Narration Lines
-{numbered}
-""".strip()
-
-    logger.info(f"generating one search term per narration line: {len(lines)} lines")
+    wanted = "image prompt" if visual_prompt else "search term"
+    logger.info(
+        f"generating one {wanted} per narration line: {len(lines)} lines"
+    )
 
     terms: List[str] = []
     for attempt in range(_max_retries):
@@ -1419,7 +1535,7 @@ spoken**.
     for index in range(len(lines)):
         term = terms[index].strip() if index < len(terms) else ""
         aligned.append(term or subject or lines[index])
-    logger.success(f"completed: {len(aligned)} per-line search terms")
+    logger.success(f"completed: {len(aligned)} per-line {wanted}s")
     return aligned
 
 
