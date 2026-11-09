@@ -728,6 +728,17 @@ class SceneReorderRequest(BaseModel):
     order: List[int]
 
 
+class NarrationScriptRequest(BaseModel):
+    """整条旁白的文字，一次改完。
+
+    台词按时间归到画面上，所以改句子的先后、把一句拆成两句、或者整段重写，
+    都没有哪一段画面是它的归属——那些要改的是这里。场景上那个输入框只是这段
+    文字的局部视图。
+    """
+
+    script: str
+
+
 class SceneData(BaseModel):
     model_config = ConfigDict(extra="allow")
 

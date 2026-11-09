@@ -22,6 +22,9 @@ const ui = {
   frame: el("frame"), fx: el("fx"), settings: el("settings"), scroll: el("scroll"),
   fit: el("fit"), gap: el("gap"), screen: document.querySelector(".screen"),
   queue: el("queue"),
+  scriptToggle: el("script-toggle"), scriptPanel: el("script-panel"),
+  scriptText: el("script-text"), scriptSave: el("script-save"),
+  scriptClose: el("script-close"), scriptNote: el("script-note"),
 };
 
 const state = {
@@ -557,6 +560,7 @@ function draw() {
     || !!state.queue.busy
     || !!(state.data && state.data.audio_stale);
   ui.rerecord.disabled = !state.data || !state.data.audio_stale;
+  ui.scriptToggle.disabled = !state.data;
   ui.placeholder.hidden = ready;
   ui.playhead.hidden = !ready;
   ui.frame.classList.toggle("ready", ready);
@@ -928,8 +932,28 @@ function drawInspector() {
       + "Change the keyword to get a different one.";
   ui.inspBody.appendChild(sourceNote);
 
-  const narration = field("Narration", "textarea", scene.narration || "");
+  // 台词按时间算出来的：这段画面在屏幕上时真正会念到的那几句。配音是一整
+  // 条，字幕按那条配音的时间轴生成，所以"这张图上会念什么"只由它在成片里
+  // 的起止时间决定——把图拖到别的位置，念的词不跟着走。
+  //
+  // 标题要说清这件事。以前写的是 "Narration"，用户会以为那是这张图自己的
+  // 台词，于是重排之后看到另一段的词，以为渲染器配错了。
+  const narration = field(
+    scene.narration_edited ? "Spoken here (edited)" : "Spoken here",
+    "textarea",
+    scene.narration || ""
+  );
   ui.inspBody.append(narration.wrap);
+
+  const spokenNote = document.createElement("p");
+  spokenNote.className = "hint";
+  spokenNote.textContent = scene.narration_edited
+    ? "You rewrote these words, so they stay as you typed them. Clear the box "
+      + "and save to drop them from the script instead."
+    : "Taken from the narration by time — the lines that play while this "
+      + "picture is on screen. It follows the timeline, so it changes when you "
+      + "move or retime pictures. Use Script for the whole text.";
+  ui.inspBody.appendChild(spokenNote);
 
   const save = button("Save text", "small", () => run("Saving", () =>
     call("PUT", scenePath(scene.index), {
@@ -1475,6 +1499,38 @@ ui.rerecord.addEventListener("click", () => run("Re-recording narration", async 
   state.wasBusy = true;
   watchTask();
   return "";
+}));
+
+/* ---------- 旁白正文 ----------
+
+   打开时才从载荷里灌一次文字，之后不再碰：每次刷新都重灌会把用户正在打的
+   字抹掉——而这个面板是开着的时候图还在一张张出，刷新随时会来。 */
+function openScript() {
+  ui.scriptText.value = (state.data && state.data.script) || "";
+  ui.scriptNote.textContent = state.data && state.data.audio_stale
+    ? "The recorded voice is older than these words."
+    : "";
+  ui.scriptPanel.hidden = false;
+  ui.scriptText.focus();
+}
+
+function closeScript() {
+  ui.scriptPanel.hidden = true;
+}
+
+ui.scriptToggle.addEventListener("click", () => {
+  if (ui.scriptPanel.hidden) openScript(); else closeScript();
+});
+
+ui.scriptClose.addEventListener("click", closeScript);
+
+ui.scriptSave.addEventListener("click", () => run("Saving the script", async () => {
+  await call("PUT", `/tasks/${encodeURIComponent(state.taskId)}/script`, {
+    script: ui.scriptText.value,
+  });
+  closeScript();
+  // 存完配音就不作数了，但不替用户按"重新配音"：那要跑一次 TTS。
+  return "Script saved. Re-record the narration when you want it spoken.";
 }));
 
 ui.render.addEventListener("click", () => run("Submitting the render", async () => {

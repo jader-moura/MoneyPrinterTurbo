@@ -279,8 +279,10 @@ class TestReorderAndDelete:
         """重排只换画面顺序。配音是一整条，顺序没变，字幕也还对得上。
 
         所以重排之后可以直接渲染，不强制重新配音——那会让"调一下画面顺序"
-        这种便宜的修改变成一次完整的 TTS。代价是：重排后如果再重新配音，
-        台词会跟着场景顺序走。这一条在 docs/scene-review.md 里写明了。
+        这种便宜的修改变成一次完整的 TTS。
+
+        台词也不跟着画面走：重排之后再重新配音，念的顺序还是脚本的顺序。
+        这一条由 test_narration_follows_time.py 钉着。
         """
         task_id, _ = _reviewed_task(task_root)
         scene_editor.reorder_scenes(task_id, [1, 0])

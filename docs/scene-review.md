@@ -106,6 +106,7 @@ curl -X POST localhost:8080/api/v1/tasks/$TASK/render
 | `PUT /api/v1/tasks/{id}/scenes/{i}` | edit `narration`, `keyword` or `locked` |
 | `DELETE /api/v1/tasks/{id}/scenes/{i}` | drop a scene |
 | `POST /api/v1/tasks/{id}/scenes/reorder` | `order` must be a full permutation |
+| `PUT /api/v1/tasks/{id}/script` | rewrite the whole narration script |
 | `POST /api/v1/tasks/{id}/audio` | re-record narration and rebuild subtitles |
 | `POST /api/v1/tasks/{id}/render` | render the reviewed scenes |
 | `GET /api/v1/tasks/{id}/timeline` | the scene list plus each material's real length |
@@ -124,12 +125,19 @@ message says what. Nothing falls back to another provider silently.
 * **Scene timings are not editable here.** The renderer computes them from the
   narration length, the concat mode and the transitions. The review step is
   about *what is in* each scene, not how long it lasts.
-* **Reordering moves each scene's narration with it.** A scene is a picture
-  *and* the line said over it, so moving scene 3 to the front moves its line to
-  the front too. That only takes effect in the audio once you re-record; until
-  then the existing narration still plays in its original order, which is why
-  reordering alone does not mark the audio stale. If you reorder and want the
-  words to follow, re-record.
+* **Reordering moves the picture, not the words.** The narration is one take
+  and the subtitles are timed against it, so what is heard at a given second
+  does not change when a picture moves to another slot. Each scene shows the
+  lines spoken while it is on screen, recomputed from the subtitle timing on
+  every read — move a picture, hold it longer or delete it and the lines
+  redistribute to match. Re-recording uses the script in its own order, so it
+  can no longer be shuffled by a reorder.
+* **To change the words, edit the script.** `PUT /tasks/{id}/script` (or
+  **Script** in the editor) rewrites the whole narration, which is where
+  sentence order, splits and rewrites belong. Editing one scene's text still
+  works and overrides just that stretch; clearing it drops those lines from the
+  next recording. Either way the recorded voice goes stale and you choose when
+  to re-record.
 * **A scene can lose its file** if something outside the app deletes it. The
   panel says so for that row, and Render refuses before queueing rather than
   failing halfway through.

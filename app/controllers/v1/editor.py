@@ -28,6 +28,7 @@ from app.controllers.v1.base import new_router
 from app.controllers.v1.video import create_task, task_manager
 from app.models.exception import HttpException
 from app.models.schema import (
+    NarrationScriptRequest,
     SceneListResponse,
     SceneAddRequest,
     SceneRegenJobResponse,
@@ -168,6 +169,30 @@ def add_scene(
 # 整数参数的路由并直接返回 422，而不是落到这里。
 # Declared before ``/scenes/{index}``: otherwise "reorder" matches that
 # integer-typed route first and returns 422 instead of reaching this one.
+@router.put(
+    "/tasks/{task_id}/script",
+    response_model=SceneListResponse,
+    summary="Rewrite the whole narration script",
+)
+def rewrite_script(
+    request: Request,
+    body: NarrationScriptRequest,
+    task_id: str = Path(..., description="Task ID"),
+):
+    """改整条旁白的文字。
+
+    改完配音就不作数了，要再按一次"重新配音"才会用上新词——这里不自动重配：
+    重配要跑一次 TTS 并作废全部字幕时间，那应该是用户按下按钮的结果。
+    """
+    request_id = base.get_task_id(request)
+    _require_task(task_id, request_id)
+    _handle(task_id, request_id, lambda: scene_editor.rewrite_script(task_id, body.script))
+    data = _handle(
+        task_id, request_id, lambda: scene_editor.describe(task_id, _endpoint())
+    )
+    return utils.get_response(200, data)
+
+
 @router.post(
     "/tasks/{task_id}/scenes/reorder",
     response_model=SceneListResponse,

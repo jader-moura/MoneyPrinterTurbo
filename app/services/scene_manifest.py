@@ -196,6 +196,13 @@ def _normalise_scene(raw: Any, index: int) -> dict:
     style = str(record.get("image_style") or "").strip()
     if style:
         scene["image_style"] = style
+    # 用户亲手改过这一段的台词。按"有才带"处理，理由同上。
+    #
+    # 为什么要记：台词平时是按时间算出来的（这段画面播放时真正会念到的那
+    # 几句），画面一重排、一删、一改时长就会重新算一遍。算出来的东西不该
+    # 盖掉用户自己写的字，所以改过的那一段要标出来，重算时跳过它。
+    if record.get("narration_edited"):
+        scene["narration_edited"] = True
     # 时间线字段只在用户真的设置过之后才出现，所以这里按"有才带"处理：
     # 这个函数同时跑在读和写两条路上，无条件补默认值会让每条老记录都长出
     # 两个新键,而无条件丢掉则会让拖好的入点存不进去。
@@ -647,6 +654,13 @@ def narration_pairing_is_stale(scenes: list[dict], lines: list[str]) -> bool:
     stored = [str(scene.get("narration") or "").strip() for scene in scenes or []]
     available = [str(line).strip() for line in lines or [] if str(line).strip()]
     if not available or not stored:
+        return False
+    # 有人亲手改过台词，就谁也别动这份列表。
+    #
+    # 下面那条"每条都原封不动是脚本里的某一句"的判断猜的就是这件事，但猜不
+    # 到"清空"：空字符串被当成"这一段还没配到词"，于是整份配对被重算一遍，
+    # 刚刚删掉的句子又回来了。改过的那一段现在自己带着标记。
+    if any(scene.get("narration_edited") for scene in scenes or []):
         return False
     known = set(available)
     if any(text and text not in known for text in stored):

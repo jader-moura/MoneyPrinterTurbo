@@ -89,6 +89,48 @@ body {
 .banner.error { background: #4a2626; }
 .banner.warn { background: #4a3c1e; }
 
+/* ---------- narration script ---------- */
+
+/* 旁白正文。和横幅、队列栏一样横贯整行：这段文字属于整条片子，不属于右边
+   面板里那一段画面。 */
+.script-panel {
+  flex: 0 0 auto;
+  max-height: 46vh;
+  overflow-y: auto;
+  padding: 10px 14px 12px;
+  background: var(--panel-2);
+  border-bottom: 1px solid var(--line);
+}
+
+.script-panel h2 {
+  margin: 0 0 4px;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.script-panel .hint { margin: 0 0 8px; }
+
+.script-panel textarea {
+  width: 100%;
+  box-sizing: border-box;
+  resize: vertical;
+  min-height: 120px;
+  padding: 8px 10px;
+  background: var(--panel);
+  color: inherit;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  font: inherit;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+/* 这一行是"两个按钮 + 一句说明"，不是等分的一排控件，所以不吃 .row 那条
+   flex: 1——否则"Save script"会被拉到半屏宽。 */
+.script-panel .row { margin-top: 8px; align-items: center; }
+.script-panel .row > .btn { flex: 0 0 auto; }
+.script-panel .row > .hint { flex: 1 1 auto; margin: 0; }
+
 /* ---------- regeneration queue ---------- */
 
 /* 排队中的重生成。贴在横幅下面、舞台上面：审片时用户一段一段地点"重出"，

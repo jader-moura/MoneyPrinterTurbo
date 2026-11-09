@@ -520,8 +520,22 @@ def update_scene(
         narration_changed = False
         if narration is not None:
             text = str(narration).strip()
-            narration_changed = text != scene.get("narration", "")
-            scene["narration"] = text
+            # 和界面上现在显示的那段比,而不是和存着的比。界面显示的是按时间
+            # 算出来的台词,存着的往往是空的——照存着的比,用户只要按一下"保存
+            # 文字"而什么都没改,也会被当成改了台词,配音白白作废一次。
+            shown = narration_for_scenes(task_id)
+            current = (
+                shown[position]
+                if position < len(shown)
+                else str(scene.get("narration") or "")
+            )
+            narration_changed = text != current
+            if narration_changed:
+                scene["narration"] = text
+                # 标成手改过,重算时不要盖掉他写的字。清空也算改过——那是"重新
+                # 配音时别念这几句"的意思,不是"交回去重新算一遍",否则刚删掉
+                # 的句子下一次读清单又回来了。
+                scene["narration_edited"] = True
         if keyword is not None:
             scene["keyword"] = str(keyword).strip()
         if locked is not None:
@@ -573,9 +587,31 @@ def reorder_scenes(task_id: str, order: Sequence[Any]) -> list[dict]:
                 f"scene order must be a permutation of 0..{len(scenes) - 1}, "
                 f"got {positions}"
             )
-        scene_manifest.save_scenes(
-            task_id, [scenes[position] for position in positions]
-        )
+        # 画面换位置，台词留在原处。
+        #
+        # 台词属于时间,不属于图：配音是一整条,顺序没变；字幕按那条配音的时间
+        # 轴生成,也没变。把图拖到前面只是让它早点出现,第 30 秒念的还是第 30
+        # 秒那句话。文字跟着图走的话,界面会把另一段的台词显示在这张图下面,而
+        # "重新配音"读的就是这份列表——按一下就把整条旁白按画面顺序重念了。
+        #
+        # Reordering pictures must not reorder the words: the voice-over is one
+        # take and the subtitles are timed against it, so what is heard at a
+        # given second does not change when a picture moves to another slot.
+        words = [
+            (
+                str(scene.get("narration") or ""),
+                bool(scene.get("narration_edited")),
+            )
+            for scene in scenes
+        ]
+        reordered = [scenes[position] for position in positions]
+        for scene, (text, edited) in zip(reordered, words):
+            scene["narration"] = text
+            if edited:
+                scene["narration_edited"] = True
+            else:
+                scene.pop("narration_edited", None)
+        scene_manifest.save_scenes(task_id, reordered)
         return scene_manifest.load(task_id)["scenes"]
 
 
@@ -620,6 +656,142 @@ def planned_windows(
         clip_duration=getattr(params, "video_clip_duration", None),
         probe=probe,
     )
+
+
+def _narration_by_time(
+    task_id: str,
+    manifest: dict,
+    windows: list[dict] | None = None,
+) -> list[str]:
+    """按时间把旁白分到每一段画面上：这段画面在屏幕上时真正会念到的那几句。
+
+    画面铺不满旁白时整组会轮播,所以要按轮播后的真实时间线分配,再把同一个
+    场景的几次出现合回一条。只按第一轮分配的话,第一轮之后的每一句都会堆到
+    最后一个场景上。
+
+    改过脚本还没重新配音时不看字幕：那份字幕还是旧词的时间轴,照它分配会把
+    用户刚写下的句子显示成改之前的样子。
+    """
+    scenes = manifest["scenes"]
+    if not scenes:
+        return []
+    if windows is None:
+        windows = planned_windows(task_id, manifest, probe=False)
+    if len(windows) != len(scenes):
+        return ["" for _ in scenes]
+    lines = scene_manifest.split_narration(manifest.get("script"))
+    segments = (
+        []
+        if manifest.get("audio_stale")
+        else scene_manifest.narration_segments(task_id)
+    )
+    if not lines and not segments:
+        return ["" for _ in scenes]
+    cycled = timeline.cycle_windows(
+        windows, float(manifest.get("audio_duration") or 0.0)
+    )
+    blocks = scene_manifest.distribute_narration(
+        [{"start": item["start"], "end": item["end"]} for item in cycled],
+        segments=segments,
+        lines=lines,
+    )
+    texts = ["" for _ in scenes]
+    for item, block in zip(cycled, blocks):
+        if not block:
+            continue
+        index = item["scene"]
+        texts[index] = "\n".join(filter(None, (texts[index], block))).strip()
+    return texts
+
+
+def narration_for_scenes(
+    task_id: str,
+    manifest: dict | None = None,
+    windows: list[dict] | None = None,
+) -> list[str]:
+    """每一段画面该显示的台词。
+
+    台词不属于某一张图,属于某一段时间：配音是一整条,字幕是按那条配音的时
+    间轴生成的,所以"这段画面上会念什么"只能由它在成片里的起止时间决定。把
+    文字存在场景上只是个缓存——画面一重排、一删、一改时长,缓存就过期了,而
+    过期的缓存会让界面显示另一段的台词。
+
+    Narration belongs to a stretch of time, not to a picture: the voice-over
+    is one take and the subtitles are timed against it, so what is said over
+    a picture follows from where that picture sits in the finished video.
+    Recomputing it on every read is what keeps the editor honest after a
+    reorder, a delete or a timing change.
+
+    用户亲手改过的那一段例外,用他写的字：那不是缓存,那是他的输入。
+    """
+    manifest = manifest if manifest is not None else scene_manifest.load(task_id)
+    scenes = manifest["scenes"]
+    stored = [str(scene.get("narration") or "") for scene in scenes]
+    try:
+        derived = _narration_by_time(task_id, manifest, windows)
+    except scene_manifest.SceneError as exc:
+        # 排不出时间线（参数读不回来之类）时宁可显示存着的旧文字，也不要让
+        # 审片界面打不开。
+        logger.warning(f"cannot pair narration by time for {task_id}: {exc}")
+        return stored
+    if len(derived) != len(stored):
+        return stored
+    return [
+        stored[position]
+        if scenes[position].get("narration_edited") or not derived[position]
+        else derived[position]
+        for position in range(len(scenes))
+    ]
+
+
+def narration_script(task_id: str) -> str:
+    """重新配音要念的脚本,顺序与画面顺序无关。
+
+    不把场景台词按场景顺序拼起来：场景顺序是画面顺序。用户把第 7 张图拖到
+    最前面,是想让那张图先出现,不是想让第 7 句话先被念出来——而按场景顺序拼
+    接恰恰会那样,再按一下"重新配音"整条旁白就被打乱了,而且没有任何提示。
+
+    按时间分配出来的块本身就是脚本顺序(场景顺序即时间顺序),重排画面动不了
+    它。一句都不丢,所以拼回去仍然是完整的脚本。
+    """
+    manifest = scene_manifest.load(task_id)
+    blocks = narration_for_scenes(task_id, manifest)
+    script = "\n".join(block.strip() for block in blocks if block.strip())
+    # 一句都没排出来（既没有脚本也没有字幕）时退回旧的拼接，总比交一段空
+    # 脚本给 TTS 好。
+    return script or scene_manifest.narration_script(task_id)
+
+
+def rewrite_script(task_id: str, script: str) -> str:
+    """整条旁白的文字,一次改完。
+
+    台词按时间归到画面上,所以"改第 3 段的词"其实是在改脚本的某一块；想调整
+    句子的先后、把一句拆成两句、或者整段重写,都没有哪一段画面是它的归属。
+    这里是改词的地方,场景上的那个输入框只是它的局部视图。
+
+    改完配音就不作数了,但不在这里自动重配：重配要跑一次 TTS 并作废全部字幕
+    时间,那应该是用户按下按钮的结果,不是存一次文字的副作用。
+    """
+    _require_idle(task_id)
+    text = str(script or "").strip()
+    if not text:
+        raise SceneError("the narration script cannot be empty")
+    with _editing(task_id):
+        manifest = scene_manifest.load(task_id)
+        if not manifest["scenes"]:
+            raise SceneError(f"task {task_id} has no scenes to narrate")
+        if text == str(manifest.get("script") or "").strip():
+            return text
+        if not scene_manifest.patch_script(task_id, text):
+            raise SceneError("failed to save the narration script")
+        # 脚本就是台词本身了，场景上那些"手改过"的标记跟着作废：留着它们会
+        # 让刚写下的句子被旧的局部编辑挡住。
+        scenes = manifest["scenes"]
+        for scene in scenes:
+            scene.pop("narration_edited", None)
+            scene["narration"] = ""
+        scene_manifest.save_scenes(task_id, scenes, audio_stale=True)
+    return text
 
 
 def realign_narration(task_id: str) -> bool:
@@ -697,9 +869,15 @@ def describe(task_id: str, endpoint: str = "", *, with_timing: bool = False) -> 
             )
         except scene_manifest.SceneError as exc:
             logger.warning(f"cannot plan scene timing for {task_id}: {exc}")
+    # 台词按时间算,不直接用存着的那一份：存着的只是缓存,画面一重排、一删、
+    # 一改时长就过期了。理由见 ``narration_for_scenes``。
+    spoken = narration_for_scenes(task_id, manifest, windows or None)
     scenes = []
     for scene in manifest["scenes"]:
         record = dict(scene)
+        if scene["index"] < len(spoken):
+            record["narration"] = spoken[scene["index"]]
+        record["narration_edited"] = bool(scene.get("narration_edited"))
         window = windows[scene["index"]] if scene["index"] < len(windows) else None
         # 成片里的起止时间。界面靠它把"第 7 段画面"和"第 30 秒的旁白"对上。
         record["starts_at"] = window["start"] if window else None
@@ -803,7 +981,9 @@ def prepare_audio_rerun(task_id: str) -> VideoParams:
     """
     _require_idle(task_id)
     params = load_params(task_id)
-    script = scene_manifest.narration_script(task_id)
+    # 按时间排好的台词，而不是按场景顺序拼起来的：重排画面不该改变念词的
+    # 顺序。见 ``narration_script``。
+    script = narration_script(task_id)
     if not script:
         raise SceneError("every scene's narration is empty; nothing to narrate")
 

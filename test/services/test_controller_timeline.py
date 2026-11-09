@@ -333,8 +333,15 @@ class TestAddScene:
         assert scenes[2]["keyword"] == "a hand dropping a coin into a jar"
         assert scenes[2]["index"] == 2
 
-    def test_the_new_scene_has_empty_narration(self, client, reviewed):
-        """补画面不该顺手改旁白，否则会悄悄让已经录好的配音失效。"""
+    def test_the_new_scene_does_not_touch_the_narration(self, client, reviewed):
+        """补画面不该顺手改旁白，否则会悄悄让已经录好的配音失效。
+
+        这里钉的是"没动旁白"：脚本原样、配音依然有效。新那一段显示的台词
+        不是空的,而是它在成片里那段时间上真正会念到的句子——台词按时间算,
+        插一张图会让后面的画面各自挪位置,于是每一段显示的句子跟着重分一次。
+        它只是算出来的视图,不是存在图上的属性,所以"没动旁白"依然成立。
+        """
+        before = client.get(f"/api/v1/tasks/{reviewed}/scenes").json()["data"]
         new_file = str(utils.task_dir(reviewed) + "/added2.png")
         with open(new_file, "wb") as handle:
             handle.write(b"x")
@@ -343,8 +350,9 @@ class TestAddScene:
         ):
             client.post(f"/api/v1/tasks/{reviewed}/scenes", json={"keyword": "seeds"})
         listed = client.get(f"/api/v1/tasks/{reviewed}/scenes").json()["data"]
-        assert listed["scenes"][2]["narration"] == ""
         assert listed["audio_stale"] is False
+        assert listed["script"] == before["script"]
+        assert listed["scenes"][2]["narration_edited"] is False
 
     def test_after_inserts_in_the_middle(self, client, reviewed):
         new_file = str(utils.task_dir(reviewed) + "/added3.png")

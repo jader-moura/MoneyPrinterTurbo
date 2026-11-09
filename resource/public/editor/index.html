@@ -13,6 +13,7 @@
   <button id="load" class="btn">Load</button>
   <span id="totals" class="totals"></span>
   <span class="spacer"></span>
+  <button id="script-toggle" class="btn" disabled>Script</button>
   <button id="rerecord" class="btn" disabled>Re-record narration</button>
   <button id="render" class="btn primary" disabled>Render video</button>
 </header>
@@ -23,6 +24,23 @@
      而右边那个面板只讲当前选中的那一段,切到别的场景就看不见了——而用户
      恰恰是在一段一段地点"重出"的过程中需要一直看着它。 -->
 <div id="queue" class="queue" hidden></div>
+
+<!-- 旁白正文。放在最外层而不是放进右边的场景面板：这段文字属于整条片子,
+     不属于某一张图——句子的先后、把一句拆成两句、整段重写,都不是"某一段
+     画面"的属性。右边那个输入框只是这段文字的局部视图。 -->
+<section id="script-panel" class="script-panel" hidden>
+  <h2>Narration script</h2>
+  <p class="hint">The words and their order, for the whole video. Pictures are
+    matched to them by time, so moving a picture never moves a word. Saving
+    here does not re-record on its own — press <b>Re-record narration</b> when
+    you want the new words spoken.</p>
+  <textarea id="script-text" spellcheck="false" rows="12"></textarea>
+  <div class="row">
+    <button id="script-save" class="btn primary small">Save script</button>
+    <button id="script-close" class="btn small">Close</button>
+    <span id="script-note" class="hint"></span>
+  </div>
+</section>
 
 <main class="stage">
   <section class="viewer">
