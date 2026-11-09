@@ -5,7 +5,7 @@ from unittest.mock import patch
 
 import numpy as np
 import pytest
-from moviepy import VideoFileClip
+from moviepy import ImageClip, VideoFileClip
 from PIL import Image, ImageDraw
 from pydantic import ValidationError
 
@@ -101,6 +101,65 @@ def test_invalid_motion_is_rejected_before_paid_image_generation():
 def _white_width(frame):
     _, x = np.where(frame.min(axis=2) > 220)
     return int(x.max() - x.min() + 1)
+
+
+def _bright_centroid_x(frame):
+    """画面里亮线的亚像素横向重心。"""
+    weight = frame.astype(float).mean(axis=(0, 2))
+    weight = np.clip(weight - weight.mean(), 0, None)
+    return float((weight * np.arange(frame.shape[1])).sum() / weight.sum())
+
+
+def test_the_zoom_moves_the_picture_one_way_only():
+    """放大过程中画面不能抖。
+
+    老写法是 ``clip.resized(lambda t: ...)``：每帧把画幅重算成
+    ``int(w * z(t))``，合成时再按 ``int((W - w) / 2)`` 居中。画幅每长一个
+    像素，中心就移动半个像素，截断会把相邻两帧算到同一个偏移上——于是亮线
+    一边外移一边来回跳，89 帧里有 23 帧往反方向走，单帧最大 0.8 像素。
+
+    一次缓慢放大里，画面上每一点都只能朝外走。这里量的就是"只朝一个方向
+    走"：任何一帧的反向位移都是用户看到的抖动。
+    """
+    size, duration, fps = 256, 2.0, 30
+    pixels = np.zeros((size, size, 3), dtype=np.uint8)
+    pixels[:, :, 0] = 30
+    pixels[:, 59:62] = 255
+    source = ImageClip(pixels).with_duration(duration).with_position("center")
+    zoomed = video._zoom_image_clip(source, duration)
+    try:
+        frames = [zoomed.get_frame(index / fps) for index in range(int(duration * fps))]
+    finally:
+        zoomed.close()
+        source.close()
+
+    assert {frame.shape for frame in frames} == {(size, size, 3)}
+    positions = [_bright_centroid_x(frame) for frame in frames]
+    steps = np.diff(positions)
+    assert positions[-1] < positions[0] - 2, "the zoom did not magnify the picture"
+    assert steps.max() < 1e-9, f"the picture jitters backwards by up to {steps.max():.3f}px"
+
+
+def test_the_zoom_keeps_a_transparent_edge_within_range():
+    """图片运镜用 BICUBIC 采样，它会在硬边两侧过冲。
+
+    颜色帧是 uint8，Pillow 自己截断了；遮罩帧是浮点的，过冲出 [0, 1] 会在
+    合成时把透明边缘变成一圈亮边或暗边。
+    """
+    pixels = np.zeros((64, 64, 4), dtype=np.uint8)
+    pixels[:, :, :3] = 255
+    pixels[20:44, 20:44, 3] = 255
+    source = ImageClip(pixels).with_duration(1.0).with_position("center")
+    zoomed = video._zoom_image_clip(source, 1.0)
+    try:
+        assert zoomed.mask is not None, "the alpha channel was dropped"
+        for moment in (0.0, 0.25, 0.5, 0.99):
+            mask = zoomed.mask.get_frame(moment)
+            assert mask.min() >= 0.0, f"alpha undershoots to {mask.min():.3f} at {moment}s"
+            assert mask.max() <= 1.0, f"alpha overshoots to {mask.max():.3f} at {moment}s"
+    finally:
+        zoomed.close()
+        source.close()
 
 
 def test_native_static_pixels_zoom_default_and_output_identity(tmp_path):

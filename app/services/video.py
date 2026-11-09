@@ -2088,6 +2088,47 @@ def _rendered_clip_is_usable(video_file: str) -> bool:
             close_clip(clip)
 
 
+# 放大幅度：每秒约 3%，由整段时长决定终点倍率。
+_IMAGE_ZOOM_RATE_PER_SECOND = 0.03
+# 运镜算法的版本号。它进输出文件名，所以换了采样方式之后，磁盘上那些按老算法
+# 渲出来的（会抖的）片段不会被当成"已经渲好了"而继续播。
+_IMAGE_ZOOM_SAMPLING_REVISION = "subpixel-bicubic-1"
+
+
+def _zoom_image_clip(clip, clip_duration):
+    """缓慢放大一张图片，而且放大过程中画面不能抖。
+
+    ``clip.resized(lambda t: ...)`` 每帧把画幅重算成 ``int(w * z(t))``，
+    合成时再按 ``int((W - w) / 2)`` 居中。画幅每长 1 像素，中心就移动半像素，
+    而截断会把相邻两帧算到同一个偏移上——于是画面一边放大一边左右抖一个像素。
+    改成在固定画布上采样一个亚像素窗口：输出尺寸始终不变，不需要重新居中，
+    窗口边界按小数移动。这和 ``video_effects.zoom_still_frame`` 是同一套理由。
+
+    The naive form recomputes the frame size as ``int(w * z(t))`` every frame
+    and the composite then centres it with ``int((W - w) / 2)``. A one-pixel
+    size step moves the centre by half a pixel, which truncates onto the same
+    offset as the frame before — so the picture jitters left and right by a
+    pixel while it grows. Sampling a sub-pixel window out of a fixed-size
+    canvas keeps the output size constant, re-centres nothing, and moves the
+    window's edges in fractions of a pixel.
+    """
+    duration = max(float(clip_duration), 1e-3)
+    span = _IMAGE_ZOOM_RATE_PER_SECOND * duration
+
+    def sample_zoomed_frame(get_frame, current_time: float):
+        progress = min(max(current_time / duration, 0.0), 1.0)
+        sampled = video_effects.zoom_still_frame(
+            get_frame(current_time), 1.0 + span * progress
+        )
+        # BICUBIC 会在硬边两侧过冲。颜色帧是 uint8，Pillow 自己截断了；遮罩帧是
+        # 浮点的，过冲出 [0, 1] 会让透明边缘在合成时出现一圈亮边或暗边。
+        if sampled.ndim == 2:
+            return np.clip(sampled, 0.0, 1.0)
+        return sampled
+
+    return clip.transform(sample_zoomed_frame, apply_to=["mask"])
+
+
 def _image_zoom_video_path(
     image_path: str, clip, clip_duration, motion: ImageMotion
 ) -> str:
@@ -2103,7 +2144,11 @@ def _image_zoom_video_path(
     digest.update(frame.tobytes())
     if clip.mask is not None:
         digest.update(clip.mask.get_frame(0).tobytes())
-    duration_identity = hashlib.sha256(str(clip_duration).encode()).hexdigest()[:16]
+    # 静止模式的画面和运镜算法无关，别让它的缓存跟着一起作废白渲一遍。
+    identity = str(clip_duration)
+    if motion == ImageMotion.zoom:
+        identity = f"{identity}|{_IMAGE_ZOOM_SAMPLING_REVISION}"
+    duration_identity = hashlib.sha256(identity.encode()).hexdigest()[:16]
     return os.path.join(
         os.path.dirname(image_path),
         f"{digest.hexdigest()}.{motion.value}-{duration_identity}.mp4",
@@ -2139,9 +2184,9 @@ def render_image_zoom_video(
         if _rendered_clip_is_usable(existing):
             logger.debug(f"reusing the rendered image clip: {os.path.basename(existing)}")
             return existing
-        # 只有放大模式改变画面尺寸，静止模式保留原始构图及透明背景处理。
+        # 放大模式在固定画幅内做亚像素采样，静止模式保留原始构图及透明背景处理。
         image_clip = (
-            clip.resized(lambda t: 1 + (clip_duration * 0.03) * (t / clip.duration))
+            _zoom_image_clip(clip, clip_duration)
             if motion == ImageMotion.zoom
             else clip
         )

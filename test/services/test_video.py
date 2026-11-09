@@ -575,6 +575,9 @@ class TestVideoService(unittest.TestCase):
             def resized(self, _scale):
                 return self
 
+            def transform(self, _frame_function, **_kwargs):
+                return self
+
         class FakeCompositeClip:
             def __init__(self, clips, bg_color=None):
                 self.duration = clips[0].duration
@@ -616,6 +619,9 @@ class TestVideoService(unittest.TestCase):
                 return self
 
             def resized(self, _scale):
+                return self
+
+            def transform(self, _frame_function, **_kwargs):
                 return self
 
         writes = 0
