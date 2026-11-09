@@ -21,6 +21,7 @@ const ui = {
   audioTrack: el("audio-track"), playhead: el("playhead"), narration: el("narration"),
   frame: el("frame"), fx: el("fx"), settings: el("settings"), scroll: el("scroll"),
   fit: el("fit"), gap: el("gap"), screen: document.querySelector(".screen"),
+  queue: el("queue"),
 };
 
 const state = {
@@ -35,6 +36,12 @@ const state = {
   imageStyles: [],
   imageStyle: "",
   imageStylePinned: false,
+  // 排队中的重生成。出一张图要几分钟，所以点"重出"只是排队：请求立刻
+  // 回来，用户接着点下一张或者去改别处，不用站在那儿等。
+  queue: { jobs: [], waiting: 0, running: null, busy: false },
+  queueWatching: false,
+  // 已经重读过时间线的那些活，免得同一张图反复触发重读。
+  queueSeen: [],
   adding: false,
   taskBusy: false,
   watching: false,
@@ -177,6 +184,12 @@ async function load(taskId) {
     draw();
     // 打开时就查一次：别人(或刚才的自己)可能正在渲染这条任务。
     watchTask();
+    // 队列在服务端，所以上一次开着这个页面时排的活可能还在跑。刷新页面、
+    // 换一个浏览器都还看得见它。已经出完的那些不算"刚完成"——时间线是
+    // 刚读的，上面已经是新画面了。
+    state.queueSeen = doneIds(await fetchQueue());
+    draw();
+    watchQueue();
   } catch (error) {
     state.data = null;
     state.scenes = [];
@@ -258,6 +271,159 @@ function setControlsEnabled(enabled) {
     || !state.scenes.length
     || !!(state.data && state.data.audio_stale);
   ui.fit.disabled = !enabled;
+}
+
+/* ---------- the regeneration queue ---------- */
+
+function queuePath() {
+  return `/tasks/${encodeURIComponent(state.taskId)}/scenes/queue`;
+}
+
+const EMPTY_QUEUE = { jobs: [], waiting: 0, running: null, busy: false };
+
+/** 已经出完的那些活。只有"出完"才需要重读时间线：失败和撤销没有改磁盘。 */
+function doneIds(queue) {
+  return (queue.jobs || []).filter((job) => job.state === "done").map((job) => job.id);
+}
+
+/** 读一次队列现状。不重读时间线，只更新那条队列栏。 */
+async function fetchQueue() {
+  if (!state.taskId) return EMPTY_QUEUE;
+  try {
+    state.queue = (await call("GET", queuePath())) || EMPTY_QUEUE;
+  } catch {
+    // 队列查不到不该让编辑器停摆：对面可能还跑着没有这条接口的旧版 API。
+    state.queue = EMPTY_QUEUE;
+  }
+  drawQueue();
+  return state.queue;
+}
+
+/** 盯着队列，直到排空。
+
+    每出完一张就重读一次时间线：磁盘上的画面已经换了，不重读的话用户看到的
+    还是旧缩略图，会以为"重出"根本没生效。 */
+async function watchQueue() {
+  if (state.queueWatching || !state.taskId) return;
+  state.queueWatching = true;
+  try {
+    for (;;) {
+      const queue = await fetchQueue();
+      const fresh = doneIds(queue).filter((id) => !state.queueSeen.includes(id));
+      if (fresh.length) {
+        state.queueSeen.push(...fresh);
+        await refresh();
+      }
+      if (!queue.busy) break;
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+    }
+  } finally {
+    state.queueWatching = false;
+    drawQueue();
+  }
+}
+
+/** 这一段上排着的活（含正在出的）。 */
+function pendingJobs(index) {
+  return (state.queue.jobs || []).filter(
+    (job) => job.index === index && (job.state === "queued" || job.state === "running")
+  );
+}
+
+/** 把一次重生成排进队列。请求立刻回来，所以按钮不用禁。 */
+async function queueRegeneration(index, keyword, imageStyle) {
+  try {
+    const job = await call(
+      "POST",
+      `${scenePath(index)}/material/queue`,
+      { keyword, image_style: imageStyle }
+    );
+    say(job && job.position > 1
+      ? `Scene ${index + 1} queued — ${job.position - 1} ahead of it.`
+      : `Scene ${index + 1} queued. Queue another or keep editing.`);
+    await fetchQueue();
+    draw();
+    watchQueue();
+  } catch (error) {
+    say(String(error.message || error), "error");
+  }
+}
+
+/** 队列栏。排着的、正在出的、刚结束的都在这里，失败原因照原样显示。 */
+function drawQueue() {
+  const jobs = (state.queue.jobs || []).filter((job) => job.state !== "cancelled");
+  ui.queue.innerHTML = "";
+  ui.queue.hidden = !jobs.length;
+  if (!jobs.length) return;
+
+  const running = state.queue.running;
+  const waiting = state.queue.waiting || 0;
+  const head = document.createElement("div");
+  head.className = "queue-head";
+  const title = document.createElement("span");
+  title.textContent = running
+    ? `Regenerating scene ${running.index + 1} · ${fmt(running.elapsed)}`
+      + (waiting ? ` · ${waiting} waiting` : "")
+    : waiting
+      ? `${waiting} picture${waiting === 1 ? "" : "s"} waiting`
+      : "Nothing left to regenerate";
+  head.appendChild(title);
+
+  if (jobs.some((job) => job.state === "done" || job.state === "failed")) {
+    const clear = button("Clear finished", "small", async () => {
+      try {
+        state.queue = (await call("DELETE", queuePath())) || EMPTY_QUEUE;
+        drawQueue();
+      } catch (error) {
+        say(String(error.message || error), "error");
+      }
+    });
+    head.appendChild(clear);
+  }
+  ui.queue.appendChild(head);
+
+  for (const job of jobs) {
+    const row = document.createElement("div");
+    row.className = "queue-row " + job.state;
+
+    const label = document.createElement("span");
+    label.className = "queue-label";
+    const term = job.keyword ? ` · ${job.keyword}` : "";
+    if (job.state === "running") {
+      label.textContent = `Scene ${job.index + 1}${term} · generating ${fmt(job.elapsed)}`;
+    } else if (job.state === "queued") {
+      label.textContent = `Scene ${job.index + 1}${term} · waiting`
+        + (job.position > 1 ? ` (${job.position - 1} ahead)` : " (next)");
+    } else if (job.state === "done") {
+      label.textContent = `Scene ${job.index + 1}${term} · redrawn in ${fmt(job.elapsed)}`;
+    } else {
+      // 失败原因是服务端点名过的那一句（哪个源怎么失败的），照原样显示。
+      label.textContent = `Scene ${job.index + 1}${term} · failed: ${job.error}`;
+    }
+    row.appendChild(label);
+
+    // 只有还排着的能撤。正在出的那一张撤不掉：出图是一次没法中断的外部
+    // 调用，给个按钮假装能撤只会让用户看着它继续跑。
+    if (job.state === "queued") {
+      row.appendChild(button("Cancel", "small", async () => {
+        try {
+          await call("DELETE", `${queuePath()}/${encodeURIComponent(job.id)}`);
+          await fetchQueue();
+          draw();
+        } catch (error) {
+          say(String(error.message || error), "error");
+        }
+      }));
+    }
+    // 点一行就跳到那一段，省得自己在时间线上找。
+    label.addEventListener("click", () => {
+      const scene = state.scenes[job.index];
+      if (!scene) return;
+      state.selected = job.index;
+      draw();
+    });
+    ui.queue.appendChild(row);
+  }
 }
 
 /** 所有改数据的操作都走这里：禁用按钮、显示真实错误、完成后重读一次。
@@ -381,9 +547,15 @@ function draw() {
   drawInspector();
   drawTotals();
   drawSettings();
+  drawQueue();
   const ready = state.scenes.length > 0;
   ui.play.disabled = !ready;
-  ui.render.disabled = !ready || !!(state.data && state.data.audio_stale);
+  // 还有图没出完就不让开渲：渲染器要读的正是队列那边还在换的那几个文件，
+  // 渲出来会是新旧画面混在一起的一条片子。接口那边也会拒,这里只是不让
+  // 用户白点一次。
+  ui.render.disabled = !ready
+    || !!state.queue.busy
+    || !!(state.data && state.data.audio_stale);
   ui.rerecord.disabled = !state.data || !state.data.audio_stale;
   ui.placeholder.hidden = ready;
   ui.playhead.hidden = !ready;
@@ -440,6 +612,22 @@ function drawClips() {
       + ` · ${span.toFixed(1)}s`
       + (scene.exists ? "" : " · missing");
     clip.appendChild(text);
+
+    // 排着队要重出的那几段，在轨道上就标出来：用户是在时间线上挑画面的，
+    // 他需要在这里看见"这段我已经点过了"，而不是去别处对一遍列表。
+    const pending = pendingJobs(index);
+    if (pending.length) {
+      const running = pending.some((job) => job.state === "running");
+      clip.classList.add(running ? "generating" : "queued");
+      const badge = document.createElement("div");
+      badge.className = "clip-badge";
+      badge.textContent = running
+        ? "redrawing…"
+        : pending.length > 1
+          ? `queued ×${pending.length}`
+          : "queued";
+      clip.appendChild(badge);
+    }
 
     for (const side of ["left", "right"]) {
       const handle = document.createElement("div");
@@ -699,39 +887,43 @@ function drawInspector() {
   // 生成新画面是这个面板里最常用的动作：画面不对时要改的通常就是关键词，
   // 改完紧接着就要重出一张。所以它紧贴在关键词下面，而不是和锁定、删除
   // 挤在最底下那一排。
-  // 本机出一张图可能要几分钟（实测 zimage-turbo 约 3 分钟）。按钮必须禁用
-  // 并且**显示已经等了多久**：一个几分钟不变的"生成中…"和卡死没有区别，
-  // 用户只会以为它挂了然后反复点。
-  const regenerate = button(regenerateLabel(scene), "primary", async () => {
-    regenerate.disabled = true;
-    const started = Date.now();
-    const tick = setInterval(() => {
-      regenerate.textContent = `Generating… ${fmt((Date.now() - started) / 1000)}`;
-    }, 1000);
-    regenerate.textContent = "Generating… 0:00";
-    try {
-      await run("Generating a new picture for this scene", () =>
-        call("POST", scenePath(scene.index) + "/material",
-          {
-            keyword: keyword.input.value || null,
-            // 下拉框在就把它的值发出去，空字符串是"和这条片子一样"，
-            // 和"没有下拉框"(null,沿用上次挑的)不是一回事。
-            image_style: style ? style.input.value : null,
-          }));
-    } finally {
-      clearInterval(tick);
-      regenerate.disabled = false;
-      regenerate.textContent = regenerateLabel(scene);
-    }
-  });
+  //
+  // 本机出一张图要几分钟（实测 zimage-turbo 约 3 分钟），所以点下去只是
+  // **排队**：请求立刻回来，按钮也不禁用，用户接着挑下一段点"重出"，或者
+  // 去改别处的台词和时长。等着出的那几张在上面那条队列栏里，出完一张
+  // 时间线自己就换成新画面。
+  const regenerate = button(regenerateLabel(scene), "primary", () =>
+    queueRegeneration(
+      scene.index,
+      keyword.input.value || null,
+      // 下拉框在就把它的值发出去，空字符串是"和这条片子一样"，
+      // 和"没有下拉框"(null,沿用上次挑的)不是一回事。
+      style ? style.input.value : null
+    ));
   ui.inspBody.appendChild(regenerate);
+
+  // 这一段已经排着了就说出来。不说的话，用户点完看不出任何变化，只会
+  // 再点一次——然后同一段画面被重出两遍。
+  const mine = pendingJobs(scene.index);
+  if (mine.length) {
+    const queued = document.createElement("p");
+    queued.className = "hint pending";
+    const running = mine.find((job) => job.state === "running");
+    queued.textContent = running
+      ? `Being redrawn now · ${fmt(running.elapsed)} so far.`
+      : mine.length > 1
+        ? `${mine.length} regenerations of this scene are waiting in the queue.`
+        : "Waiting in the queue. Queue others or keep editing.";
+    ui.inspBody.appendChild(queued);
+  }
 
   const sourceNote = document.createElement("p");
   sourceNote.className = "hint";
   sourceNote.textContent = isGenerated(scene)
     ? "Draws a new picture from the keyword. Edit the keyword first if the "
-      + "subject itself is wrong — that is usually what fixes it. A local "
-      + "image server can take a few minutes per picture."
+      + "subject itself is wrong — that is usually what fixes it. Pictures are "
+      + "drawn one at a time and a local image server takes a few minutes "
+      + "each, so this only joins the queue — keep working while it runs."
     : "Stock searches are cached, so the same keyword returns the same clip. "
       + "Change the keyword to get a different one.";
   ui.inspBody.appendChild(sourceNote);

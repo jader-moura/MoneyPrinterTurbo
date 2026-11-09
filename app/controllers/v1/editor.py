@@ -30,6 +30,8 @@ from app.models.exception import HttpException
 from app.models.schema import (
     SceneListResponse,
     SceneAddRequest,
+    SceneRegenJobResponse,
+    SceneRegenQueueResponse,
     SceneRegenerateRequest,
     SceneReorderRequest,
     SceneReplaceRequest,
@@ -40,7 +42,7 @@ from app.models.schema import (
     TaskVideoRequest,
 )
 from app.controllers.manager.base_manager import TaskQueueFullError
-from app.services import scene_editor, scene_manifest
+from app.services import scene_editor, scene_manifest, scene_regen_queue
 from app.services import state as sm
 from app.services import task as tm
 from app.utils import utils
@@ -180,6 +182,94 @@ def reorder_scenes(
     _require_task(task_id, request_id)
     _handle(task_id, request_id, lambda: scene_editor.reorder_scenes(task_id, body.order))
     return utils.get_response(200, scene_editor.describe(task_id, _endpoint()))
+
+
+#: 和 "reorder" 同一个道理，必须声明在 ``/scenes/{index}`` 那几条之前。
+@router.get(
+    "/tasks/{task_id}/scenes/queue",
+    response_model=SceneRegenQueueResponse,
+    summary="List the queued image regenerations of a task",
+)
+def list_regen_queue(request: Request, task_id: str = Path(..., description="Task ID")):
+    """这个任务排着的、正在出的和刚结束的重生成。
+
+    跑完的也要带上：界面靠它显示失败原因。一张图失败了而队列里已经没有它
+    的记录，用户就只能看到画面没变，不知道为什么。
+    """
+    request_id = base.get_task_id(request)
+    _require_task(task_id, request_id)
+    return utils.get_response(200, scene_regen_queue.snapshot(task_id))
+
+
+@router.delete(
+    "/tasks/{task_id}/scenes/queue",
+    response_model=SceneRegenQueueResponse,
+    summary="Forget the finished image regenerations of a task",
+)
+def clear_regen_queue(
+    request: Request, task_id: str = Path(..., description="Task ID")
+):
+    """清掉已经结束的记录。排着的和正在出图的不动。"""
+    request_id = base.get_task_id(request)
+    _require_task(task_id, request_id)
+    scene_regen_queue.dismiss(task_id)
+    return utils.get_response(200, scene_regen_queue.snapshot(task_id))
+
+
+@router.delete(
+    "/tasks/{task_id}/scenes/queue/{job_id}",
+    response_model=SceneRegenJobResponse,
+    summary="Cancel one queued image regeneration",
+)
+def cancel_regen_job(
+    request: Request,
+    task_id: str = Path(..., description="Task ID"),
+    job_id: str = Path(..., description="Queued job id"),
+):
+    """撤掉一个还排着的活。已经在出图的那一张撤不掉（见队列模块的说明）。"""
+    request_id = base.get_task_id(request)
+    _require_task(task_id, request_id)
+    job = _handle(task_id, request_id, lambda: scene_regen_queue.cancel(job_id))
+    return utils.get_response(200, job)
+
+
+@router.post(
+    "/tasks/{task_id}/scenes/{index}/material/queue",
+    response_model=SceneRegenJobResponse,
+    summary="Queue a regeneration of one scene's material",
+)
+def queue_scene_material(
+    request: Request,
+    body: SceneRegenerateRequest,
+    task_id: str = Path(..., description="Task ID"),
+    index: int = Path(..., ge=0, description="Scene index"),
+):
+    """和下面那条接口做同一件事，但是立刻返回，出图排进队列。
+
+    为什么要分成两条路由而不是改那一条：那条同步接口的调用方（CLI、脚本、
+    现有的集成）要的就是"这个请求回来的时候图已经换好了"。把它改成异步会
+    让那些调用方在图还没出来的时候就以为做完了。所以这里新增一条,原来那
+    条一个字没动。
+
+    请求体和同步那条完全一样,``keyword`` 和 ``image_style`` 的含义也一样。
+    改请求才能解决的错误（任务在渲染、下标越界、风格 id 不认识）在这里就
+    直接报出来,不会排进队列几分钟之后才冒出来。
+
+    A second route rather than a change to the synchronous one: its callers
+    expect the picture to be in place when the request returns, and making it
+    asynchronous would have them believe the work was done. The body and the
+    meaning of its fields are identical.
+    """
+    request_id = base.get_task_id(request)
+    _require_task(task_id, request_id)
+    job = _handle(
+        task_id,
+        request_id,
+        lambda: scene_regen_queue.enqueue(
+            task_id, index, keyword=body.keyword, image_style=body.image_style
+        ),
+    )
+    return utils.get_response(200, job)
 
 
 @router.post(
@@ -369,9 +459,25 @@ def rerecord_audio(request: Request, task_id: str = Path(..., description="Task 
     summary="Render the reviewed scenes into the final video",
 )
 def render_task(request: Request, task_id: str = Path(..., description="Task ID")):
-    """按审片后的场景顺序渲染成片，不重新生成任何素材。"""
+    """按审片后的场景顺序渲染成片，不重新生成任何素材。
+
+    还有图排着队没出完的时候不开渲：渲染器正要去读那几个素材文件，而队列
+    那边还在往清单里换文件。渲出来的片子会混着新旧两批画面,而且谁也说不清
+    到底混进了哪几张。这里点名还剩几张,让用户自己决定是等还是撤。
+    """
     request_id = base.get_task_id(request)
     _require_task(task_id, request_id)
+    queue = scene_regen_queue.snapshot(task_id)
+    if queue["busy"]:
+        pending = queue["waiting"] + (1 if queue["running"] else 0)
+        raise HttpException(
+            task_id=task_id,
+            status_code=409,
+            message=(
+                f"{request_id}: {pending} picture(s) are still being regenerated; "
+                "wait for them to finish or cancel them before rendering"
+            ),
+        )
     params = _handle(task_id, request_id, lambda: scene_editor.prepare_render(task_id))
     return _submit(task_id, request_id, params, stop_at="video", start_from="video")
 

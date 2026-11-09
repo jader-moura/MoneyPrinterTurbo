@@ -30,7 +30,9 @@ from __future__ import annotations
 
 import os
 import shutil
-from typing import Any, Sequence
+import threading
+from contextlib import contextmanager
+from typing import Any, Iterator, Sequence
 
 from loguru import logger
 
@@ -51,6 +53,44 @@ class SceneBusyError(SceneError):
 # 这些源不是按关键词取素材的，重新生成一个场景没有意义。
 # These sources are not keyword-driven, so regenerating one scene is meaningless.
 _UNSUPPORTED_REGEN_SOURCES = ("local", "loomloom")
+
+
+_LOCKS_GUARD = threading.Lock()
+_LOCKS: dict[str, threading.RLock] = {}
+
+
+@contextmanager
+def _editing(task_id: str) -> Iterator[None]:
+    """把"读清单 → 改 → 写回"圈成一个不可分割的动作。
+
+    为什么现在需要：重生成排了队之后，写清单的不只有正在处理的那个 HTTP
+    请求了——后台那个工作线程出完一张图就会写一次。两边都是"先读整份清单，
+    改掉一段，再整份写回去",交错起来后写的那次会把先写的那次完全盖掉:
+    用户在等图的时候改了一句台词,图出来的瞬间那句台词就没了。
+
+    锁按任务分：两个任务互不相干，没有理由互相等。
+
+    注意**不要**把出图圈进来。出图要几分钟，拿着锁出图等于审片界面在这几
+    分钟里全部卡住,而排队的全部意义正是让用户能接着干别的。所以慢的那一段
+    在锁外面跑,跑完重新读一遍清单再写——这也是 ``_locate_scene`` 存在的原因。
+
+    Both the request thread and the regeneration worker read the whole
+    manifest, change one scene and write it all back, so without this the
+    later write silently discards the earlier one -- a narration edited while
+    a picture was being generated would vanish the moment it finished. The
+    lock is per task, and deliberately does not cover generation itself:
+    holding it for minutes would freeze the editor, which is exactly what the
+    queue is meant to prevent.
+    """
+    with _LOCKS_GUARD:
+        lock = _LOCKS.get(task_id)
+        if lock is None:
+            # 可重入：下面好几个操作会互相调用（比如重排之后重新读一遍），
+            # 普通锁会把自己锁死。
+            lock = threading.RLock()
+            _LOCKS[task_id] = lock
+    with lock:
+        yield
 
 
 def _require_idle(task_id: str) -> None:
@@ -103,12 +143,91 @@ def _scene_at(scenes: list[dict], index: Any) -> int:
     return position
 
 
+def _locate_scene(scenes: list[dict], position: int, anchor: str) -> int:
+    """出图期间时间线可能变了，把用户当时点的那一段找回来。
+
+    按素材文件认，不按下标认：排队的那几分钟里用户可能删掉、插入或者重排
+    了场景，下标就指向另一段画面了。把新图写到一段用户没动过的画面上，比
+    这次重生成直接失败要糟得多——他会以为那段画面自己坏了。
+
+    那一段真的不在了（被删了）就点名说清楚。生成出来的文件留在磁盘上没人
+    用，这不好看，但比悄悄塞给另一段画面好。
+
+    Scene indices shift when the timeline is edited while a job waits, so the
+    scene is found again by the material file it had. Writing the new picture
+    onto a scene the user never touched would be worse than failing.
+    """
+    if not anchor:
+        return _scene_at(scenes, position)
+    if (
+        0 <= position < len(scenes)
+        and str(scenes[position].get("material") or "") == anchor
+    ):
+        return position
+    for candidate, scene in enumerate(scenes):
+        if str(scene.get("material") or "") == anchor:
+            return candidate
+    raise SceneError(
+        "the scene this picture was generated for is no longer in the timeline; "
+        "ask for it again if you still want it"
+    )
+
+
+def check_regenerate(
+    task_id: str,
+    index: Any,
+    *,
+    keyword: str | None = None,
+    image_style: str | None = None,
+) -> dict:
+    """能不能重生成这一段；能的话返回执行它需要的东西。
+
+    为排队而拆出来的：这些失败改请求才能解决（任务在渲染中、下标越界、这个
+    素材源不按关键词出图、风格 id 不认识），所以必须在**排队的那一刻**就说，
+    而不是等队列轮到它、几分钟之后再冒出来——那时候用户只会以为是出图失败。
+
+    返回的 ``material`` 是这一段现在用的素材文件，排队期间时间线变了就靠它
+    把这一段找回来（见 ``_locate_scene``）。
+
+    Split out for the queue: these failures are fixed by a different request,
+    so they must be reported when the job is accepted rather than minutes
+    later, where they would look like a generator failure.
+    """
+    _require_idle(task_id)
+    params = load_params(task_id)
+    source = str(getattr(params, "video_source", "") or "")
+    if source in _UNSUPPORTED_REGEN_SOURCES:
+        raise SceneError(
+            f"video source {source!r} does not generate materials from keywords; "
+            "replace this scene with your own file instead"
+        )
+    with _editing(task_id):
+        scenes = _scenes_or_fail(task_id)
+        position = _scene_at(scenes, index)
+        scene = dict(scenes[position])
+    term = str(keyword if keyword is not None else scene.get("keyword") or "").strip()
+    if not term:
+        raise SceneError("no keyword to generate from; provide one with the request")
+    # 风格 id 认不认识现在就说。不传就按这一段记着的那个风格验——真正出图时
+    # 用的也是它。
+    effective_style = (
+        image_style if image_style is not None else str(scene.get("image_style") or "")
+    )
+    _image_prompt_template(params, effective_style)
+    return {
+        "index": position,
+        "keyword": term,
+        "material": str(scene.get("material") or ""),
+    }
+
+
 def regenerate_material(
     task_id: str,
     index: Any,
     *,
     keyword: str | None = None,
     image_style: str | None = None,
+    expect_material: str | None = None,
 ) -> dict:
     """重新取这一个场景的素材。
 
@@ -123,41 +242,59 @@ def regenerate_material(
     重新生成很可能拿回同一个文件。本地出图的源每次都是新的采样,所以重生成
     确实会得到不同的画面。这里不绕过缓存——绕过等于让用户在不知情的情况下
     多花一次第三方额度。
+
+    ``expect_material`` 给的是排队时这一段用的素材文件。队列里排着的活执行
+    时下标可能已经指向别的画面了（用户删了、插了、重排了），给了它就按文件
+    把那一段找回来。见 ``_locate_scene``。
     """
     _require_idle(task_id)
-    scenes = _scenes_or_fail(task_id)
-    position = _scene_at(scenes, index)
-    scene = scenes[position]
-
-    term = str(keyword if keyword is not None else scene.get("keyword") or "").strip()
-    # 三种情况要分开，否则界面上那个下拉框会说谎。
-    #
-    # 不传（``None``）：沿用这一段上次挑过的风格。不这样的话，在编辑器里把
-    # 某一段改成漫画风，下一次重生成又会悄悄变回去。老版客户端和不画下拉框
-    # 的界面走的都是这条路。
-    # 传空字符串：用户在下拉框里选了"和这条片子一样"，那就回到任务记下的
-    # 风格，并且把这一段上记着的那个选择清掉——留着它，下次打开界面显示的
-    # 还是旧选择，而画出来的已经不是它了。
-    # 传风格 id：只给这一张换画风，并记住它。
-    if image_style is None:
-        style = str(scene.get("image_style") or "").strip()
-    else:
-        style = str(image_style).strip()
-        if style:
-            scene["image_style"] = style
+    with _editing(task_id):
+        scenes = _scenes_or_fail(task_id)
+        position = _scene_at(scenes, index)
+        scene = scenes[position]
+        term = str(
+            keyword if keyword is not None else scene.get("keyword") or ""
+        ).strip()
+        # 三种情况要分开，否则界面上那个下拉框会说谎。
+        #
+        # 不传（``None``）：沿用这一段上次挑过的风格。不这样的话，在编辑器里
+        # 把某一段改成漫画风，下一次重生成又会悄悄变回去。老版客户端和不画
+        # 下拉框的界面走的都是这条路。
+        # 传空字符串：用户在下拉框里选了"和这条片子一样"，那就回到任务记下
+        # 的风格，并且把这一段上记着的那个选择清掉——留着它，下次打开界面
+        # 显示的还是旧选择，而画出来的已经不是它了。
+        # 传风格 id：只给这一张换画风，并记住它。
+        if image_style is None:
+            style = str(scene.get("image_style") or "").strip()
         else:
-            scene.pop("image_style", None)
+            style = str(image_style).strip()
+        anchor = str(expect_material or scene.get("material") or "")
+
+    # 出图在锁外面。本机一张图要几分钟，拿着锁出图等于这几分钟里这个任务
+    # 什么都改不了。
     new_path, source = _produce_material(
         task_id, term, what=f"scene {position}", image_style=style
     )
-    scene["material"] = new_path
-    scene["kind"] = scene_manifest.material_kind(new_path)
-    scene["source"] = source
-    scene["keyword"] = term
-    # 用户亲手重生成过的结果，不应该被后续批量操作再覆盖掉。
-    scene["locked"] = True
-    scene_manifest.save_scenes(task_id, scenes)
-    return scene
+
+    # 重新读一遍清单：刚才那几分钟里用户完全可能改过别的场景，拿出图之前
+    # 那份内存里的旧清单写回去会把那些改动全盖掉。
+    with _editing(task_id):
+        scenes = _scenes_or_fail(task_id)
+        position = _locate_scene(scenes, position, anchor)
+        scene = scenes[position]
+        if image_style is not None:
+            if style:
+                scene["image_style"] = style
+            else:
+                scene.pop("image_style", None)
+        scene["material"] = new_path
+        scene["kind"] = scene_manifest.material_kind(new_path)
+        scene["source"] = source
+        scene["keyword"] = term
+        # 用户亲手重生成过的结果，不应该被后续批量操作再覆盖掉。
+        scene["locked"] = True
+        scene_manifest.save_scenes(task_id, scenes)
+        return scene
 
 
 def _image_prompt_template(params: VideoParams, image_style: str | None) -> str:
@@ -264,9 +401,20 @@ def add_scene(
     还是这个风格。
     """
     _require_idle(task_id)
-    scenes = scene_manifest.load(task_id)["scenes"]
     term = str(keyword or "").strip()
     style = str(image_style or "").strip()
+    with _editing(task_id):
+        scenes = scene_manifest.load(task_id)["scenes"]
+        # 插在哪一段后面，同样按素材文件认：出图这几分钟里时间线可能变了，
+        # 光记一个下标会把新画面插到另一个位置去。
+        after_position = None if after is None else _scene_at(scenes, after)
+        anchor = (
+            ""
+            if after_position is None
+            else str(scenes[after_position].get("material") or "")
+        )
+
+    # 和重生成一样，慢的那一段不拿锁。
     new_path, source = _produce_material(
         task_id,
         term,
@@ -286,32 +434,39 @@ def add_scene(
     }
     if style:
         scene["image_style"] = style
-    position = len(scenes) if after is None else _scene_at(scenes, after) + 1
-    scenes.insert(position, scene)
-    scene_manifest.save_scenes(task_id, scenes)
-    logger.success(
-        f"added scene at position {position} of task {task_id} "
-        f"with keyword {term!r}"
-    )
-    return scene_manifest.load(task_id)["scenes"][position]
+    with _editing(task_id):
+        scenes = scene_manifest.load(task_id)["scenes"]
+        position = (
+            len(scenes)
+            if after_position is None
+            else _locate_scene(scenes, after_position, anchor) + 1
+        )
+        scenes.insert(position, scene)
+        scene_manifest.save_scenes(task_id, scenes)
+        logger.success(
+            f"added scene at position {position} of task {task_id} "
+            f"with keyword {term!r}"
+        )
+        return scene_manifest.load(task_id)["scenes"][position]
 
 
 def replace_material(task_id: str, index: Any, material_path: str) -> dict:
     """用一个已经通过上传校验的文件替换场景素材。"""
     _require_idle(task_id)
-    scenes = _scenes_or_fail(task_id)
-    position = _scene_at(scenes, index)
+    with _editing(task_id):
+        scenes = _scenes_or_fail(task_id)
+        position = _scene_at(scenes, index)
 
-    # 上传目录和任务目录之外的路径一律拒绝，哪怕它确实存在。
-    resolved = scene_manifest.resolve_material(task_id, material_path)
-    resolved = _adopt_into_task(task_id, resolved)
-    scene = scenes[position]
-    scene["material"] = resolved
-    scene["kind"] = scene_manifest.material_kind(resolved)
-    scene["source"] = "local"
-    scene["locked"] = True
-    scene_manifest.save_scenes(task_id, scenes)
-    return scene
+        # 上传目录和任务目录之外的路径一律拒绝，哪怕它确实存在。
+        resolved = scene_manifest.resolve_material(task_id, material_path)
+        resolved = _adopt_into_task(task_id, resolved)
+        scene = scenes[position]
+        scene["material"] = resolved
+        scene["kind"] = scene_manifest.material_kind(resolved)
+        scene["source"] = "local"
+        scene["locked"] = True
+        scene_manifest.save_scenes(task_id, scenes)
+        return scene
 
 
 def _adopt_into_task(task_id: str, source: str) -> str:
@@ -357,25 +512,26 @@ def update_scene(
     文本框的副作用。
     """
     _require_idle(task_id)
-    scenes = _scenes_or_fail(task_id)
-    position = _scene_at(scenes, index)
-    scene = scenes[position]
+    with _editing(task_id):
+        scenes = _scenes_or_fail(task_id)
+        position = _scene_at(scenes, index)
+        scene = scenes[position]
 
-    narration_changed = False
-    if narration is not None:
-        text = str(narration).strip()
-        narration_changed = text != scene.get("narration", "")
-        scene["narration"] = text
-    if keyword is not None:
-        scene["keyword"] = str(keyword).strip()
-    if locked is not None:
-        scene["locked"] = bool(locked)
+        narration_changed = False
+        if narration is not None:
+            text = str(narration).strip()
+            narration_changed = text != scene.get("narration", "")
+            scene["narration"] = text
+        if keyword is not None:
+            scene["keyword"] = str(keyword).strip()
+        if locked is not None:
+            scene["locked"] = bool(locked)
 
-    extra: dict[str, Any] = {}
-    if narration_changed:
-        extra["audio_stale"] = True
-    scene_manifest.save_scenes(task_id, scenes, **extra)
-    return scene
+        extra: dict[str, Any] = {}
+        if narration_changed:
+            extra["audio_stale"] = True
+        scene_manifest.save_scenes(task_id, scenes, **extra)
+        return scene
 
 
 def delete_scene(task_id: str, index: Any) -> list[dict]:
@@ -385,16 +541,17 @@ def delete_scene(task_id: str, index: Any) -> list[dict]:
     是上一次已经花掉的算力。清理任务目录本来就由删除任务负责。
     """
     _require_idle(task_id)
-    scenes = _scenes_or_fail(task_id)
-    position = _scene_at(scenes, index)
-    if len(scenes) == 1:
-        raise SceneError("a video needs at least one scene")
-    removed = scenes.pop(position)
-    logger.info(
-        f"removed scene {position} from task {task_id}: {removed.get('material')}"
-    )
-    scene_manifest.save_scenes(task_id, scenes)
-    return scene_manifest.load(task_id)["scenes"]
+    with _editing(task_id):
+        scenes = _scenes_or_fail(task_id)
+        position = _scene_at(scenes, index)
+        if len(scenes) == 1:
+            raise SceneError("a video needs at least one scene")
+        removed = scenes.pop(position)
+        logger.info(
+            f"removed scene {position} from task {task_id}: {removed.get('material')}"
+        )
+        scene_manifest.save_scenes(task_id, scenes)
+        return scene_manifest.load(task_id)["scenes"]
 
 
 def reorder_scenes(task_id: str, order: Sequence[Any]) -> list[dict]:
@@ -404,19 +561,22 @@ def reorder_scenes(task_id: str, order: Sequence[Any]) -> list[dict]:
     变成一个需要猜的问题,而猜错的结果是成片里少了一段。
     """
     _require_idle(task_id)
-    scenes = _scenes_or_fail(task_id)
-    try:
-        positions = [int(value) for value in order]
-    except (TypeError, ValueError) as exc:
-        raise SceneError("scene order must be a list of whole numbers") from exc
+    with _editing(task_id):
+        scenes = _scenes_or_fail(task_id)
+        try:
+            positions = [int(value) for value in order]
+        except (TypeError, ValueError) as exc:
+            raise SceneError("scene order must be a list of whole numbers") from exc
 
-    if sorted(positions) != list(range(len(scenes))):
-        raise SceneError(
-            f"scene order must be a permutation of 0..{len(scenes) - 1}, "
-            f"got {positions}"
+        if sorted(positions) != list(range(len(scenes))):
+            raise SceneError(
+                f"scene order must be a permutation of 0..{len(scenes) - 1}, "
+                f"got {positions}"
+            )
+        scene_manifest.save_scenes(
+            task_id, [scenes[position] for position in positions]
         )
-    scene_manifest.save_scenes(task_id, [scenes[position] for position in positions])
-    return scene_manifest.load(task_id)["scenes"]
+        return scene_manifest.load(task_id)["scenes"]
 
 
 def set_locked(task_id: str, index: Any, locked: bool) -> dict:
@@ -715,12 +875,15 @@ def update_timing(
         duration=requested_duration,
         clip_speed=speed,
     )
-    scene = scene_manifest.patch_scene_timing(
-        task_id,
-        index,
-        trim_start=timing["trim_start"],
-        duration=timing["duration"],
-    )
+    # 只把写清单那一下圈进锁里。上面的 ``ensure_image_length`` 可能要重渲一
+    # 段画面，拿着锁去做它没必要。
+    with _editing(task_id):
+        scene = scene_manifest.patch_scene_timing(
+            task_id,
+            index,
+            trim_start=timing["trim_start"],
+            duration=timing["duration"],
+        )
     scene["clamped"] = timing["clamped"]
     scene["source_duration"] = timing["source_duration"]
     return scene
@@ -785,14 +948,15 @@ def fit_to_narration(task_id: str) -> dict:
 
 def _point_scene_at(task_id: str, index: int, material_path: str) -> None:
     """把某个场景指向一份新素材文件。供图片按新时长重渲后改写清单使用。"""
-    scenes = scene_manifest.load(task_id)["scenes"]
-    if not 0 <= index < len(scenes):
-        return
-    scenes[index]["material"] = scene_manifest.relative_media_path(
-        task_id, material_path
-    )
-    scenes[index]["kind"] = scene_manifest.material_kind(material_path)
-    scene_manifest.save_scenes(task_id, scenes)
+    with _editing(task_id):
+        scenes = scene_manifest.load(task_id)["scenes"]
+        if not 0 <= index < len(scenes):
+            return
+        scenes[index]["material"] = scene_manifest.relative_media_path(
+            task_id, material_path
+        )
+        scenes[index]["kind"] = scene_manifest.material_kind(material_path)
+        scene_manifest.save_scenes(task_id, scenes)
 
 
 def prepare_render(task_id: str) -> VideoParams:

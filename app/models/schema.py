@@ -757,6 +757,42 @@ class SceneListData(BaseModel):
     script: str = ""
 
 
+class SceneRegenJobData(BaseModel):
+    """排队中的一次重生成。``extra="allow"`` 的理由和场景一样：队列以后多带
+    一个字段，不该让界面整个打不开。"""
+
+    model_config = ConfigDict(extra="allow")
+
+    id: str
+    task_id: str = ""
+    index: int = 0
+    keyword: str = ""
+    image_style: Optional[str] = None
+    state: str = ""
+    error: str = ""
+    # 排在第几个，1 表示下一个就是它；正在出图的和已经结束的是 0。
+    position: int = 0
+    elapsed: float = 0.0
+    waited: float = 0.0
+
+
+class SceneRegenQueueData(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    jobs: List[SceneRegenJobData] = []
+    waiting: int = 0
+    running: Optional[SceneRegenJobData] = None
+    busy: bool = False
+
+
+class SceneRegenJobResponse(BaseResponse):
+    data: SceneRegenJobData
+
+
+class SceneRegenQueueResponse(BaseResponse):
+    data: SceneRegenQueueData
+
+
 class SceneListResponse(BaseResponse):
     data: SceneListData
 
