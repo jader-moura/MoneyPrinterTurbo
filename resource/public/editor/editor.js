@@ -45,6 +45,10 @@ const state = {
   queueWatching: false,
   // 已经重读过时间线的那些活，免得同一张图反复触发重读。
   queueSeen: [],
+  // 队列浮层收起没有。只是这台浏览器上的一点顺手，读不出来就当没收起。
+  queueCollapsed: (() => {
+    try { return !!localStorage.getItem("mpt_queue_collapsed"); } catch { return false; }
+  })(),
   adding: false,
   taskBusy: false,
   watching: false,
@@ -361,15 +365,30 @@ function drawQueue() {
 
   const running = state.queue.running;
   const waiting = state.queue.waiting || 0;
+  const failed = jobs.filter((job) => job.state === "failed").length;
+  ui.queue.classList.toggle("collapsed", state.queueCollapsed);
   const head = document.createElement("div");
   head.className = "queue-head";
   const title = document.createElement("span");
-  title.textContent = running
+  title.className = "queue-title";
+  // 收起来之后这一行是唯一还看得见的东西，所以失败的条数要写在这里——
+  // 否则一张图出错了而面板是收着的，用户永远不会知道。
+  const summary = running
     ? `Regenerating scene ${running.index + 1} · ${fmt(running.elapsed)}`
       + (waiting ? ` · ${waiting} waiting` : "")
     : waiting
       ? `${waiting} picture${waiting === 1 ? "" : "s"} waiting`
       : "Nothing left to regenerate";
+  title.textContent = (state.queueCollapsed ? "▸ " : "▾ ")
+    + summary
+    + (failed ? ` · ${failed} failed` : "");
+  title.title = state.queueCollapsed ? "Show the queue" : "Hide the queue";
+  title.addEventListener("click", () => {
+    state.queueCollapsed = !state.queueCollapsed;
+    try { localStorage.setItem("mpt_queue_collapsed", state.queueCollapsed ? "1" : ""); }
+    catch { /* 隐身窗口里存不了，收起状态就只在这一页有效 */ }
+    drawQueue();
+  });
   head.appendChild(title);
 
   if (jobs.some((job) => job.state === "done" || job.state === "failed")) {
@@ -401,7 +420,11 @@ function drawQueue() {
       label.textContent = `Scene ${job.index + 1}${term} · redrawn in ${fmt(job.elapsed)}`;
     } else {
       // 失败原因是服务端点名过的那一句（哪个源怎么失败的），照原样显示。
-      label.textContent = `Scene ${job.index + 1}${term} · failed: ${job.error}`;
+      // 只是把换行和连串空格压成一个空格：有些报错自带几行 ##### 分隔线，
+      // 照原样塞进这块浮层会把它撑成半屏高。完整那段话在 title 里。
+      const reason = String(job.error || "unknown error").replace(/\s+/g, " ").trim();
+      label.textContent = `Scene ${job.index + 1}${term} · failed: ${reason}`;
+      label.title = String(job.error || "");
     }
     row.appendChild(label);
 
