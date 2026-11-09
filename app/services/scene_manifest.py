@@ -190,6 +190,12 @@ def _normalise_scene(raw: Any, index: int) -> dict:
         "clip_duration": _coerce_duration(record.get("clip_duration")),
         "locked": bool(record.get("locked")),
     }
+    # 画风同样只在用户显式挑过之后才出现，和下面的时间线字段同一个道理：
+    # 无条件补一个默认值会让每条老记录都长出一个新键，而丢掉它会让用户在
+    # 编辑器里挑的画风存不下来。
+    style = str(record.get("image_style") or "").strip()
+    if style:
+        scene["image_style"] = style
     # 时间线字段只在用户真的设置过之后才出现，所以这里按"有才带"处理：
     # 这个函数同时跑在读和写两条路上，无条件补默认值会让每条老记录都长出
     # 两个新键,而无条件丢掉则会让拖好的入点存不进去。

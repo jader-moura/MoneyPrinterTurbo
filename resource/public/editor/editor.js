@@ -29,6 +29,12 @@ const state = {
   scenes: [],
   speed: 1,
   settings: {},
+  // 可挑的画风，以及这条片子出片时用的那个。后者是重生成的默认值：
+  // 以前这里什么都不知道，出图只能用 API 进程启动时读到的那份全局配置,
+  // 于是漫画风的片子补出过一张油画。
+  imageStyles: [],
+  imageStyle: "",
+  imageStylePinned: false,
   adding: false,
   taskBusy: false,
   watching: false,
@@ -152,6 +158,9 @@ async function load(taskId) {
     state.scenes = data.scenes || [];
     state.speed = data.clip_speed || 1;
     state.settings = data.render_settings || {};
+    state.imageStyles = data.image_styles || [];
+    state.imageStyle = data.image_style || "";
+    state.imageStylePinned = !!data.image_style_pinned;
     state.selected = state.scenes.length ? 0 : -1;
     state.playhead = 0;
     state.loadedClip = -1;
@@ -184,6 +193,9 @@ async function refresh() {
   state.scenes = data.scenes || [];
   state.speed = data.clip_speed || 1;
   state.settings = data.render_settings || {};
+  state.imageStyles = data.image_styles || [];
+  state.imageStyle = data.image_style || "";
+  state.imageStylePinned = !!data.image_style_pinned;
   state.selected = Math.min(keep, state.scenes.length - 1);
   state.loadedClip = -1;
   applyAspect();
@@ -676,6 +688,14 @@ function drawInspector() {
   const keyword = field("Keyword", "input", scene.keyword || "");
   ui.inspBody.append(keyword.wrap);
 
+  // 画风紧跟在关键词下面：关键词说画什么，画风说画成什么样，改完一起
+  // 重生成。默认是这条片子出片时用的那个风格——以前重生成读的是 API
+  // 进程"现在"的全局配置，漫画风的片子因此补出过一张油画。
+  const style = state.imageStyles.length
+    ? stylePicker(scene.image_style || "")
+    : null;
+  if (style) ui.inspBody.append(style.wrap);
+
   // 生成新画面是这个面板里最常用的动作：画面不对时要改的通常就是关键词，
   // 改完紧接着就要重出一张。所以它紧贴在关键词下面，而不是和锁定、删除
   // 挤在最底下那一排。
@@ -692,7 +712,12 @@ function drawInspector() {
     try {
       await run("Generating a new picture for this scene", () =>
         call("POST", scenePath(scene.index) + "/material",
-          { keyword: keyword.input.value || null }));
+          {
+            keyword: keyword.input.value || null,
+            // 下拉框在就把它的值发出去，空字符串是"和这条片子一样"，
+            // 和"没有下拉框"(null,沿用上次挑的)不是一回事。
+            image_style: style ? style.input.value : null,
+          }));
     } finally {
       clearInterval(tick);
       regenerate.disabled = false;
@@ -781,6 +806,11 @@ function drawAddForm() {
   keyword.input.placeholder = "a hand dropping a coin into a jar";
   ui.inspBody.appendChild(keyword.wrap);
 
+  // 和重生成那边同一个下拉框，默认同样是这条片子的风格：补一张画面想要的
+  // 本来就是"再来一张一样的"，而不是在漫画片子里插一张油画。
+  const style = state.imageStyles.length ? stylePicker("") : null;
+  if (style) ui.inspBody.append(style.wrap);
+
   const create = button("Generate and add", "primary", async () => {
     const term = keyword.input.value.trim();
     if (!term) { say("Enter a keyword for the new picture first.", "warn"); return; }
@@ -793,7 +823,10 @@ function drawAddForm() {
     try {
       await run("Generating an extra picture", async () => {
         await call("POST", `/tasks/${encodeURIComponent(state.taskId)}/scenes`,
-          { keyword: term });
+          {
+            keyword: term,
+            image_style: style ? style.input.value : null,
+          });
         state.adding = false;
         // 新的一段在末尾，选中它，这样生成完就能直接接着改。
         state.selected = state.scenes.length;
@@ -852,6 +885,54 @@ function field(label, tag, value, type) {
   input.value = value;
   wrap.append(caption, input);
   return { wrap, input };
+}
+
+/** 画风下拉框。空值表示"和这条片子一样",也就是出片时用的那个风格。
+
+    id 列表由 API 给出(服务端的预设表),这里只负责显示名。遇到不认识的新
+    预设就把 id 本身排版出来,而不是漏掉一个选项。 */
+function stylePicker(selected) {
+  const wrap = document.createElement("div");
+  wrap.className = "field";
+  const caption = document.createElement("label");
+  caption.textContent = "Image style";
+  const input = document.createElement("select");
+  for (const id of ["", ...state.imageStyles]) {
+    const option = document.createElement("option");
+    option.value = id;
+    option.textContent = id ? styleLabel(id) : sameStyleLabel();
+    input.appendChild(option);
+  }
+  input.value = state.imageStyles.includes(selected) ? selected : "";
+  wrap.append(caption, input);
+  return { wrap, input };
+}
+
+const STYLE_LABELS = {
+  photorealistic: "Photorealistic", cinematic: "Cinematic",
+  monochrome: "Black and white", vintage_film: "Vintage film",
+  anime: "Anime", digital_art: "Digital art", oil_painting: "Oil painting",
+  watercolour: "Watercolour", three_d: "3D render", flat_vector: "Flat vector",
+  stickman: "Stickman explainer", comic: "Comic book",
+};
+
+function styleLabel(id) {
+  return STYLE_LABELS[id]
+    || String(id).replace(/_/g, " ").replace(/^./, (c) => c.toUpperCase());
+}
+
+function sameStyleLabel() {
+  // 说出名字，用户才知道"一样"是哪一样。自定义模板配不上任何预设名，
+  // 那就只说"一样"。
+  //
+  // 这个功能之前出的片子没有记下画风，对它们只能按设置里现在那个来，
+  // 所以话也得这么说——否则就是对着一条漫画风的片子说"和这条片子一样"，
+  // 而实际画出来的是设置里那个风格。
+  const name = state.imageStyle ? styleLabel(state.imageStyle) : "";
+  if (state.imageStylePinned) {
+    return name ? `Same as this video (${name})` : "Same as this video";
+  }
+  return name ? `From settings (${name})` : "From settings";
 }
 
 function button(label, extra, onClick) {

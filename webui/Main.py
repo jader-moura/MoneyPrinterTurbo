@@ -6434,6 +6434,15 @@ def _render_video_settings(panel, params):
                             ] = style_template
                         saved_template = style_template
 
+                # 把用户此刻看到的模板一起提交，让它跟着任务落盘。
+                #
+                # 两个毛病都出在"风格只存在全局配置里"上：一是后台任务持锁
+                # 时这里的写入会被暂存，config.app 里还是旧模板，于是出图用
+                # 的和界面显示的不是一个风格；二是审片时在时间线编辑器里重
+                # 生成一张图，那是 API 进程，读的是它自己那份配置——漫画风的
+                # 片子因此补出过一张油画。参数里带上它，这两件事都不会发生。
+                params.image_prompt_template = saved_template
+
                 # 显示真正会发出去的提示词。风格名只是概括，模板才是事实，
                 # 二者不一致时用户应当看得见。
                 if saved_template:

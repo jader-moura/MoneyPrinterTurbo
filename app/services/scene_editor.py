@@ -34,6 +34,7 @@ from typing import Any, Sequence
 
 from loguru import logger
 
+from app.models import image_style as image_style_model
 from app.models.schema import VideoAspect, VideoConcatMode, VideoParams
 from app.services import material, scene_manifest, task_artifacts, timeline
 from app.services import state as sm
@@ -103,12 +104,20 @@ def _scene_at(scenes: list[dict], index: Any) -> int:
 
 
 def regenerate_material(
-    task_id: str, index: Any, *, keyword: str | None = None
+    task_id: str,
+    index: Any,
+    *,
+    keyword: str | None = None,
+    image_style: str | None = None,
 ) -> dict:
     """重新取这一个场景的素材。
 
     ``keyword`` 给了就同时改写场景关键词——用户看到画面不对时,改的往往正是
     关键词,所以这两件事应该一次做完,而不是让用户先改关键词再点一次重生成。
+
+    ``image_style`` 给了就只给这一张换个画风;不给就用任务自己记下的那个,
+    也就是出片时真正用的那个。换过的风格记在场景上,界面下次打开还显示它,
+    用户不用每次重新挑。
 
     对库存素材源（Pexels 等）有一个已知限制：搜索结果有缓存,同一个关键词
     重新生成很可能拿回同一个文件。本地出图的源每次都是新的采样,所以重生成
@@ -121,7 +130,26 @@ def regenerate_material(
     scene = scenes[position]
 
     term = str(keyword if keyword is not None else scene.get("keyword") or "").strip()
-    new_path, source = _produce_material(task_id, term, what=f"scene {position}")
+    # 三种情况要分开，否则界面上那个下拉框会说谎。
+    #
+    # 不传（``None``）：沿用这一段上次挑过的风格。不这样的话，在编辑器里把
+    # 某一段改成漫画风，下一次重生成又会悄悄变回去。老版客户端和不画下拉框
+    # 的界面走的都是这条路。
+    # 传空字符串：用户在下拉框里选了"和这条片子一样"，那就回到任务记下的
+    # 风格，并且把这一段上记着的那个选择清掉——留着它，下次打开界面显示的
+    # 还是旧选择，而画出来的已经不是它了。
+    # 传风格 id：只给这一张换画风，并记住它。
+    if image_style is None:
+        style = str(scene.get("image_style") or "").strip()
+    else:
+        style = str(image_style).strip()
+        if style:
+            scene["image_style"] = style
+        else:
+            scene.pop("image_style", None)
+    new_path, source = _produce_material(
+        task_id, term, what=f"scene {position}", image_style=style
+    )
     scene["material"] = new_path
     scene["kind"] = scene_manifest.material_kind(new_path)
     scene["source"] = source
@@ -132,12 +160,36 @@ def regenerate_material(
     return scene
 
 
+def _image_prompt_template(params: VideoParams, image_style: str | None) -> str:
+    """这一次出图要用的画风模板。
+
+    不指定风格就用任务自己记下的那个——出片时真正用的那个,而不是
+    config.toml "现在"的值。审片的编辑器跑在 API 进程里,那份配置和 WebUI
+    的不是同一份内存,也不会跟着 WebUI 的改动更新,漫画风的片子因此补出过
+    一张油画。
+
+    未知的风格 id 直接报错,不静默回退成别的画风：悄悄换一种风格正是这里
+    要修的毛病。
+    """
+    requested = str(image_style or "").strip()
+    if not requested:
+        return str(getattr(params, "image_prompt_template", "") or "")
+    template = image_style_model.template_for_style(requested)
+    if not template:
+        raise SceneError(
+            f"unknown image style {requested!r}; choose one of: "
+            + ", ".join(image_style_model.image_style_ids())
+        )
+    return template
+
+
 def _produce_material(
     task_id: str,
     term: str,
     *,
     what: str,
     advice: str = "replace this scene with your own file instead",
+    image_style: str | None = None,
 ) -> tuple[str, str]:
     """按关键词取一份素材，返回 ``(文件路径, 素材源)``。
 
@@ -157,6 +209,7 @@ def _produce_material(
         )
 
     clip_duration = int(getattr(params, "video_clip_duration", 5) or 5)
+    prompt_template = _image_prompt_template(params, image_style)
     logger.info(
         f"generating {what} of task {task_id} "
         f"from source {source!r} with keyword {term!r}"
@@ -176,6 +229,8 @@ def _produce_material(
             max_clip_duration=clip_duration,
             match_script_order=True,
             image_motion=getattr(params, "image_motion", None) or "zoom",
+            # 画风跟着任务走（或者跟着用户这次挑的走），不跟着全局配置走。
+            image_prompt_template=prompt_template,
         )
     except Exception as exc:
         # 供应商失败必须点名是谁失败了，不能静默换源，也不能留下半条清单。
@@ -187,7 +242,12 @@ def _produce_material(
 
 
 def add_scene(
-    task_id: str, *, keyword: str, narration: str = "", after: Any = None
+    task_id: str,
+    *,
+    keyword: str,
+    narration: str = "",
+    after: Any = None,
+    image_style: str | None = None,
 ) -> dict:
     """按关键词生成一段新画面，插进时间线。
 
@@ -197,15 +257,22 @@ def add_scene(
 
     ``after`` 不给就追加到末尾,这也是界面上那个加号的行为。新场景的台词默认
     为空:这里只补画面,不动旁白,否则会悄悄让已经录好的配音失效。
+
+    ``image_style`` 不给就跟着任务记下的风格,补出来的画面和片子里原有的是
+    同一种风格——补画面的人想要的本来就是"再来一张一样的",而不是一张漫画
+    片子里突然插进来的油画。给了就按它来,并记在这一段上,之后重生成这一段
+    还是这个风格。
     """
     _require_idle(task_id)
     scenes = scene_manifest.load(task_id)["scenes"]
     term = str(keyword or "").strip()
+    style = str(image_style or "").strip()
     new_path, source = _produce_material(
         task_id,
         term,
         what="a new scene",
         advice="add your own file as a scene instead",
+        image_style=style,
     )
 
     scene = {
@@ -217,6 +284,8 @@ def add_scene(
         "source": source,
         "locked": True,
     }
+    if style:
+        scene["image_style"] = style
     position = len(scenes) if after is None else _scene_at(scenes, after) + 1
     scenes.insert(position, scene)
     scene_manifest.save_scenes(task_id, scenes)
@@ -502,6 +571,31 @@ def describe(task_id: str, endpoint: str = "", *, with_timing: bool = False) -> 
         "subtitle_path": os.path.basename(str(manifest.get("subtitle_path") or "")),
         "script": manifest["script"],
     }
+    # 画风：可选项，以及这条片子出片时用的那个。界面要默认选中后者——
+    # 编辑器以前根本不知道风格这件事，重生成只能用 API 进程"现在"的配置。
+    #
+    # 只有按关键词作图的来源才有画风可挑，别的来源这里是空列表，界面据此
+    # 不画那个下拉框。
+    supports_style = (
+        str(getattr(params, "video_source", "") or "")
+        in image_style_model.IMAGE_STYLE_SOURCES
+    )
+    payload["image_styles"] = (
+        list(image_style_model.image_style_ids()) if supports_style else []
+    )
+    # 这条片子出片前的任务没有记过画风（这个字段比它们新），那时唯一能说的
+    # 就是"按设置来"。界面要分得清这两种情况，否则对一个老任务说"和这条片子
+    # 一样"等于撒谎——它用的其实是设置里现在那个风格。
+    pinned = str(getattr(params, "image_prompt_template", "") or "").strip()
+    payload["image_style_pinned"] = bool(pinned)
+    task_style = image_style_model.style_for_template(
+        tm.resolve_image_prompt_template(params) if params is not None else ""
+    )
+    # 自定义模板配不上任何预设名,这时不谎报一个预设,界面只说"和这条片子
+    # 一样"就够了。
+    payload["image_style"] = (
+        "" if task_style == image_style_model.IMAGE_STYLE_CUSTOM else task_style
+    )
     payload["planned_total"] = round(windows[-1]["end"], 3) if windows else 0.0
     # 旁白总长无条件带上：审片列表要靠它说清楚"画面铺不满旁白,所以会轮播"。
     # 这只是读一次清单，不探测素材，所以不必等 with_timing。

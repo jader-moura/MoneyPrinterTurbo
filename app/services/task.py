@@ -437,6 +437,44 @@ def generate_script(task_id, params):
     return video_script
 
 
+def resolve_image_prompt_template(params) -> str:
+    """这次生成到底用哪个画风模板。
+
+    任务自己记下的优先，没记过才读 config.toml。顺序不能颠倒：配置是"现在"
+    的设置，而一个任务从出片到审片之间可能过了很久，中间换过风格；审片时
+    重生成一张图还跑在另一个进程里，读到的是它启动时载入的那一份配置。
+    漫画风的片子因此补出过一张油画——这个函数就是为了让那件事不再发生。
+
+    The task's own record wins; the config is only the fallback. The order
+    matters: the config is the *current* setting, and a task may be reviewed
+    long after it was made, from another process holding its own loaded copy.
+    """
+    pinned = str(getattr(params, "image_prompt_template", "") or "").strip()
+    if pinned:
+        return pinned
+    return str(config.app.get("openai_image_prompt_template", "") or "").strip()
+
+
+def pin_image_prompt_template(params) -> str:
+    """把这次真正用的画风模板写回 params，使它跟着任务一起落盘。
+
+    只在文生图的素材源上做，而且只在参数还没带模板时做：用户显式提交的
+    模板不能被配置覆盖。写回之后 ``save_script_data`` 会把它存进 script.json,
+    审片和重生成都从那里读,不再问"现在"的配置。
+    """
+    if str(getattr(params, "video_source", "") or "") not in (
+        material.GENERATED_IMAGE_SOURCES
+    ):
+        return ""
+    template = resolve_image_prompt_template(params)
+    if template and not str(
+        getattr(params, "image_prompt_template", "") or ""
+    ).strip():
+        params.image_prompt_template = template
+        logger.info(f"image style pinned to this task: template={template!r}")
+    return template
+
+
 def generate_terms(task_id, params, video_script):
     logger.info("\n\n## generating video terms")
     video_terms = params.video_terms
@@ -471,9 +509,7 @@ def generate_terms(task_id, params, video_script):
         # 火柴人那套预设要的是"一个小人在做某件事"，描述却写了张大脑扫描图
         # 的话，两半会互相打架。
         style_template = (
-            str(config.app.get("openai_image_prompt_template", "") or "")
-            if wants_visual_prompt
-            else ""
+            resolve_image_prompt_template(params) if wants_visual_prompt else ""
         )
         video_terms = llm.generate_terms_per_line(
             video_subject=params.video_subject,
@@ -951,6 +987,8 @@ def get_video_materials(
                 max_clip_duration=params.video_clip_duration,
                 match_script_order=keep_script_order,
                 image_motion=params.image_motion,
+                # 出片用的画风。和下面重生成读的是同一个值，两者不会分叉。
+                image_prompt_template=resolve_image_prompt_template(params),
                 # 素材阶段占用 40%~50%：每下完一个文件推进一次，慢速网络下
                 # 进度条不再长时间停在 40%。
                 progress_callback=_stage_progress_reporter(task_id, 40, 50),
@@ -1174,6 +1212,10 @@ def generate_final_videos(
         )
         logger.info(f"\n\n## combining video: {index} => {combined_video_path}")
         used_video_paths = []
+        # 每两段画面的交界时刻。转场音效要响在点上,而"点在哪里"只有切片那一层
+        # 知道——合成之后就只剩一条拼好的 MP4 了。没选音效时这个列表照样会填,
+        # 但不会有人读它。
+        clip_boundaries: list[float] = []
         batch_options = (
             {
                 "source_usage": source_usage,
@@ -1201,6 +1243,7 @@ def generate_final_videos(
             ),
             # 空列表时 combine_videos 走原来那条路，行为与本功能上线前一致。
             edit_list=edit_list or None,
+            clip_boundaries=clip_boundaries,
             **batch_options,
         )
         if allocate_batch_materials:
@@ -1267,6 +1310,7 @@ def generate_final_videos(
             output_file=final_video_path,
             params=params,
             bgm_file_override=bgm_file_override,
+            transition_sound_times=clip_boundaries,
         )
         if (
             video_music_provider is not None
@@ -1910,6 +1954,10 @@ def _run_pipeline(
             "ffmpeg is not available; install ffmpeg or set app.ffmpeg_path "
             "in config.toml to a working ffmpeg executable",
         )
+
+    # 0b. 把这次用的画风钉在参数里，之后的每一步（写画面描述、出图、审片时
+    # 重生成）都读它，不再各自去问"现在"的配置。
+    pin_image_prompt_template(params)
 
     # 1. Generate script
     if runs("script"):

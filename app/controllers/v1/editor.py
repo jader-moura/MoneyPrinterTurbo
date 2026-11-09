@@ -156,6 +156,7 @@ def add_scene(
             keyword=body.keyword,
             narration=body.narration or "",
             after=body.after,
+            image_style=body.image_style,
         ),
     )
     return utils.get_response(200, _scene_payload(task_id, scene["index"]))
@@ -197,7 +198,9 @@ def regenerate_scene_material(
     _handle(
         task_id,
         request_id,
-        lambda: scene_editor.regenerate_material(task_id, index, keyword=body.keyword),
+        lambda: scene_editor.regenerate_material(
+            task_id, index, keyword=body.keyword, image_style=body.image_style
+        ),
     )
     return utils.get_response(200, _scene_payload(task_id, index))
 

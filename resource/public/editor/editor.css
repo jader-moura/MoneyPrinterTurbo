@@ -234,7 +234,7 @@ body {
 .insp-body { display: flex; flex-direction: column; gap: 11px; }
 .field { display: flex; flex-direction: column; gap: 5px; }
 .field label { font-size: 12px; color: var(--muted); }
-.field input, .field textarea {
+.field input, .field textarea, .field select {
   padding: 6px 8px;
   background: var(--panel-2);
   border: 1px solid var(--line);
@@ -245,6 +245,8 @@ body {
   width: 100%;
 }
 .field textarea { resize: vertical; min-height: 66px; }
+/* 下拉箭头和展开的菜单交给浏览器画，深色由 :root 上的 color-scheme 管。 */
+.field select { cursor: pointer; }
 .row { display: flex; gap: 8px; }
 .row > * { flex: 1; min-width: 0; }
 .hint { font-size: 12px; color: var(--muted); margin: 0; }

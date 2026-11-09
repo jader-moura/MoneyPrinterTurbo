@@ -115,6 +115,24 @@ class VideoParams(BaseModel):
     video_aspect: Optional[VideoAspect] = VideoAspect.portrait
     video_fit_mode: VideoFitMode = VideoFitMode.cover
     image_motion: ImageMotion = ImageMotion.zoom
+
+    # 这次生成用的图片风格提示词模板（``{term}`` 会替换成脚本关键词）。空
+    # 字符串表示"按 config.toml 当前的设置来"，与本字段上线前完全一致，所以
+    # 历史任务和不带它的 API 请求行为都不变。
+    #
+    # 为什么要钉在任务里：风格原本只有 config.toml 一个来源，而那是"现在"
+    # 的设置。审片时在时间线编辑器里重生成一张图，跑的是 API 进程、读的是
+    # 它自己那份早已载入内存的配置——于是用漫画风出的片子，补拍出来的是
+    # 油画。任务开始时把当时真正用的模板记下来，重生成就不再依赖"现在"。
+    #
+    # The image-style prompt template this run used. Empty means "whatever
+    # config.toml says now", which is exactly the behaviour from before this
+    # field existed. Pinning it per task is the whole point: the style used to
+    # live only in config.toml, which is the *current* setting, so
+    # regenerating one scene later -- in another process, holding its own
+    # loaded copy of that config -- could draw an oil painting into a
+    # comic-book video.
+    image_prompt_template: Optional[str] = ""
     video_concat_mode: Optional[VideoConcatMode] = VideoConcatMode.random
     video_transition_mode: Optional[VideoTransitionMode] = None
     video_clip_duration: int = Field(default=5, ge=1)
@@ -657,9 +675,14 @@ class SceneRegenerateRequest(BaseModel):
     """重新生成这一个场景的素材。
 
     ``keyword`` 给了就同时改写场景关键词——画面不对时要改的通常正是它。
+
+    ``image_style`` 给了就只给这一张换个画风（预设 id 见
+    ``app/models/image_style.py``）。不给就沿用任务自己记下的风格,也就是
+    出片时真正用的那个。
     """
 
     keyword: Optional[str] = None
+    image_style: Optional[str] = None
 
 
 class SceneReplaceRequest(BaseModel):
@@ -674,11 +697,16 @@ class SceneAddRequest(BaseModel):
     ``after`` 是插入位置（插在该下标之后）；不给就追加到末尾。
     ``narration`` 默认留空：补画面不该顺手改旁白，否则会悄悄让已录好的
     配音失效。
+
+    ``image_style`` 给了就用这个画风生成（预设 id 见
+    ``app/models/image_style.py``）；不给就用任务自己记下的那个，补出来的
+    画面和片子里原有的画面是同一种风格。
     """
 
     keyword: str
     narration: Optional[str] = None
     after: Optional[int] = Field(default=None, ge=0)
+    image_style: Optional[str] = None
 
 
 class SceneTimingRequest(BaseModel):

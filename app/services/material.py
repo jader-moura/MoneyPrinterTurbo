@@ -1489,7 +1489,7 @@ def _openai_image_size(video_aspect: VideoAspect) -> str:
     return OPENAI_IMAGE_DEFAULT_SIZES.get(VideoAspect(video_aspect), "1024x1024")
 
 
-def _openai_image_prompt(search_term: str) -> str:
+def _openai_image_prompt(search_term: str, prompt_template: str = "") -> str:
     """
     把脚本关键词包装成最终提示词。
 
@@ -1503,8 +1503,14 @@ def _openai_image_prompt(search_term: str) -> str:
     留空或不含占位符时退回关键词原文，行为与旧版本完全一致。占位符
     替换失败（如模板误写了格式化语法）也回退原文，不让配置错误中断
     整个生成任务。
+
+    ``prompt_template`` 不为空时优先于配置。任务自己记下的风格必须盖得过
+    "现在"的全局设置：审片时重生成一张图跑在另一个进程里，那份配置可能
+    早已不是出片时的那一份，用漫画风出的片子会补出一张油画。
     """
-    template = str(config.app.get("openai_image_prompt_template", "") or "").strip()
+    template = str(prompt_template or "").strip() or str(
+        config.app.get("openai_image_prompt_template", "") or ""
+    ).strip()
     if not template or "{term}" not in template:
         return search_term
     try:
@@ -1816,6 +1822,7 @@ def generate_images_openai(
     minimum_duration: int,
     video_aspect: VideoAspect = VideoAspect.portrait,
     save_dir: str = "",
+    prompt_template: str = "",
 ) -> List[MaterialInfo]:
     """
     用 OpenAI 兼容文生图接口为一个脚本关键词生成一张图片并保存到本地。
@@ -1831,7 +1838,7 @@ def generate_images_openai(
     image_size = _openai_image_size(aspect)
     payload = {
         "model": model,
-        "prompt": _openai_image_prompt(search_term),
+        "prompt": _openai_image_prompt(search_term, prompt_template),
         "n": 1,
         "size": image_size,
     }
@@ -1984,6 +1991,7 @@ def _download_videos_openai_image_on_demand(
     image_generator: Callable[..., List[MaterialInfo]] | None = None,
     provider: str = "openai_image",
     codex_image_context=None,
+    prompt_template: str = "",
 ) -> List[str]:
     """
     按脚本片段顺序逐张生成 OpenAI 兼容文生图素材，凑够所需总时长立即停止。
@@ -2021,6 +2029,11 @@ def _download_videos_openai_image_on_demand(
     if image_generator is None:
         image_generator = generate_images_openai
     generation_options = {}
+    # Codex 那条路自己拼提示词（见 ``generate_images_codex``），从来不吃这个
+    # 模板，所以只有 OpenAI 兼容那条传。为空时一个参数都不多传，注入假生成
+    # 器的调用方看到的签名和以前完全一样。
+    if prompt_template and provider != "codex_image":
+        generation_options["prompt_template"] = prompt_template
     if provider == "codex_image":
         try:
             codex_image_context = (
@@ -2438,9 +2451,13 @@ def download_videos(
     image_motion: ImageMotion = ImageMotion.zoom,
     jalapeno_video_endpoint: volcengine_seedance.SeedanceEndpoint | None = None,
     codex_image_context=None,
+    image_prompt_template: str = "",
 ) -> List[str]:
     """
     搜索并下载覆盖配音时长所需的素材，返回本地文件路径。
+
+    ``image_prompt_template`` 只对文生图的素材源有意义：任务记下的画风模板
+    要能盖过 config.toml "现在"的值。留空就按配置来，与以前一致。
 
     ``progress_callback`` 可选：库存素材（Pexels、Pixabay、Coverr）每下完一个
     文件就以 0~1 的完成比例调用一次，供任务层推进进度条。按需生成的付费
@@ -2559,6 +2576,7 @@ def download_videos(
             max_clip_duration=max_clip_duration,
             material_directory=material_directory,
             image_motion=image_motion,
+            prompt_template=str(image_prompt_template or ""),
             **image_options,
         )
 
