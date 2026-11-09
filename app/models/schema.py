@@ -120,6 +120,22 @@ class VideoParams(BaseModel):
     video_clip_duration: int = Field(default=5, ge=1)
     video_clip_speed: Optional[float] = 1.0
     match_materials_to_script: bool = False
+    # 逐句生成画面关键词：每一句旁白各要一个"这句话该配什么画面"的词，
+    # 而不是给整篇脚本要固定几个主题词再按下标配对。关掉时行为与以前完全
+    # 一致。默认打开：固定条数的词在下游按下标配给旁白,条数不等就必然错配
+    # ——12 个主题词配 28 句旁白时,用户听到的是"早餐",看到的是超市货架。
+    # 代价是按句子数出图、付费素材源花费上升,但错配的画面本来就等于白花。
+    #
+    # One search term per narration line instead of a fixed number of topics
+    # for the whole script. On by default: a fixed count is paired with the
+    # narration by index downstream, so unequal counts mismatch by
+    # construction — 12 topics against 28 lines put the supermarket picture
+    # under the sentence about breakfast.
+    #
+    # 只在"第一次生成画面"时起作用：它属于 terms 阶段,而审片之后的渲染
+    # (start_from="materials") 根本不跑那个阶段,所以重新出片不会再问一次
+    # 模型,也不会重新生成任何图片。
+    align_terms_to_narration: bool = True
     video_count: int = Field(default=1, ge=1)
 
     # Pictures generated on this machine rather than stock footage searched for

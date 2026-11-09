@@ -551,6 +551,8 @@
     "Open Timeline Editor": "Apri l'editor timeline",
     "Timeline Editor Hint": "Preferisci una timeline in stile CapCut? Lì puoi tagliare le clip, impostarne la durata e trascinarle.",
     "Timeline Editor Unavailable": "L'editor timeline richiede il server API, che non risponde su {base}. Avvialo con `python main.py` oppure usa `scripts/start-local.sh`, che ora lo avvia per te.",
-    "Pick Scene To Replace": "Quale scena?"
+    "Pick Scene To Replace": "Quale scena?",
+    "Align Visuals To Narration": "Allinea ogni immagine alla sua battuta",
+    "Align Visuals To Narration Help": "Chiede al modello di cosa parla ogni battuta e genera un'immagine per quella battuta, invece di pochi temi per l'intero copione. Risolve le immagini che appartengono a un'altra parte del video. Produce un'immagine per battuta, quindi le fonti a pagamento costano di più."
   }
 }

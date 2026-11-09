@@ -551,6 +551,8 @@
     "Open Timeline Editor": "Zaman çizelgesi düzenleyicisini aç",
     "Timeline Editor Hint": "CapCut tarzı bir zaman çizelgesi mi istiyorsunuz? Orada klipleri kırpabilir, her birinin süresini ayarlayabilir ve sürükleyebilirsiniz.",
     "Timeline Editor Unavailable": "Zaman çizelgesi düzenleyicisi API sunucusuna ihtiyaç duyar, ancak {base} yanıt vermiyor. `python main.py` ile başlatın veya artık onu da başlatan `scripts/start-local.sh` dosyasını kullanın.",
-    "Pick Scene To Replace": "Hangi sahne?"
+    "Pick Scene To Replace": "Hangi sahne?",
+    "Align Visuals To Narration": "Her görseli kendi anlatım satırına eşle",
+    "Align Visuals To Narration Help": "Tüm senaryo için birkaç konu almak yerine, her konuşulan satırın neyle ilgili olduğunu modele sorar ve o satır için görsel üretir. Videonun başka bir bölümüne ait görselleri düzeltir. Satır başına bir görsel ürettiği için ücretli kaynaklar daha pahalıya gelir."
   }
 }

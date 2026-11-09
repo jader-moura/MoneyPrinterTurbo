@@ -551,6 +551,8 @@
     "Open Timeline Editor": "Ouvrir l'éditeur de montage",
     "Timeline Editor Hint": "Vous préférez une timeline comme CapCut ? Vous pouvez y rogner les clips, définir leur durée et les déplacer.",
     "Timeline Editor Unavailable": "L'éditeur de montage a besoin du serveur d'API, qui ne répond pas sur {base}. Lancez-le avec `python main.py`, ou utilisez `scripts/start-local.sh`, qui le démarre désormais.",
-    "Pick Scene To Replace": "Quelle scène ?"
+    "Pick Scene To Replace": "Quelle scène ?",
+    "Align Visuals To Narration": "Aligner chaque image sur sa ligne de narration",
+    "Align Visuals To Narration Help": "Demande au modèle ce dont parle chaque ligne et génère une image pour cette ligne, au lieu de quelques thèmes pour tout le script. Corrige les images qui appartiennent à une autre partie de la vidéo. Produit une image par ligne, donc les sources payantes coûtent plus cher."
   }
 }

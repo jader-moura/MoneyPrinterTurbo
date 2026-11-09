@@ -551,6 +551,8 @@
     "Open Timeline Editor": "Obre l'editor de línia de temps",
     "Timeline Editor Hint": "Prefereixes una línia de temps a l'estil CapCut? Allà pots retallar clips, definir quant dura cadascun i arrossegar-los.",
     "Timeline Editor Unavailable": "L'editor de línia de temps necessita el servidor d'API, que no respon a {base}. Inicia'l amb `python main.py`, o fes servir `scripts/start-local.sh`, que ara l'arrenca per tu.",
-    "Pick Scene To Replace": "Quina escena?"
+    "Pick Scene To Replace": "Quina escena?",
+    "Align Visuals To Narration": "Ajusta cada imatge a la seva línia de narració",
+    "Align Visuals To Narration Help": "Pregunta al model de què tracta cada línia parlada i genera una imatge per a aquella línia, en lloc d'uns quants temes per a tot el guió. Corregeix imatges que pertanyen a una altra part del vídeo. Genera una imatge per línia, així que les fonts de pagament costen més."
   }
 }

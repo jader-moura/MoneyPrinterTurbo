@@ -806,6 +806,8 @@
     "Open Timeline Editor": "Open the timeline editor",
     "Timeline Editor Hint": "Prefer a CapCut-style timeline? Trim clips, set how long each one holds and drag them around there.",
     "Timeline Editor Unavailable": "The timeline editor needs the API server, which is not answering at {base}. Start it with `python main.py`, or use `scripts/start-local.sh`, which now starts it for you.",
-    "Pick Scene To Replace": "Which scene?"
+    "Pick Scene To Replace": "Which scene?",
+    "Align Visuals To Narration": "Match each picture to its narration line",
+    "Align Visuals To Narration Help": "Ask the model what each spoken line is about and generate a picture for that line, instead of a few topics for the whole script. Fixes pictures that belong to a different part of the video. Produces one picture per line, so paid material sources cost more."
   }
 }

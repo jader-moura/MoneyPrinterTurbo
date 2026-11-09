@@ -551,6 +551,8 @@
     "Open Timeline Editor": "Timeline-Editor öffnen",
     "Timeline Editor Hint": "Lieber eine Timeline wie in CapCut? Dort kannst du Clips kürzen, ihre Standzeit festlegen und sie verschieben.",
     "Timeline Editor Unavailable": "Der Timeline-Editor braucht den API-Server, der unter {base} nicht antwortet. Starte ihn mit `python main.py` oder nutze `scripts/start-local.sh`, das ihn jetzt mitstartet.",
-    "Pick Scene To Replace": "Welche Szene?"
+    "Pick Scene To Replace": "Welche Szene?",
+    "Align Visuals To Narration": "Bilder auf die Erzählung abstimmen",
+    "Align Visuals To Narration Help": "Fragt das Modell für jede gesprochene Zeile, welches Bild dazu passt, statt einige Themen für das ganze Skript zu nehmen. Behebt Bilder, die zu einem anderen Teil des Videos gehören. Erzeugt ein Bild pro Zeile, kostenpflichtige Quellen werden dadurch teurer."
   }
 }

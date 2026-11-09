@@ -806,6 +806,8 @@
     "Open Timeline Editor": "打开时间线编辑器",
     "Timeline Editor Hint": "想要类似剪映的时间线？在那里可以裁剪片段、设置每段停留时长，并拖动排序。",
     "Timeline Editor Unavailable": "时间线编辑器需要 API 服务，但 {base} 没有响应。用 `python main.py` 启动它，或者直接用 `scripts/start-local.sh`（现在会一并启动）。",
-    "Pick Scene To Replace": "替换哪一段？"
+    "Pick Scene To Replace": "替换哪一段？",
+    "Align Visuals To Narration": "按旁白逐句匹配画面",
+    "Align Visuals To Narration Help": "逐句询问模型「这句话该配什么画面」并为该句生成图片，而不是给整篇脚本取几个主题词。可以解决「画面对应的是视频另一部分」的问题。按句子数出图，付费素材源花费会更高。"
   }
 }

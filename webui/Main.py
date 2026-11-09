@@ -708,6 +708,9 @@ def _initialize_session_state():
             llm.DEFAULT_SCRIPT_SYSTEM_PROMPT,
             llm.MAX_SCRIPT_SYSTEM_PROMPT_LENGTH,
         ),
+        "align_terms_to_narration": bool(
+            config.app.get("align_terms_to_narration", True)
+        ),
         "match_materials_to_script": bool(
             config.app.get("match_materials_to_script", False)
         ),
@@ -1634,6 +1637,9 @@ def _apply_restored_params(params):
         utils.normalize_clip_speed(params.get("video_clip_speed", 1.0)),
     )
     _set_stable_widget_value("video_count_select", params.get("video_count", 1))
+    st.session_state["align_terms_to_narration"] = bool(
+        params.get("align_terms_to_narration", False)
+    )
     st.session_state["match_materials_to_script"] = bool(
         params.get("match_materials_to_script", False)
     )
@@ -6227,6 +6233,21 @@ def _render_video_settings(panel, params):
                 help=tr("Match Materials to Script Order Help"),
                 key="match_materials_to_script",
                 on_change=sync_script_order_concat_mode,
+            )
+
+            # 逐句生成画面关键词。默认打开：关掉之后关键词是整篇脚本的
+            # 固定几个主题词，下游却按下标把第 i 个词配给第 i 句旁白，
+            # 条数不等就必然错配。关掉它只在"句子多、素材贵、不在乎画面
+            # 对不对得上"时才划算。
+            params.align_terms_to_narration = st.checkbox(
+                tr("Align Visuals To Narration"),
+                help=tr("Align Visuals To Narration Help"),
+                key="align_terms_to_narration",
+            )
+            _set_runtime_config(
+                "app",
+                "align_terms_to_narration",
+                params.align_terms_to_narration,
             )
             _set_runtime_config(
                 "app",

@@ -551,6 +551,8 @@
     "Open Timeline Editor": "Buka editor timeline",
     "Timeline Editor Hint": "Ingin timeline seperti CapCut? Di sana Anda bisa memotong klip, mengatur durasi tiap adegan, dan menggesernya.",
     "Timeline Editor Unavailable": "Editor timeline memerlukan server API, tetapi {base} tidak merespons. Jalankan dengan `python main.py`, atau gunakan `scripts/start-local.sh` yang sekarang ikut menjalankannya.",
-    "Pick Scene To Replace": "Adegan yang mana?"
+    "Pick Scene To Replace": "Adegan yang mana?",
+    "Align Visuals To Narration": "Cocokkan tiap gambar dengan baris narasinya",
+    "Align Visuals To Narration Help": "Menanyakan ke model tentang isi tiap baris yang diucapkan lalu membuat gambar untuk baris itu, bukan beberapa topik untuk seluruh naskah. Memperbaiki gambar yang sebenarnya milik bagian lain video. Menghasilkan satu gambar per baris, sehingga sumber materi berbayar jadi lebih mahal."
   }
 }

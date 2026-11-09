@@ -852,6 +852,9 @@ video_source="pexels",
             video_subject="城市通勤",
             video_script="",
             match_materials_to_script=True,
+            # 逐句生成默认打开，而它比这里要测的顺序匹配更强，会抢先接管。
+            # 这个用例测的是固定条数那条路，所以显式关掉。
+            align_terms_to_narration=False,
         )
 
         with patch.object(

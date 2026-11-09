@@ -1313,6 +1313,116 @@ Please note that you must use English for generating video search terms; Chinese
     return search_terms
 
 
+def generate_terms_per_line(
+    video_subject: str,
+    narration_lines: List[str],
+    app_config=None,
+) -> List[str]:
+    """为每一句旁白各生成一个画面关键词，返回长度与入参一致的列表。
+
+    为什么需要它
+    ------------
+    ``generate_terms`` 把整篇脚本交给模型，要回**固定条数**(5 或 8)的主题词；
+    下游再按下标把第 i 个词配给第 i 句旁白。两边条数根本不相等——实测一条
+    任务有 24 句旁白、12 个关键词——于是"第 2 句讲的是叙利亚北部，配的却是
+    考古学家检查骨骼"这种错配是必然的，而不是偶然。
+
+    这里把问题反过来：先切好句子，让模型逐句给出"这句话该配什么画面"，
+    条数由句子数决定。配对因此在构造上就是对的，不再依赖模型自己的分段
+    恰好和断句一致。
+
+    ``generate_terms`` asks for a fixed number of topics for the whole script
+    and the caller then pairs term *i* with narration line *i*. The two counts
+    are unrelated, so the mismatch is structural, not occasional. This asks for
+    one term per line instead, which makes the pairing correct by construction.
+
+    返回值长度**保证**等于 ``narration_lines``：模型少给就用主题兜底，多给就
+    截断。下游是按下标取的，长度不对会让整条时间线错位。
+    """
+    lines = [str(line or "").strip() for line in narration_lines or []]
+    lines = [line for line in lines if line]
+    if not lines:
+        return []
+
+    subject = str(video_subject or "").strip()
+    numbered = "\n".join(
+        f"{index + 1}. {utils.remove_pause_tags(line)}"
+        for index, line in enumerate(lines)
+    )
+    prompt = f"""
+# Role: Scene Image Prompt Generator
+
+## Goals:
+For each numbered narration line, write one short English search term
+describing the picture that should be on screen **while that exact line is
+spoken**.
+
+## Constrains:
+1. return a json-array of strings and nothing else.
+2. the array must have exactly {len(lines)} items, in the same order as the lines.
+3. item i must depict what line i is talking about, not the video as a whole.
+4. 2-6 words, concrete and depictable: name the subject and what it is doing.
+   prefer "a woman kneading dough on a wooden table" over "food preparation".
+5. no camera directions, no text overlays, no abstract nouns on their own.
+6. english only.
+
+## Output Example:
+["a cracked human jawbone on dark soil", "a dry riverbank in northern syria"]
+
+## Context:
+### Video Subject
+{subject}
+
+### Narration Lines
+{numbered}
+""".strip()
+
+    logger.info(f"generating one search term per narration line: {len(lines)} lines")
+
+    terms: List[str] = []
+    for attempt in range(_max_retries):
+        response = ""
+        try:
+            if app_config is None:
+                response = _generate_response(prompt)
+            else:
+                response = _generate_response(prompt, app_config=app_config)
+            if response.startswith("Error: "):
+                # 与 generate_terms 一致：不要把错误文案当成关键词传下去。
+                logger.error(f"failed to generate per-line terms: {response}")
+                return []
+            terms = json.loads(_strip_code_fence(response))
+        except Exception as exc:
+            logger.warning(f"failed to generate per-line terms: {exc}")
+            if response:
+                try:
+                    terms = _extract_embedded_json(response, "[")
+                except ValueError as inner:
+                    logger.warning(f"failed to generate per-line terms: {inner}")
+
+        if isinstance(terms, list) and all(isinstance(term, str) for term in terms):
+            terms = [term.strip() for term in terms]
+            if any(terms):
+                break
+        terms = []
+        if attempt < _max_retries - 1:
+            logger.warning(
+                f"failed to generate per-line terms, trying again... {attempt + 1}"
+            )
+
+    if not terms:
+        return []
+
+    # 长度必须对齐。模型少给时用主题兜底，而不是让后面的句子整体前移——
+    # 错位一格比配一个泛一点的画面糟糕得多。
+    aligned: List[str] = []
+    for index in range(len(lines)):
+        term = terms[index].strip() if index < len(terms) else ""
+        aligned.append(term or subject or lines[index])
+    logger.success(f"completed: {len(aligned)} per-line search terms")
+    return aligned
+
+
 # =============================================================================
 # Social publishing metadata
 #

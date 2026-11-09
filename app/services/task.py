@@ -439,7 +439,33 @@ def generate_script(task_id, params):
 def generate_terms(task_id, params, video_script):
     logger.info("\n\n## generating video terms")
     video_terms = params.video_terms
-    if not video_terms:
+    # 这组词是不是真的逐句对齐了。不能直接看开关：用户自己填了关键词时
+    # 逐句分支根本没跑，模型调用失败时它也没产出,两种情况下的词都没有
+    # 对齐性质,下面的语义重排该照常执行。
+    aligned_per_line = False
+    if not video_terms and getattr(params, "align_terms_to_narration", False):
+        # 逐句生成：先按旁白断句，再让模型逐句说"这句话该配什么画面"。
+        #
+        # 默认那条路给整篇脚本要固定 5 或 8 个主题词，下游却按下标把第 i 个
+        # 词配给第 i 句旁白——两边条数根本不相等，错配是必然的。这里让条数
+        # 由句子数决定，配对在构造上就是对的。
+        #
+        # 失败时不静默回退到旧逻辑：那会让用户以为逐句生成生效了，实际拿到
+        # 的还是错配的结果。下面的空值检查会把任务明确判失败。
+        narration_lines = utils.split_string_by_punctuations(
+            utils.remove_pause_tags(video_script)
+        )
+        video_terms = llm.generate_terms_per_line(
+            video_subject=params.video_subject,
+            narration_lines=narration_lines,
+            **_llm_override_kwargs(params),
+        )
+        aligned_per_line = bool(video_terms)
+        logger.info(
+            f"generated {len(video_terms)} per-line search terms "
+            f"for {len(narration_lines)} narration lines"
+        )
+    elif not video_terms:
         # 开启素材按文案顺序匹配后，关键词本身也必须按脚本叙事顺序生成；
         # 否则后续即使顺序下载和顺序拼接，也只能复用一组全局主题词，
         # 无法改善“后面内容的画面提前出现”的问题。
@@ -475,7 +501,9 @@ def generate_terms(task_id, params, video_script):
 
     # 可选的 TwelveLabs Marengo 语义重排：未启用时返回原顺序，无任何副作用。
     # 顺序匹配模式下关键词顺序本身就是脚本叙事顺序，必须保持原样，故跳过。
-    if not params.match_materials_to_script:
+    # 逐句生成同样必须跳过：那组词是和旁白逐句对齐的，重排一次就全错位了，
+    # 恰好会把这个功能要解决的问题重新制造出来。
+    if not params.match_materials_to_script and not aligned_per_line:
         video_terms = twelvelabs.rerank_terms_by_subject(
             video_subject=params.video_subject,
             search_terms=video_terms,
@@ -880,6 +908,11 @@ def get_video_materials(
             generation_options["codex_image_context"] = codex_image_context
         # 顺序匹配模式只在用户显式开启时生效。这里强制素材下载按关键词顺序
         # 轮询，避免某个早期关键词下载太多素材，把后续脚本主题挤出最终时间线。
+        # 逐句生成的关键词本身就是按旁白顺序排的，取材和拼接必须保持这个
+        # 顺序，否则第 i 句配的画面又会跑到别处去——那正是这个功能要修的问题。
+        keep_script_order = bool(params.match_materials_to_script) or bool(
+            getattr(params, "align_terms_to_narration", False)
+        )
         try:
             downloaded_videos = material.download_videos(
                 task_id=task_id,
@@ -888,12 +921,12 @@ def get_video_materials(
                 video_aspect=params.video_aspect,
                 video_concat_mode=(
                     VideoConcatMode.sequential
-                    if params.match_materials_to_script
+                    if keep_script_order
                     else params.video_concat_mode
                 ),
                 audio_duration=audio_duration * params.video_count,
                 max_clip_duration=params.video_clip_duration,
-                match_script_order=params.match_materials_to_script,
+                match_script_order=keep_script_order,
                 image_motion=params.image_motion,
                 # 素材阶段占用 40%~50%：每下完一个文件推进一次，慢速网络下
                 # 进度条不再长时间停在 40%。

@@ -551,6 +551,8 @@
     "Open Timeline Editor": "Zaman qrafiki redaktorunu aç",
     "Timeline Editor Hint": "CapCut tipli zaman qrafiki istəyirsiniz? Orada klipləri kəsə, hər birinin müddətini təyin edə və sürüşdürə bilərsiniz.",
     "Timeline Editor Unavailable": "Zaman qrafiki redaktoru API serverinə ehtiyac duyur, lakin {base} cavab vermir. Onu `python main.py` ilə başladın və ya artıq onu da başladan `scripts/start-local.sh` istifadə edin.",
-    "Pick Scene To Replace": "Hansı səhnə?"
+    "Pick Scene To Replace": "Hansı səhnə?",
+    "Align Visuals To Narration": "Hər şəkli öz mətn sətri ilə uyğunlaşdır",
+    "Align Visuals To Narration Help": "Bütün ssenari üçün bir neçə mövzu götürmək əvəzinə, hər deyilən sətrin nədən bəhs etdiyini modeldən soruşur və həmin sətir üçün şəkil yaradır. Videonun başqa hissəsinə aid şəkilləri düzəldir. Sətir başına bir şəkil yaratdığı üçün ödənişli mənbələr daha baha başa gəlir."
   }
 }

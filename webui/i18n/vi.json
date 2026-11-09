@@ -551,6 +551,8 @@
     "Open Timeline Editor": "Mở trình chỉnh sửa dòng thời gian",
     "Timeline Editor Hint": "Bạn muốn dòng thời gian kiểu CapCut? Ở đó bạn có thể cắt clip, đặt thời lượng từng cảnh và kéo để sắp xếp.",
     "Timeline Editor Unavailable": "Trình chỉnh sửa dòng thời gian cần máy chủ API, nhưng {base} không phản hồi. Hãy chạy `python main.py`, hoặc dùng `scripts/start-local.sh` — giờ đã khởi động nó giúp bạn.",
-    "Pick Scene To Replace": "Cảnh nào?"
+    "Pick Scene To Replace": "Cảnh nào?",
+    "Align Visuals To Narration": "Khớp mỗi hình ảnh với câu lời bình",
+    "Align Visuals To Narration Help": "Hỏi mô hình xem mỗi câu nói về điều gì rồi tạo hình cho chính câu đó, thay vì lấy vài chủ đề cho cả kịch bản. Khắc phục việc hình ảnh thuộc về phần khác của video. Tạo một hình mỗi câu nên nguồn tư liệu trả phí sẽ tốn hơn."
   }
 }
