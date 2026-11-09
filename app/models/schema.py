@@ -163,6 +163,13 @@ class VideoParams(BaseModel):
     video_music_prompt: str = Field(default="", max_length=2000)
     sonilo_bgm_prompt: str = Field(default="", max_length=2000)
 
+    # 转场音效：每两段画面的交界处响一下的那个 whoosh/pop。空字符串表示不放，
+    # 成片与本功能上线前完全一致，所以历史任务和不带这两个字段的 API 请求
+    # 都不会突然多出声音。文件名由 app/services/transition_sound.py 在音效库
+    # 内解析，这里不接受路径。
+    transition_sound: Optional[str] = ""
+    transition_sound_volume: Optional[float] = Field(default=0.5, allow_inf_nan=False)
+
     subtitle_enabled: Optional[bool] = True
     subtitle_position: Optional[str] = config.ui.get(
         "subtitle_position", "bottom"

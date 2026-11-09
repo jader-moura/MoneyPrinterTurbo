@@ -48,6 +48,7 @@ from app.models.schema import (
 )
 from app.services import bgm as bgm_service
 from app.services import material_upload as material_upload_service
+from app.services import transition_sound as transition_sound_service
 from app.services import (
     cache_manager,
     llm,
@@ -1614,6 +1615,12 @@ def _apply_restored_params(params):
     _set_stable_widget_value(
         "video_transition_mode_select",
         params.get("video_transition_mode") or VideoTransitionMode.none.value,
+    )
+    _set_stable_widget_value(
+        "transition_sound_select", params.get("transition_sound") or ""
+    )
+    _set_stable_widget_value(
+        "transition_sound_volume_select", params.get("transition_sound_volume", 0.5)
     )
     _set_stable_widget_value(
         f"video_aspect_for_{video_source}",
@@ -6292,6 +6299,10 @@ def _render_video_settings(panel, params):
                 params.video_transition_mode.value,
             )
 
+            # 转场音效跟着转场模式走：它响的位置就是画面切换的位置，哪怕转场
+            # 模式是"无"也一样——硬切同样是一刀。
+            _render_transition_sound_settings(params)
+
             video_aspect_ratios = [
                 (tr("Portrait"), VideoAspect.portrait.value),
                 (tr("Landscape"), VideoAspect.landscape.value),
@@ -7792,6 +7803,91 @@ def _render_elevenlabs_api_key_input(label_key):
         type="password",
         key="elevenlabs_api_key_input",
     ).strip()
+
+
+_NO_TRANSITION_SOUND = ""
+
+
+def _render_transition_sound_settings(params):
+    """渲染转场音效的选择、试听和音量。
+
+    音效选中就直接出播放器，而不是再点一次"试听"：用户要听的是"这几个里哪个
+    合适"，挨个点开再点播放等于每首歌多两下。播放器读的是服务层白名单校验后
+    的真实路径，不接受界面传进来的任意路径。
+    """
+    available_paths = transition_sound_service.list_transition_sounds()
+    sounds_by_name = {
+        os.path.basename(sound_path): sound_path for sound_path in available_paths
+    }
+    options = [_NO_TRANSITION_SOUND, *sounds_by_name]
+    # 标签在这里就全部算好，format_func 只做查表。它会在页面运行之外被再次
+    # 调用（Streamlit 的测试框架就这么干），那时 st.session_state 不可用，
+    # 在 lambda 里调 tr() 会抛异常——页面上其它下拉框也都是这个写法。
+    option_labels = {_NO_TRANSITION_SOUND: tr("No Transition Sound")}
+    option_labels.update(
+        {name: os.path.splitext(name)[0] for name in sounds_by_name}
+    )
+    saved_choice = _saved_ui_choice(
+        "transition_sound", options, _NO_TRANSITION_SOUND
+    )
+    # 比的是配置里原样存着的名字，不是 ``_saved_ui_choice`` 归一化之后的结果：
+    # 归一化已经把缺失的音效换成了"无"，拿它去比永远比不出问题。
+    requested = st.session_state.get(
+        localized_widget_key("transition_sound_select"),
+        _saved_ui_text("transition_sound"),
+    )
+    if requested and requested not in options:
+        # 历史任务或别人导出的设置可能引用这台机器上没有的音效。明说一声再
+        # 回退到"无"，总好过悄悄换一个声音。
+        st.warning(tr("Selected Transition Sound Unavailable"))
+    selected_sound = stable_selectbox(
+        tr("Transition Sound"),
+        options=options,
+        default_value=saved_choice if saved_choice in options else _NO_TRANSITION_SOUND,
+        key="transition_sound_select",
+        format_func=lambda value: option_labels.get(value, value),
+        help=tr("Transition Sound Help"),
+    )
+    _set_runtime_config("ui", "transition_sound", selected_sound)
+
+    if not selected_sound:
+        params.transition_sound = ""
+        return
+
+    preview_available = True
+    selected_sound_path = sounds_by_name[selected_sound]
+    try:
+        # Streamlit 直接读路径失败时会把 OSError 包成内部异常，这里自己读字节，
+        # 让挂载短暂失效、权限变化等情况稳定落进可控分支。
+        selected_sound_bytes = Path(selected_sound_path).read_bytes()
+    except OSError as exc:
+        preview_available = False
+        logger.warning(
+            "failed to preview transition sound: "
+            f"name={selected_sound}, error={str(exc)}"
+        )
+        st.warning(tr("Transition Sound Preview Failed"))
+    else:
+        preview_mime_type = (
+            mimetypes.guess_type(selected_sound_path)[0] or "audio/mpeg"
+        )
+        st.audio(selected_sound_bytes, format=preview_mime_type)
+
+    transition_sound_volumes = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
+    params.transition_sound_volume = stable_selectbox(
+        tr("Transition Sound Volume"),
+        options=transition_sound_volumes,
+        default_value=_saved_ui_choice(
+            "transition_sound_volume", transition_sound_volumes, 0.5
+        ),
+        key="transition_sound_volume_select",
+        format_func=lambda value: f"{int(value * 100)}%",
+    )
+    _set_runtime_config(
+        "ui", "transition_sound_volume", params.transition_sound_volume
+    )
+    # 试听都读不出来的文件，不要交给渲染器在最后一步才失败。
+    params.transition_sound = selected_sound if preview_available else ""
 
 
 def _render_background_music_settings(params, elevenlabs_api_key_rendered=False):

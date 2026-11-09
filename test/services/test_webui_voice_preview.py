@@ -15,6 +15,9 @@ from app.services import task as tm
 from app.services import voice
 from app.services import webui_task
 from app.utils import utils
+# 页面上不止一个播放器（背景音乐、转场音效也各有一个），所以这些用例只看
+# 配音试听那一个——理由见 webui_audio.py。
+from test.services.webui_audio import voice_preview_players
 
 
 ROOT_DIR = Path(__file__).parent.parent.parent
@@ -377,17 +380,17 @@ def test_short_preview_autoplays_only_after_explicit_click_and_reuses_cache():
         app.run()
 
         _button_by_key(app, "play_voice_button").click().run()
-        assert len(app.get("audio")) == 1
-        assert app.get("audio")[0].proto.autoplay
+        assert len(voice_preview_players(app)) == 1
+        assert voice_preview_players(app)[0].proto.autoplay
 
         app.run()
-        assert len(app.get("audio")) == 1
-        assert not app.get("audio")[0].proto.autoplay
+        assert len(voice_preview_players(app)) == 1
+        assert not voice_preview_players(app)[0].proto.autoplay
 
         _button_by_key(app, "play_voice_button").click().run()
 
     synthesize.assert_called_once()
-    assert app.get("audio")[0].proto.autoplay
+    assert voice_preview_players(app)[0].proto.autoplay
     assert [str(item.value) for item in app.exception] == []
 
 
@@ -431,8 +434,8 @@ def test_full_preview_uses_script_and_reuses_identical_cached_audio():
 
     synthesize.assert_called_once()
     assert synthesize.call_args.kwargs["text"] == script
-    assert len(app.get("audio")) == 1
-    assert not app.get("audio")[0].proto.autoplay
+    assert len(voice_preview_players(app)) == 1
+    assert not voice_preview_players(app)[0].proto.autoplay
     assert any("实际配音时长：12.3 秒" in item.value for item in app.caption)
     assert [str(item.value) for item in app.exception] == []
 
@@ -527,7 +530,7 @@ def test_full_preview_warns_when_audio_duration_is_unavailable():
             "generate_full_voiceover_preview_button",
         ).click().run()
 
-    assert len(app.get("audio")) == 1
+    assert len(voice_preview_players(app)) == 1
     warning_messages = [item.value for item in app.warning]
     assert "试听音频已生成，但无法读取准确时长，请检查应用日志。" in warning_messages
 

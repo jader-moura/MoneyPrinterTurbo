@@ -18,6 +18,7 @@ from typing import Callable, List
 from loguru import logger
 import numpy as np
 from moviepy import (
+    AudioArrayClip,
     AudioFileClip,
     ColorClip,
     CompositeAudioClip,
@@ -42,6 +43,7 @@ from app.models.schema import (
     VideoTransitionMode,
 )
 from app.services import bgm as bgm_service
+from app.services import transition_sound as transition_sound_service
 from app.services.utils import subtitle_shaping, video_effects
 from app.utils import file_security, logging_utils, utils
 from app.utils.subtitle_reader import moviepy_subtitles
@@ -1033,10 +1035,16 @@ def combine_videos(
     source_usage: dict[str, int] | None = None,
     source_groups: dict[str, str] | None = None,
     used_video_paths: List[str] | None = None,
+    clip_boundaries: List[float] | None = None,
     progress_callback: Callable[[float], None] | None = None,
     edit_list: List[dict] | None = None,
 ) -> str:
     """把素材拼成一条与旁白同长的视频。
+
+    ``clip_boundaries`` 和 ``used_video_paths`` 一样是可选的出参：给一个空列表
+    进来,这里会把每两段画面的交界时刻(相对成片开头的秒数)填进去。转场音效
+    要知道"什么时候切的"才能响在点上,而这件事只有切片这一层知道——到了
+    ``generate_video`` 手里就只剩一条拼好的 MP4 了。不给则一切照旧。
 
     ``edit_list`` 是时间线编辑用的可选入口：给定时按 ``[{path, start, end}]``
     原样渲染,跳过自动切片、去重排序、补时长和循环填充。不给时行为与以前
@@ -1370,7 +1378,7 @@ def combine_videos(
             # 时间线模式下长度由用户决定，这里不能再按旁白截。
             max_duration=None if render_edit_list else audio_duration,
         )
-        if used_video_paths is not None:
+        if used_video_paths is not None or clip_boundaries is not None:
             # Exclude safety-margin clips that FFmpeg trims entirely from the output.
             elapsed = 0.0
             # 时间线模式不按旁白截断，所以每一段都真的进了成片。
@@ -1378,8 +1386,13 @@ def combine_videos(
             for clip in processed_clips:
                 if elapsed >= usable_duration:
                     break
-                used_video_paths.append(clip.source_file_path)
+                if used_video_paths is not None:
+                    used_video_paths.append(clip.source_file_path)
                 elapsed += clip.duration
+                # 交界时刻就是上一段结束、下一段开始的那一瞬。最后一段结束时
+                # 没有下一段，成片也到头了，那里不该再响一声。
+                if clip_boundaries is not None and 0.0 < elapsed < usable_duration:
+                    clip_boundaries.append(elapsed)
     finally:
         # FFmpeg failures and timeouts must not strand one encoded MP4 per clip.
         # Repeated clips share a path; delete_files already deduplicates them.
@@ -1695,6 +1708,92 @@ def subtitle_font_supports_text(font_path: str, text: str) -> bool:
     return _subtitle_font_supports_sample(font_path, sample)
 
 
+def _load_transition_sound_samples(sound_file: str) -> tuple[np.ndarray, int]:
+    """把一段转场音效整个读进内存，裁到播放上限并补上淡出。
+
+    不能把同一个 ``AudioFileClip`` 挂到十几个剪辑点上：它们共用一个 FFmpeg
+    reader，合成时读取指针被来回拉扯，漏播和串音都会出现。音效本来就只有一两
+    秒，一次解码成数组之后每个剪辑点各用各的一份，互不干扰。
+
+    素材站的"转场音效"里混着几十秒的环境音，整段铺在剪辑点上会盖掉旁白，
+    所以超长的只取开头那一截，末尾线性淡出——硬切会"啪"一声。
+    """
+    source_clip = AudioFileClip(sound_file)
+    try:
+        fps = int(getattr(source_clip, "fps", 0) or 44100)
+        playable = min(
+            float(source_clip.duration or 0.0),
+            transition_sound_service.MAX_TRANSITION_SOUND_SECONDS,
+        )
+        sample_count = int(playable * fps)
+        if sample_count <= 1:
+            raise ValueError(f"transition sound has no audio: {sound_file}")
+        # 分块读，而且块要小。MoviePy 2.1.2 的音频 reader 在一次请求跨过
+        # ``buffersize // 2`` 个采样时会走一条坏掉的递归分支（readers.py:229
+        # 把布尔掩码当成时间点传回自己），于是抛出 "Accessing time t=1.00-1.00"
+        # 这种看起来像越界、其实跟越界无关的 OSError。而短文件的 buffersize
+        # 就是文件自己的长度，所以一个 1.5 秒的 whoosh 整段读必然踩中。
+        # 块大小按采样数自适应：永远不超过文件的四分之一，就一定在半个
+        # buffersize 以内。
+        chunk_size = max(1, min(1024, sample_count // 4))
+        samples = np.concatenate(
+            [
+                source_clip.get_frame(
+                    np.arange(begin, min(begin + chunk_size, sample_count)) / fps
+                )
+                for begin in range(0, sample_count, chunk_size)
+            ]
+        )
+    finally:
+        close_clip(source_clip)
+
+    samples = np.array(samples, dtype=float)
+    if samples.ndim == 1:
+        # 单声道文件解码出来是一维的；AudioArrayClip 要的是 (采样数, 声道数)。
+        samples = samples[:, None]
+
+    fade_samples = min(
+        len(samples),
+        int(transition_sound_service.TRANSITION_SOUND_FADE_SECONDS * fps),
+    )
+    if fade_samples > 1:
+        envelope = np.linspace(1.0, 0.0, fade_samples)
+        samples[-fade_samples:] *= envelope[:, None]
+    return samples, fps
+
+
+def _build_transition_sound_clips(
+    sound_file: str,
+    times: List[float],
+    volume: float,
+    timeline_duration: float,
+) -> List[AudioArrayClip]:
+    """在每个剪辑点上放一份音效，并保证它不会伸到成片结尾之外。
+
+    超出成片长度的音频会把 ``CompositeAudioClip`` 的时长一起拉长，写出来的
+    视频末尾就会多出一截黑屏配声音。所以最后一个剪辑点附近的音效按剩余时间
+    截断，截不下一点点的就干脆不放。
+    """
+    samples, fps = _load_transition_sound_samples(sound_file)
+    samples = samples * float(volume)
+    sound_duration = len(samples) / fps
+
+    sound_clips: List[AudioArrayClip] = []
+    for raw_start in times:
+        start = float(raw_start)
+        if start <= 0 or start >= timeline_duration:
+            continue
+        playable_samples = samples
+        remaining = timeline_duration - start
+        if remaining < sound_duration:
+            keep = int(remaining * fps)
+            if keep <= 1:
+                continue
+            playable_samples = samples[:keep]
+        sound_clips.append(AudioArrayClip(playable_samples, fps=fps).with_start(start))
+    return sound_clips
+
+
 def generate_video(
     video_path: str,
     audio_path: str,
@@ -1702,6 +1801,7 @@ def generate_video(
     output_file: str,
     params: VideoParams,
     bgm_file_override: str | None = None,
+    transition_sound_times: List[float] | None = None,
 ) -> bool:
     """
     合成最终视频，并返回本次背景音乐处理是否成功。
@@ -2040,6 +2140,48 @@ def generate_video(
                 logger.exception(
                     f"failed to mix background music: type={params.bgm_type}, "
                     f"file={bgm_file}"
+                )
+
+        # 转场音效。没选音效、音量为 0，或者这条片子根本没有剪辑点（只有一段
+        # 画面）时，下面整段都不会执行，成片与本功能上线前逐字节一致。
+        transition_sound_file = ""
+        if transition_sound_times and transition_sound_service.should_use_transition_sound(
+            params.transition_sound, params.transition_sound_volume
+        ):
+            try:
+                transition_sound_file = (
+                    transition_sound_service.resolve_transition_sound(
+                        str(params.transition_sound)
+                    )
+                )
+            except ValueError as exc:
+                # 名字来自任务参数，可能是另一台机器上存在、这里没有的音效。
+                # 渲染已经走到最后一步，为一声 whoosh 丢掉整条片子不值得，
+                # 但必须把名字写进日志，否则用户只会觉得"选了却没响"。
+                logger.error(
+                    f"skipping transition sound because it cannot be resolved: "
+                    f"name={params.transition_sound}, error={str(exc)}"
+                )
+        if transition_sound_file:
+            try:
+                transition_sound_clips = _build_transition_sound_clips(
+                    transition_sound_file,
+                    list(transition_sound_times),
+                    float(params.transition_sound_volume),
+                    float(video_clip.duration),
+                )
+                if transition_sound_clips:
+                    audio_clip = CompositeAudioClip(
+                        [audio_clip, *transition_sound_clips]
+                    )
+                    logger.info(
+                        f"mixed transition sound at {len(transition_sound_clips)} cuts: "
+                        f"file={os.path.basename(transition_sound_file)}"
+                    )
+            except Exception:
+                logger.exception(
+                    "failed to mix transition sound: "
+                    f"file={os.path.basename(transition_sound_file)}"
                 )
 
         final_video_clip = video_clip.with_audio(audio_clip)

@@ -130,6 +130,19 @@ def song_dir(sub_dir: str = ""):
     return d
 
 
+def transition_sound_dir(sub_dir: str = ""):
+    """随项目分发的转场音效目录（whoosh、pop 这类短音）。
+
+    与 ``song_dir`` 并列：背景音乐铺满整条片子，转场音效只在每两段画面的
+    交界处响一下，两者各用各的目录，用户往里丢文件时不会互相混进对方的列表。
+    """
+    d = resource_dir("transitions")
+    if sub_dir:
+        d = os.path.join(d, sub_dir)
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
 def public_dir(sub_dir: str = ""):
     d = resource_dir("public")
     if sub_dir:

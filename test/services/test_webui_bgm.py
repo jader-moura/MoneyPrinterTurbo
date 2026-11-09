@@ -14,6 +14,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from app.config import config
 from app.services import bgm, elevenlabs_music, sonilo, voice
+from test.services.webui_audio import bgm_players
 
 
 ROOT_DIR = Path(__file__).parent.parent.parent
@@ -125,7 +126,7 @@ class TestWebuiBackgroundMusic(unittest.TestCase):
                     app.selectbox, "preset_song_select"
                 )
                 self.assertEqual(preset_select.value, first_song.name)
-                self.assertEqual(len(app.get("audio")), 1)
+                self.assertEqual(len(bgm_players(app)), 1)
 
                 preset_select.set_value(second_song.name).run()
 
@@ -134,7 +135,7 @@ class TestWebuiBackgroundMusic(unittest.TestCase):
             )
             self.assertEqual(updated_select.value, second_song.name)
             self.assertEqual(test_ui["preset_song"], second_song.name)
-            self.assertEqual(len(app.get("audio")), 1)
+            self.assertEqual(len(bgm_players(app)), 1)
             self.assertEqual([str(item.value) for item in app.exception], [])
 
     def test_empty_preset_song_list_shows_localized_warning(self):
@@ -205,7 +206,7 @@ class TestWebuiBackgroundMusic(unittest.TestCase):
             )
             self.assertEqual(preset_select.value, restored_song.name)
             self.assertEqual(test_ui["preset_song"], restored_song.name)
-            self.assertEqual(len(app.get("audio")), 1)
+            self.assertEqual(len(bgm_players(app)), 1)
             self.assertEqual([str(item.value) for item in app.exception], [])
 
     def test_missing_preset_song_does_not_interrupt_the_page(self):
@@ -229,7 +230,7 @@ class TestWebuiBackgroundMusic(unittest.TestCase):
             self._translation("en", "Background Music Preview Failed"),
             [item.value for item in app.warning],
         )
-        self.assertEqual(len(app.get("audio")), 0)
+        self.assertEqual(len(bgm_players(app)), 0)
         self.assertEqual([str(item.value) for item in app.exception], [])
 
     def test_invalid_audio_shows_error_without_ready_state_or_player(self):
@@ -261,7 +262,7 @@ class TestWebuiBackgroundMusic(unittest.TestCase):
                 self.assertFalse(
                     any("invalid.m4a" in item.value for item in app.info)
                 )
-                self.assertEqual(len(app.get("audio")), 0)
+                self.assertEqual(len(bgm_players(app)), 0)
                 self.assertEqual(len(rejection_logs), 1)
 
     def test_valid_audio_shows_ready_state_and_reuses_validation_cache(self):
@@ -292,7 +293,7 @@ class TestWebuiBackgroundMusic(unittest.TestCase):
                         "valid.wav"
                     ],
                 )
-                self.assertEqual(len(app.get("audio")), 1)
+                self.assertEqual(len(bgm_players(app)), 1)
 
     def test_zero_volume_defers_custom_upload_validation_until_enabled(self):
         """0 音量保留上传选择，但必须等重新启用 BGM 后才校验和预览。"""
@@ -308,7 +309,7 @@ class TestWebuiBackgroundMusic(unittest.TestCase):
         self.assertEqual([str(item.value) for item in app.exception], [])
         self.assertEqual([item.value for item in app.error], [])
         self.assertFalse(any("deferred.wav" in item.value for item in app.info))
-        self.assertEqual(len(app.get("audio")), 0)
+        self.assertEqual(len(bgm_players(app)), 0)
 
         # 文件仍保留在 Streamlit 会话中。用户调高音量后，同一次 rerun 应自动
         # 完成校验并显示播放器，不需要重新选择文件。
@@ -319,7 +320,7 @@ class TestWebuiBackgroundMusic(unittest.TestCase):
         self.assertEqual([str(item.value) for item in app.exception], [])
         self.assertEqual([item.value for item in app.error], [])
         self.assertTrue(any("deferred.wav" in item.value for item in app.info))
-        self.assertEqual(len(app.get("audio")), 1)
+        self.assertEqual(len(bgm_players(app)), 1)
 
     def test_service_failure_is_not_reported_as_invalid_user_audio(self):
         for locale in TEST_LOCALES:
@@ -343,7 +344,7 @@ class TestWebuiBackgroundMusic(unittest.TestCase):
                         )
                     ],
                 )
-                self.assertEqual(len(app.get("audio")), 0)
+                self.assertEqual(len(bgm_players(app)), 0)
 
     def test_sonilo_source_shows_masked_prefilled_key_and_optional_prompt(self):
         """选择 Sonilo 后应回填本机 Key，且保持密码显示模式。"""
