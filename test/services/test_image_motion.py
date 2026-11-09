@@ -136,6 +136,13 @@ def test_static_image_preserves_alpha_composition(tmp_path):
 
 @pytest.mark.parametrize("motion", ["static", "zoom"])
 def test_failed_motion_render_keeps_previous_output_and_removes_partial_file(tmp_path, motion):
+    """一次中断的编码既不能毁掉上一段好片子，也不能留下半截临时文件。
+
+    第二次请求必须换一个时长：同一张图、同样时长、同样运镜的输出是内容寻址
+    的，已经渲好的那个文件就是正确答案，``render_image_zoom_video`` 会直接
+    返回它而不再编码（时间线把十几段画面铺满旁白时，每段都要问一次，重编码
+    一遍纯属白等）。换个时长才真的会走到编码那一步。
+    """
     source = tmp_path / "scene.png"
     Image.new("RGB", (64, 64), "red").save(source)
     output = video.render_image_zoom_video(str(source), 0.2, image_motion=motion)
@@ -147,6 +154,43 @@ def test_failed_motion_render_keeps_previous_output_and_removes_partial_file(tmp
 
     with patch.object(video.CompositeVideoClip, "write_videofile", interrupted_write):
         with pytest.raises(RuntimeError, match="encoder interrupted"):
-            video.render_image_zoom_video(str(source), 0.2, image_motion=motion)
+            video.render_image_zoom_video(str(source), 0.3, image_motion=motion)
     assert Path(output).read_bytes() == completed
     assert not list(tmp_path.glob(".image-zoom-*.mp4"))
+
+
+@pytest.mark.parametrize("motion", [ImageMotion.zoom, ImageMotion.static])
+def test_an_identical_render_request_reuses_the_rendered_clip(tmp_path, motion):
+    """同一张图、同样时长、同样运镜，第二次请求不该再编码一遍。
+
+    输出名按内容寻址，所以磁盘上那个文件就是答案。时间线为每一段画面各问
+    一次,一次七秒的重编码乘以十几段就是用户在渲染开始前白等的一分半钟。
+    """
+    source = tmp_path / "scene.png"
+    Image.new("RGB", (64, 64), "red").save(source)
+    first = video.render_image_zoom_video(str(source), 0.2, image_motion=motion)
+
+    def must_not_encode(_clip, filename, **_kwargs):
+        raise AssertionError("re-encoded a clip that was already rendered")
+
+    with patch.object(video.CompositeVideoClip, "write_videofile", must_not_encode):
+        second = video.render_image_zoom_video(str(source), 0.2, image_motion=motion)
+    assert second == first
+
+
+@pytest.mark.parametrize("motion", [ImageMotion.zoom, ImageMotion.static])
+def test_an_unreadable_leftover_clip_is_rendered_again(tmp_path, motion):
+    """上一次写到一半留下的坏文件不能被当成"已经渲好了"。
+
+    文件在、能打开目录项，解码却是空的。把它交给渲染器只会让整条片子在拼接
+    阶段才失败，所以这里重渲一遍。
+    """
+    source = tmp_path / "scene.png"
+    Image.new("RGB", (64, 64), "red").save(source)
+    rendered = video.render_image_zoom_video(str(source), 0.2, image_motion=motion)
+    Path(rendered).write_bytes(b"not a video")
+
+    again = video.render_image_zoom_video(str(source), 0.2, image_motion=motion)
+    assert again == rendered
+    with VideoFileClip(again) as clip:
+        assert clip.duration > 0

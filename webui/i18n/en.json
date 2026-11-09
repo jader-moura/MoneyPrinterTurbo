@@ -781,6 +781,7 @@
     "Review Scenes Before Rendering": "Review scenes before rendering",
     "Review Scenes Before Rendering Help": "Stop once the pictures and narration are ready so you can check, replace or regenerate each scene, then render when you are happy with it.",
     "Review Scenes Ready": "{count} scenes are ready to review",
+    "Review Scene Coverage": "{scenes} pictures cover {total}s of narration ({lines} lines), about {each}s each. This run asked for a fixed number of keywords, so a picture spans several lines. New runs match each picture to its own narration line.",
     "Review Scenes Hint": "Check each scene below. Replace or regenerate anything that came out wrong, then render the final video.",
     "Narration Out Of Date": "The narration no longer matches the edited text. Re-record it before rendering.",
     "Rerecord Narration": "Re-record narration",

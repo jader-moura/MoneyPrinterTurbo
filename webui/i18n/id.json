@@ -526,6 +526,7 @@
     "Review Scenes Before Rendering": "Tinjau adegan sebelum render",
     "Review Scenes Before Rendering Help": "Berhenti setelah gambar dan narasi siap sehingga kamu bisa memeriksa, mengganti, atau membuat ulang setiap adegan, lalu render saat sudah sesuai.",
     "Review Scenes Ready": "{count} adegan siap ditinjau",
+    "Review Scene Coverage": "{scenes} pictures cover {total}s of narration ({lines} lines), about {each}s each. This run asked for a fixed number of keywords, so a picture spans several lines. New runs match each picture to its own narration line.",
     "Review Scenes Hint": "Periksa setiap adegan di bawah. Ganti atau buat ulang yang kurang pas, lalu render video akhirnya.",
     "Narration Out Of Date": "Narasi tidak lagi cocok dengan teks yang diubah. Rekam ulang sebelum render.",
     "Rerecord Narration": "Rekam ulang narasi",

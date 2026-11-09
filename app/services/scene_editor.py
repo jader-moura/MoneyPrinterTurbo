@@ -370,6 +370,65 @@ def _enum_value(value: Any) -> str:
     return str(getattr(value, "value", value))
 
 
+def planned_windows(
+    task_id: str, manifest: dict, params=None, *, probe: bool = True
+) -> list[dict]:
+    """场景在成片里各自占的时间段，渲染器用的就是这组数字。
+
+    ``probe`` 关掉时按请求的单段时长估算，不启动解码器——审片列表每次页面
+    重跑都要算一遍，不该为此多付十几次解码。
+    """
+    scenes = manifest.get("scenes") or []
+    if not scenes:
+        return []
+    if params is None:
+        params = load_params(task_id)
+    return timeline.plan_windows(
+        task_id,
+        scenes,
+        audio_duration=manifest.get("audio_duration") or 0.0,
+        clip_speed=getattr(params, "video_clip_speed", 1.0) or 1.0,
+        clip_duration=getattr(params, "video_clip_duration", None),
+        probe=probe,
+    )
+
+
+def realign_narration(task_id: str) -> bool:
+    """把场景列表里漏掉的旁白句子按时间补回去，返回是否改动过。
+
+    关键词个数决定画面张数，旁白句数由脚本决定，两者几乎从不相等。按下标
+    配对时多出来的句子在界面上直接消失(12 张图配 28 句旁白会丢 16 句),
+    而"改台词后重新配音"读的就是这份列表——脚本会被悄悄砍掉一多半。
+
+    这里是幂等的：补过一次之后每条场景台词都是若干句的合并，不再等于脚本
+    里的任何单句，``narration_pairing_is_stale`` 随即返回 False。用户手改过
+    台词的任务同样返回 False，不会被盖掉。
+    """
+    manifest = scene_manifest.load(task_id)
+    scenes = manifest["scenes"]
+    lines = scene_manifest.split_narration(manifest.get("script"))
+    if not scene_manifest.narration_pairing_is_stale(scenes, lines):
+        return False
+    try:
+        windows = planned_windows(task_id, manifest, probe=False)
+    except scene_manifest.SceneError as exc:
+        # 参数读不回来时宁可继续显示旧配对，也不要让审片界面打不开。
+        logger.warning(f"cannot re-pair narration for {task_id}: {exc}")
+        return False
+
+    texts = scene_manifest.distribute_narration(
+        windows,
+        segments=scene_manifest.narration_segments(task_id),
+        lines=lines,
+    )
+    scene_manifest.apply_narration_pairing(task_id, texts)
+    logger.info(
+        f"re-paired {len(lines)} narration lines across {len(scenes)} scenes "
+        f"by on-screen time, task_id: {task_id}"
+    )
+    return True
+
+
 def describe(task_id: str, endpoint: str = "", *, with_timing: bool = False) -> dict:
     """审片界面的读模型：场景、可播放地址、以及配音是否已失效。
 
@@ -377,10 +436,33 @@ def describe(task_id: str, endpoint: str = "", *, with_timing: bool = False) -> 
     源长度才能画出拖拽边界,但探测要逐个打开解码器,所以默认不做——Phase 1
     的审片列表并不需要它。探测结果按"路径+修改时间+大小"缓存。
     """
+    # 先把漏掉的旁白句子按时间补回场景，再读：界面显示的台词必须是这段画面
+    # 播放时真正会念的那几句，否则用户会以为渲染器换掉了图片。
+    try:
+        realign_narration(task_id)
+    except Exception as exc:  # pragma: no cover - 补配对失败不该挡住审片
+        logger.warning(f"cannot re-pair narration for {task_id}: {exc}")
     manifest = scene_manifest.load(task_id)
+    params = None
+    try:
+        params = load_params(task_id)
+    except scene_manifest.SceneError as exc:
+        logger.warning(f"cannot read render settings for {task_id}: {exc}")
+    windows = []
+    if params is not None:
+        try:
+            windows = planned_windows(
+                task_id, manifest, params, probe=with_timing
+            )
+        except scene_manifest.SceneError as exc:
+            logger.warning(f"cannot plan scene timing for {task_id}: {exc}")
     scenes = []
     for scene in manifest["scenes"]:
         record = dict(scene)
+        window = windows[scene["index"]] if scene["index"] < len(windows) else None
+        # 成片里的起止时间。界面靠它把"第 7 段画面"和"第 30 秒的旁白"对上。
+        record["starts_at"] = window["start"] if window else None
+        record["ends_at"] = window["end"] if window else None
         record["url"] = media_url(task_id, scene["material"], endpoint)
         record["exists"] = bool(record["url"])
         timing = scene_manifest.scene_timing(scene)
@@ -408,8 +490,10 @@ def describe(task_id: str, endpoint: str = "", *, with_timing: bool = False) -> 
         "subtitle_path": os.path.basename(str(manifest.get("subtitle_path") or "")),
         "script": manifest["script"],
     }
+    payload["planned_total"] = round(windows[-1]["end"], 3) if windows else 0.0
     if with_timing:
-        params = load_params(task_id)
+        if params is None:
+            params = load_params(task_id)
         payload["clip_speed"] = float(getattr(params, "video_clip_speed", 1.0) or 1.0)
         payload["audio_duration"] = float(manifest.get("audio_duration") or 0.0)
         payload["has_timing_edits"] = scene_manifest.has_timing_edits(

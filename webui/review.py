@@ -60,6 +60,20 @@ def render_panel(task_id: str, tr) -> bool:
 
     st.success(tr("Review Scenes Ready").format(count=len(scenes)))
 
+    # 画面张数由关键词个数决定，旁白句数由脚本决定，两者几乎从不相等。
+    # 不说出来的话，"28 句旁白只有 12 段画面"看起来像是列表被截断了。
+    lines = scene_manifest.split_narration(described.get("script"))
+    total = described.get("planned_total") or 0.0
+    if scenes and lines:
+        st.caption(
+            tr("Review Scene Coverage").format(
+                scenes=len(scenes),
+                total=f"{total:.1f}",
+                lines=len(lines),
+                each=f"{total / len(scenes):.1f}" if total else "0.0",
+            )
+        )
+
     if described["audio_stale"]:
         st.warning(tr("Narration Out Of Date"))
 
@@ -244,6 +258,11 @@ def _scene_row(task_id: str, scene: dict, total: int, tr) -> None:
     index = scene["index"]
     with st.container(border=True):
         heading = tr("Scene Number").format(index=index + 1)
+        # 成片里的起止时间。没有它，用户无法判断界面上这一段对应成片的哪一
+        # 段——关键词个数和旁白句数不等时，"第 7 段画面"并不播在第 7 句上。
+        window = _scene_window(scene)
+        if window:
+            heading = f"{heading} · {window}"
         if scene["locked"]:
             heading = f"{heading} · {tr('Scene Locked')}"
         st.write(heading)
@@ -253,6 +272,19 @@ def _scene_row(task_id: str, scene: dict, total: int, tr) -> None:
             _render_preview(task_id, scene, tr)
         with controls:
             _render_controls(task_id, scene, total, tr)
+
+
+def _scene_window(scene: dict) -> str:
+    """这一段在成片里的起止时间，算不出来时返回空串。"""
+    start, end = scene.get("starts_at"), scene.get("ends_at")
+    if start is None or end is None:
+        return ""
+    return f"{_stamp(start)}–{_stamp(end)} ({end - start:.1f}s)"
+
+
+def _stamp(seconds: float) -> str:
+    total = max(0, int(round(float(seconds))))
+    return f"{total // 60}:{total % 60:02d}"
 
 
 def _render_preview(task_id: str, scene: dict, tr) -> None:

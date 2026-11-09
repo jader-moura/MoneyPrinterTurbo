@@ -526,6 +526,7 @@
     "Review Scenes Before Rendering": "Revisar as cenas antes de renderizar",
     "Review Scenes Before Rendering Help": "Para depois que as imagens e a narração ficam prontas, para você conferir, substituir ou gerar novamente cada cena e renderizar só quando estiver satisfeito.",
     "Review Scenes Ready": "{count} cenas prontas para revisão",
+    "Review Scene Coverage": "{scenes} imagens cobrem {total}s de narração ({lines} falas), cerca de {each}s cada. Esta geração pediu um número fixo de palavras-chave, então cada imagem cobre várias falas. Novas gerações associam uma imagem a cada fala.",
     "Review Scenes Hint": "Confira cada cena abaixo. Substitua ou gere novamente o que saiu errado e depois renderize o vídeo final.",
     "Narration Out Of Date": "A narração não corresponde mais ao texto editado. Grave-a novamente antes de renderizar.",
     "Rerecord Narration": "Gravar a narração novamente",

@@ -526,6 +526,7 @@
     "Review Scenes Before Rendering": "Renderdən əvvəl səhnələri nəzərdən keçir",
     "Review Scenes Before Rendering Help": "Şəkillər və səsləndirmə hazır olanda dayanır ki, hər səhnəni yoxlayıb dəyişdirə və ya yenidən yarada bilsən, sonra razı qaldıqda render edəsən.",
     "Review Scenes Ready": "{count} səhnə nəzərdən keçirilməyə hazırdır",
+    "Review Scene Coverage": "{scenes} pictures cover {total}s of narration ({lines} lines), about {each}s each. This run asked for a fixed number of keywords, so a picture spans several lines. New runs match each picture to its own narration line.",
     "Review Scenes Hint": "Aşağıdakı hər səhnəni yoxla. Pis çıxanları dəyişdir və ya yenidən yarat, sonra son videonu render et.",
     "Narration Out Of Date": "Səsləndirmə dəyişdirilmiş mətnə artıq uyğun gəlmir. Render etməzdən əvvəl yenidən yaz.",
     "Rerecord Narration": "Səsləndirməni yenidən yaz",

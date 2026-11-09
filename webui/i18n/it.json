@@ -526,6 +526,7 @@
     "Review Scenes Before Rendering": "Rivedi le scene prima del rendering",
     "Review Scenes Before Rendering Help": "Si ferma quando immagini e voce narrante sono pronte, così puoi controllare, sostituire o rigenerare ogni scena e avviare il rendering solo quando sei soddisfatto.",
     "Review Scenes Ready": "{count} scene pronte per la revisione",
+    "Review Scene Coverage": "{scenes} pictures cover {total}s of narration ({lines} lines), about {each}s each. This run asked for a fixed number of keywords, so a picture spans several lines. New runs match each picture to its own narration line.",
     "Review Scenes Hint": "Controlla ogni scena qui sotto. Sostituisci o rigenera ciò che non va, poi esegui il rendering del video finale.",
     "Narration Out Of Date": "La voce narrante non corrisponde più al testo modificato. Registrala di nuovo prima del rendering.",
     "Rerecord Narration": "Registra di nuovo la voce narrante",

@@ -34,6 +34,7 @@ from app.services import (
     sonilo,
     subtitle,
     task_artifacts,
+    timeline,
     twelvelabs,
     video,
     volcengine_seedance,
@@ -2113,9 +2114,39 @@ def _run_pipeline(
         # and rendering from the old list would silently discard every edit.
         try:
             downloaded_videos = scene_manifest.materials_for_render(task_id)
-            # 时间线上拖过入出点的任务会留下一张剪辑表。没拖过时它是空的，
-            # 渲染器照旧自己按旁白时长切片。
+            # 时间线上拖过入出点的任务会留下一张剪辑表，照它渲染。
             render_edit_list = scene_manifest.edit_list_for_render(task_id)
+            if not render_edit_list:
+                # 没拖过时自己铺一张：按场景列表上显示的时间段渲染。
+                #
+                # 不这么做的话，渲染器会把 12 段 5 秒画面拼成 60 秒，再把第
+                # 1 段接到 64 秒旁白的尾巴上——用户在列表里数到 12 段，成片
+                # 里却有 13 段、第一张图还出现两次，于是以为渲染器换掉了图
+                # 片。审片的前提是"列表就是成片",所以这条路必须按列表渲染。
+                #
+                # Otherwise the renderer lays the 12 five-second clips end to
+                # end for 60s and loops clip 1 to cover a 64s narration: the
+                # list shows 12 scenes and the video holds 13, with the first
+                # picture twice. A review is only meaningful if the list is
+                # what renders, so a resumed render follows the list.
+                try:
+                    render_edit_list = timeline.auto_fit_edit_list(
+                        task_id,
+                        scene_manifest.load(task_id)["scenes"],
+                        audio_duration=audio_duration,
+                        clip_speed=getattr(params, "video_clip_speed", 1.0) or 1.0,
+                        clip_duration=getattr(params, "video_clip_duration", None),
+                    )
+                except scene_manifest.SceneError as exc:
+                    # 铺不出时间线时退回自动切片，并说清楚代价：成片的分段
+                    # 会和场景列表不一致。因为一段素材读不出时长就让整次
+                    # 渲染失败,比分段对不上糟得多。
+                    logger.warning(
+                        f"cannot lay the scenes across the narration ({exc}); "
+                        "falling back to automatic slicing, so the rendered "
+                        f"cuts may not match the scene list, task_id: {task_id}"
+                    )
+                    render_edit_list = []
         except scene_manifest.SceneError as exc:
             return _mark_task_failed(task_id, "materials", str(exc))
         logger.info(

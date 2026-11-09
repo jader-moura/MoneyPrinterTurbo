@@ -526,6 +526,7 @@
     "Review Scenes Before Rendering": "렌더링 전에 장면 검토",
     "Review Scenes Before Rendering Help": "이미지와 내레이션이 준비되면 멈춰서 각 장면을 확인하고 교체하거나 다시 생성한 뒤, 만족스러울 때 렌더링합니다.",
     "Review Scenes Ready": "검토할 장면 {count}개가 준비되었습니다",
+    "Review Scene Coverage": "{scenes} pictures cover {total}s of narration ({lines} lines), about {each}s each. This run asked for a fixed number of keywords, so a picture spans several lines. New runs match each picture to its own narration line.",
     "Review Scenes Hint": "아래 장면을 하나씩 확인하세요. 잘못 나온 것은 교체하거나 다시 생성한 뒤 최종 영상을 렌더링합니다.",
     "Narration Out Of Date": "내레이션이 수정된 문장과 더 이상 맞지 않습니다. 렌더링하기 전에 다시 녹음하세요.",
     "Rerecord Narration": "내레이션 다시 녹음",

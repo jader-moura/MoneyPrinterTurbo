@@ -2064,6 +2064,52 @@ def generate_video(
         return bgm_mix_succeeded
 
 
+def _rendered_clip_is_usable(video_file: str) -> bool:
+    """这段已经渲好的片段能不能直接拿来用。
+
+    只看"文件在不在"不够：上一次渲染可能在写出途中被打断,留下一个能打开
+    目录项、却解码不出来的文件。真正打开一次再读时长比重编码便宜两个数量
+    级,而把一个坏文件交给渲染器会让整条片子在拼接阶段才失败。
+    """
+    if not os.path.isfile(video_file) or os.path.getsize(video_file) <= 0:
+        return False
+    clip = None
+    try:
+        clip = _open_video_clip_quietly(video_file)
+        return float(clip.duration or 0.0) > 0
+    except Exception as exc:
+        logger.warning(
+            f"discarding an unreadable rendered clip: "
+            f"{os.path.basename(video_file)} ({exc})"
+        )
+        return False
+    finally:
+        if clip is not None:
+            close_clip(clip)
+
+
+def _image_zoom_video_path(
+    image_path: str, clip, clip_duration, motion: ImageMotion
+) -> str:
+    """图片片段的内容寻址输出路径。
+
+    时长会改变渲染结果，所以它和图片内容一起进文件名；同一张图在不同任务里
+    可能被并发渲染，所以写出时先落临时文件再 ``os.replace``——这个路径上出现
+    的文件一定是完整的。
+    """
+    digest = hashlib.sha256(os.fsencode(os.path.abspath(image_path)))
+    frame = clip.get_frame(0)
+    digest.update(str(frame.shape).encode())
+    digest.update(frame.tobytes())
+    if clip.mask is not None:
+        digest.update(clip.mask.get_frame(0).tobytes())
+    duration_identity = hashlib.sha256(str(clip_duration).encode()).hexdigest()[:16]
+    return os.path.join(
+        os.path.dirname(image_path),
+        f"{digest.hexdigest()}.{motion.value}-{duration_identity}.mp4",
+    )
+
+
 def render_image_zoom_video(
     image_path: str, clip_duration: int = 5, image_motion: ImageMotion = ImageMotion.zoom
 ) -> str:
@@ -2079,6 +2125,20 @@ def render_image_zoom_video(
     clip = clip.with_duration(clip_duration).with_position("center")
     temp_path = ""
     try:
+        # 输出名已经按"图片内容 + 时长 + 运镜"寻址，所以同样的请求第二次来时
+        # 那个文件就已经是正确答案，重编码一遍只是把同样的字节再写一次。
+        # 时间线把 12 段画面铺满旁白时会对每一段各请求一次,一次 7 秒的重编码
+        # 乘以 12 就是用户在渲染开始前白等的一分半钟。
+        #
+        # The output name already addresses the image content, the duration and
+        # the motion, so a repeat request has its answer on disk; re-encoding
+        # only rewrites the same bytes. Laying twelve pictures across a
+        # narration asks once per picture, and a 7s re-encode each is a minute
+        # and a half of waiting before the render even starts.
+        existing = _image_zoom_video_path(image_path, clip, clip_duration, motion)
+        if _rendered_clip_is_usable(existing):
+            logger.debug(f"reusing the rendered image clip: {os.path.basename(existing)}")
+            return existing
         # 只有放大模式改变画面尺寸，静止模式保留原始构图及透明背景处理。
         image_clip = (
             clip.resized(lambda t: 1 + (clip_duration * 0.03) * (t / clip.duration))
@@ -2090,21 +2150,7 @@ def render_image_zoom_video(
         # This is useful if you want to add other elements to the video.
         final_clip = CompositeVideoClip([image_clip], bg_color=(0, 0, 0))
         try:
-            # The duration changes the rendered content, so it must be part of
-            # the output identity. Different tasks may render the same image
-            # concurrently; only publish a complete MP4 after MoviePy closes it.
-            source_digest = hashlib.sha256(os.fsencode(os.path.abspath(image_path)))
-            source_frame = clip.get_frame(0)
-            source_digest.update(str(source_frame.shape).encode())
-            source_digest.update(source_frame.tobytes())
-            if clip.mask is not None:
-                source_digest.update(clip.mask.get_frame(0).tobytes())
-            source_identity = source_digest.hexdigest()
-            duration_identity = hashlib.sha256(str(clip_duration).encode()).hexdigest()[:16]
-            video_file = os.path.join(
-                os.path.dirname(image_path),
-                f"{source_identity}.{motion.value}-{duration_identity}.mp4",
-            )
+            video_file = existing
             descriptor, temp_path = tempfile.mkstemp(
                 prefix=".image-zoom-",
                 suffix=".mp4",

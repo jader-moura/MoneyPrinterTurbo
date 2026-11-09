@@ -545,3 +545,117 @@ def relative_media_path(task_id: str, path: Any) -> str:
         return os.path.relpath(resolved, utils.task_dir("")).replace(os.sep, "/")
     except ValueError:
         return ""
+
+
+def distribute_narration(
+    windows: list[dict],
+    *,
+    segments: list[dict] | None = None,
+    lines: list[str] | None = None,
+) -> list[str]:
+    """把旁白按时间分配到每个场景，一句都不丢。
+
+    Why this exists
+    ---------------
+    ``build_scenes`` 原来按下标配对：第 i 段画面配第 i 句。关键词 12 个、
+    旁白 28 句时，后 16 句在场景列表里根本不出现——界面少显示了一多半台词,
+    而"改台词后重新配音"会把脚本从 28 句砍成 12 句。按时间分配之后每句都
+    落在某一段画面上，拼回去仍然是完整的脚本。
+
+    Pairing by index dropped every line past the last material: 12 keywords
+    against 28 narration lines left 16 lines invisible in the review list, and
+    re-recording from that list would have cut the script down to 12 lines.
+    Splitting by time puts every line under the picture that is on screen
+    while it is spoken, and joining them back yields the whole script again.
+
+    每句归给"重叠最多"的那一段。完全落在时间线之外的句子（旁白比画面长时
+    的尾句）归给离它最近的一段，而不是被丢掉。
+    """
+    if not windows:
+        return []
+
+    cues = _narration_cues(windows, segments, lines)
+    buckets: list[list[str]] = [[] for _ in windows]
+    for cue in cues:
+        best_index = 0
+        best_overlap = None
+        for index, window in enumerate(windows):
+            overlap = min(cue["end"], window["end"]) - max(
+                cue["start"], window["start"]
+            )
+            if best_overlap is None or overlap > best_overlap:
+                best_index, best_overlap = index, overlap
+        buckets[best_index].append(cue["text"])
+    # 用换行而不是空格拼：``split_narration`` 按标点和换行切句,所以换行拼出来
+    # 的几句重新切一次还是原来那几句——"改台词后重新配音"就不会把三句话读成
+    # 一句长句,断句和停顿都留在原处。
+    return [
+        "\n".join(part for part in bucket if part).strip() for bucket in buckets
+    ]
+
+
+def _narration_cues(
+    windows: list[dict],
+    segments: list[dict] | None,
+    lines: list[str] | None,
+) -> list[dict]:
+    """返回带时间的旁白句子；没有字幕时按句数在整条时间线上均分。"""
+    timed = [
+        {
+            "start": float(segment.get("start") or 0.0),
+            "end": float(segment.get("end") or 0.0),
+            "text": str(segment.get("text") or ""),
+        }
+        for segment in (segments or [])
+        if str(segment.get("text") or "").strip()
+    ]
+    if timed:
+        return timed
+
+    texts = [line for line in (lines or []) if str(line).strip()]
+    if not texts:
+        return []
+    # 没有字幕文件（关掉字幕的任务）时退回均分。均分不如字幕准，但仍然比
+    # 按下标配对准：至少每句都会落在时间上大致对应的那段画面上。
+    span = float(windows[-1]["end"]) - float(windows[0]["start"])
+    if span <= 0:
+        span = float(len(texts))
+    origin = float(windows[0]["start"])
+    step = span / len(texts)
+    return [
+        {
+            "start": origin + position * step,
+            "end": origin + (position + 1) * step,
+            "text": str(text),
+        }
+        for position, text in enumerate(texts)
+    ]
+
+
+def narration_pairing_is_stale(scenes: list[dict], lines: list[str]) -> bool:
+    """场景里的台词是不是漏掉了脚本里的句子。
+
+    只认"每条场景台词都原封不动是脚本里的某一句"这一种情况：用户手改过台词
+    之后再重排会把他的改动盖掉,那比少显示几句更糟,所以改过就不动。
+    """
+    stored = [str(scene.get("narration") or "").strip() for scene in scenes or []]
+    available = [str(line).strip() for line in lines or [] if str(line).strip()]
+    if not available or not stored:
+        return False
+    known = set(available)
+    if any(text and text not in known for text in stored):
+        # 有人手改过台词（或上一次就是按时间合并的），不碰。
+        return False
+    return len([text for text in stored if text]) < len(available)
+
+
+def apply_narration_pairing(task_id: str, texts: list[str]) -> bool:
+    """把按时间分好的台词写回场景列表。"""
+    scenes = load(task_id)["scenes"]
+    if len(texts) != len(scenes):
+        raise SceneError(
+            f"cannot re-pair narration: {len(texts)} blocks for {len(scenes)} scenes"
+        )
+    for scene, text in zip(scenes, texts):
+        scene["narration"] = text
+    return save_scenes(task_id, scenes)

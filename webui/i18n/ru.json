@@ -526,6 +526,7 @@
     "Review Scenes Before Rendering": "Проверить сцены перед рендерингом",
     "Review Scenes Before Rendering Help": "Остановиться, когда изображения и озвучка готовы, чтобы вы могли проверить, заменить или перегенерировать каждую сцену, и запустить рендеринг, когда всё устроит.",
     "Review Scenes Ready": "{count} сцен готовы к проверке",
+    "Review Scene Coverage": "{scenes} pictures cover {total}s of narration ({lines} lines), about {each}s each. This run asked for a fixed number of keywords, so a picture spans several lines. New runs match each picture to its own narration line.",
     "Review Scenes Hint": "Проверьте каждую сцену ниже. Замените или перегенерируйте то, что вышло неудачно, затем отрендерьте итоговое видео.",
     "Narration Out Of Date": "Озвучка больше не соответствует изменённому тексту. Перезапишите её перед рендерингом.",
     "Rerecord Narration": "Перезаписать озвучку",

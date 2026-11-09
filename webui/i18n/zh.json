@@ -781,6 +781,7 @@
     "Review Scenes Before Rendering": "渲染前审片",
     "Review Scenes Before Rendering Help": "勾选后，图片和配音准备好就先停下，你可以逐个检查、替换或重新生成场景，满意后再渲染成片。",
     "Review Scenes Ready": "{count} 个场景已就绪，可以开始检查",
+    "Review Scene Coverage": "{scenes} 段画面铺满 {total} 秒旁白（共 {lines} 句），每段约 {each} 秒。这次生成用的是固定数量的关键词，所以一张画面跨好几句。以后的生成会逐句配图。",
     "Review Scenes Hint": "逐个检查下面的场景。不满意的可以替换或重新生成，确认后再渲染成片。",
     "Narration Out Of Date": "台词已修改，配音与字幕不再匹配。请先重新配音，再渲染。",
     "Rerecord Narration": "重新配音",

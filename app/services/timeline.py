@@ -48,6 +48,11 @@ MIN_CLIP_DURATION = 0.2
 # 变了，这三元组也会变，所以缓存不会把旧时长带到新素材上。
 _duration_cache: dict[tuple[str, int, int], float] = {}
 
+# 图片的内容寻址摘要同样按"路径 + 修改时间 + 大小"缓存。一次渲染要为十几
+# 个场景各找一次原图，不缓存就是"场景数 × 图片数"次解码：26 张图、12 个
+# 场景是 312 次,而其中 286 次算的是同一批摘要。
+_image_digest_cache: dict[tuple[str, int, int], str] = {}
+
 
 class TimelineError(scene_manifest.SceneError):
     """时间线层面的错误。继承 SceneError，沿用既有的 400 映射。"""
@@ -131,6 +136,16 @@ def source_image_for(task_id: str, material: str) -> str | None:
         return None
 
     for candidate in candidates:
+        try:
+            identity = _file_identity(candidate)
+        except OSError:
+            continue
+        cached = _image_digest_cache.get(identity)
+        if cached is not None:
+            if cached == stem:
+                return candidate
+            continue
+
         clip = None
         try:
             clip, resolved = video_service._open_image_clip_with_fallback(candidate)
@@ -140,7 +155,12 @@ def source_image_for(task_id: str, material: str) -> str | None:
             digest.update(frame.tobytes())
             if clip.mask is not None:
                 digest.update(clip.mask.get_frame(0).tobytes())
-            if digest.hexdigest() == stem:
+            hexdigest = digest.hexdigest()
+            # 只有解析后的路径与候选路径一致时才缓存：回退打开可能换成另一个
+            # 文件，那时这个摘要不属于这个缓存键。
+            if os.path.abspath(resolved) == os.path.abspath(candidate):
+                _image_digest_cache[identity] = hexdigest
+            if hexdigest == stem:
                 return resolved
         except Exception:
             continue
@@ -238,9 +258,12 @@ def ensure_image_length(task_id: str, material: str, needed_source: float) -> st
     """
     source_image = source_image_for(task_id, material)
     if not source_image:
-        logger.warning(
-            "cannot extend an image clip without its source image, "
-            f"task_id: {task_id}, material: {os.path.basename(material)}"
+        # 网上下的视频走到这里是正常的：它本来就只有那么长。调用方会把出点
+        # 夹回素材长度,所以这里说清楚"为什么停不了那么久",而不是报错。
+        logger.info(
+            f"cannot hold {os.path.basename(material)} for "
+            f"{needed_source:.2f}s: no source image to re-render it from, "
+            f"task_id: {task_id}"
         )
         return material
 
@@ -288,10 +311,29 @@ def build_edit_list(
                 needed_source = None
 
         # 图片片段要停更久时先重渲，再按新的源长度算入出点。
-        if (
-            needed_source is not None
-            and needed_source > source_duration - float(trim_start) + 1e-6
-            and scene_manifest.material_kind(material) != "video"
+        #
+        # 判断"能不能拉长"不能只看扩展名：图片素材在生成时就烘成了固定长度
+        # 的 mp4(见 material._render_openai_image_video),扩展名一律是
+        # .mp4。只按扩展名筛会把每一段图片都当成"拉不长的视频",于是 12 段
+        # 5 秒画面永远铺不满 64 秒旁白——用户看到的就是"成片比列表多一段、
+        # 第一张图出现两次"。
+        #
+        # 所以条件是"不是视频文件,或者能找回它的原图"。``source_image_for``
+        # 认的是内容寻址的文件名,网上下的视频对不上,会立刻返回 None,那一段
+        # 仍然按素材长度夹回去。
+        #
+        # Whether a clip can be held longer is not an extension question:
+        # generated images are baked to a fixed-length MP4, so they all end in
+        # .mp4. Sniffing the extension alone treats every picture as an
+        # unstretchable video, and twelve five-second clips can then never
+        # cover a 64s narration. The test is therefore "not a video file, or
+        # its source image is still on disk" — a downloaded video matches
+        # neither and stays clamped to its own length.
+        if needed_source is not None and (
+            needed_source > source_duration - float(trim_start) + 1e-6
+        ) and (
+            scene_manifest.material_kind(material) != "video"
+            or source_image_for(task_id, material) is not None
         ):
             extended = ensure_image_length(
                 task_id, material, float(trim_start) + needed_source
@@ -334,3 +376,186 @@ def timeline_total(edit_list: Iterable[dict], *, clip_speed: float = 1.0) -> flo
         max(0.0, float(item.get("end", 0)) - float(item.get("start", 0))) / speed
         for item in edit_list
     )
+
+
+def _natural_length(
+    task_id: str,
+    scene: dict,
+    *,
+    clip_speed: float,
+    clip_duration: float | None,
+    probe: bool = True,
+) -> float:
+    """一个场景在"没人拖过时间线"时的自然长度。
+
+    这是渲染器自动切片会给它的长度：素材本身的长度（扣掉入点、折算变速），
+    再被 ``max_clip_duration`` 截一刀。读不出素材时退回请求的单段时长，而
+    不是抛错——时间线上少一段画面比显示一个近似时长更糟。
+
+    ``probe`` 关掉时一律按请求的单段时长估算，不启动解码器。这只在"某段素材
+    本身短于 max_clip_duration"时与真实值不同：图片素材是按这个时长烘出来
+    的，网上下的视频通常更长，所以估算值在绝大多数任务里就是真实值。审片
+    列表走这条路（它每次页面重跑都要算一遍），时间线编辑器则真探测。
+    """
+    timing = scene_manifest.scene_timing(scene)
+    if timing["duration"] is not None:
+        return max(MIN_CLIP_DURATION, float(timing["duration"]))
+
+    if not probe:
+        return max(MIN_CLIP_DURATION, float(clip_duration or MIN_CLIP_DURATION))
+
+    try:
+        material = scene_manifest.resolve_material(task_id, scene.get("material"))
+        source_duration = probe_duration(material)
+    except scene_manifest.SceneError as exc:
+        logger.warning(
+            f"cannot measure scene {scene.get('index')} of {task_id}: {exc}; "
+            "assuming the requested clip length"
+        )
+        return max(MIN_CLIP_DURATION, float(clip_duration or MIN_CLIP_DURATION))
+
+    held = (source_duration - timing["trim_start"]) / clip_speed
+    if clip_duration:
+        held = min(held, float(clip_duration))
+    return max(MIN_CLIP_DURATION, held)
+
+
+def plan_windows(
+    task_id: str,
+    scenes: Iterable[dict],
+    *,
+    audio_duration: Any = 0.0,
+    clip_speed: Any = 1.0,
+    clip_duration: Any = None,
+    probe: bool = True,
+) -> list[dict]:
+    """每个场景在成片里实际占据的时间段。
+
+    Why this exists
+    ---------------
+    场景列表原来按下标把第 i 段画面配第 i 句旁白。关键词个数和旁白句数一旦
+    不同——12 个关键词配 28 句旁白是常态——这个配对就是错的：第 7 段画面
+    在成片里播在 30 秒处，那里念的是第 16 句，界面却写着第 7 句。用户看到
+    的"场景"和他听到的声音对不上，于是以为渲染器换掉了图片。
+
+    The scene list used to pair picture *i* with narration line *i*. The term
+    count and the line count are rarely equal — 12 keywords against 28 lines
+    is typical — and then the pairing is simply wrong: picture 7 plays at
+    0:30, where line 16 is spoken, while the list claims line 7. Nothing is
+    out of order in the render; the list is lying about it.
+
+    没人拖过时间线时这里按比例铺满旁白，与 ``auto_fit_edit_list`` 用的是同
+    一套数字，所以界面上写的时间段就是渲染器真正会用的时间段。拖过之后按
+    拖出来的长度算，不再缩放——那才是用户要的结果。
+    """
+    scenes = list(scenes or [])
+    if not scenes:
+        return []
+
+    try:
+        speed = max(float(clip_speed or 1.0), 1e-6)
+    except (TypeError, ValueError):
+        speed = 1.0
+    try:
+        target = max(0.0, float(audio_duration or 0.0))
+    except (TypeError, ValueError):
+        target = 0.0
+    try:
+        cap = float(clip_duration) if clip_duration else None
+    except (TypeError, ValueError):
+        cap = None
+
+    lengths = [
+        _natural_length(
+            task_id, scene, clip_speed=speed, clip_duration=cap, probe=probe
+        )
+        for scene in scenes
+    ]
+
+    # 拖过时间线的任务按它拖出来的长度渲染，不缩放；没拖过的按比例铺满旁白。
+    total = sum(lengths)
+    if not scene_manifest.has_timing_edits(scenes) and target > 0 and total > 0:
+        factor = target / total
+        lengths = [length * factor for length in lengths]
+
+    windows: list[dict] = []
+    elapsed = 0.0
+    for length in lengths:
+        windows.append({"start": round(elapsed, 3), "end": round(elapsed + length, 3)})
+        elapsed += length
+    return windows
+
+
+def auto_fit_edit_list(
+    task_id: str,
+    scenes: Iterable[dict],
+    *,
+    audio_duration: Any = 0.0,
+    clip_speed: Any = 1.0,
+    clip_duration: Any = None,
+) -> list[dict]:
+    """把场景按 ``plan_windows`` 的时间段铺满旁白，返回剪辑表。
+
+    没有这一步时，渲染器会把 12 段 5 秒画面拼成 60 秒，然后把第 1 段再接到
+    64 秒旁白的尾巴上。用户在列表里看到 12 段，成片里却看到 13 段、而且第一
+    张图出现两次。按时间段渲染之后，列表有几段成片就有几段。
+
+    Without this the renderer lays 12 five-second clips end to end for 60s and
+    then loops clip 1 to cover a 64s narration: the list shows 12 pictures and
+    the video shows 13, with the first one twice. Rendering the planned
+    windows means the list and the video hold the same scenes.
+    """
+    scenes = list(scenes or [])
+    windows = plan_windows(
+        task_id,
+        scenes,
+        audio_duration=audio_duration,
+        clip_speed=clip_speed,
+        clip_duration=clip_duration,
+    )
+    planned = []
+    for scene, window in zip(scenes, windows):
+        held = round(window["end"] - window["start"], 3)
+        planned.append({**scene, "duration": held})
+
+    try:
+        speed = max(float(clip_speed or 1.0), 1e-6)
+    except (TypeError, ValueError):
+        speed = 1.0
+    try:
+        target = max(0.0, float(audio_duration or 0.0))
+    except (TypeError, ValueError):
+        target = 0.0
+
+    edit_list = build_edit_list(task_id, planned, clip_speed=speed)
+    if not target or not planned:
+        return edit_list
+
+    # 把差额补在最后一段上。
+    #
+    # 重渲一张图得到的时长会被帧率量化：要 5.33 秒，30fps 下拿到的是 5.30
+    # 秒。12 段各差 0.03 秒,加起来就是 0.4 秒——旁白最后那半句会被切掉。
+    # 这里把累计误差一次性加到最后一段,而不是让它分散在每段上。
+    #
+    # Re-rendering an image quantises to whole frames, so twelve clips each a
+    # frame short add up to a cut-off final line. The accumulated error goes
+    # onto the last clip in one go.
+    for _ in range(3):
+        gap = target - timeline_total(edit_list, clip_speed=speed)
+        if abs(gap) <= 0.05:
+            break
+        held = float(planned[-1].get("duration") or 0.0)
+        adjusted = round(max(MIN_CLIP_DURATION, held + gap), 3)
+        if abs(adjusted - held) < 1e-3:
+            break
+        planned[-1] = {**planned[-1], "duration": adjusted}
+        # 只重算最后一段：重算整张剪辑表会把前面十几段都再探测、再找一次
+        # 原图,而它们的时长根本没变。
+        retried = edit_list[:-1] + build_edit_list(
+            task_id, [planned[-1]], clip_speed=speed
+        )
+        if abs(target - timeline_total(retried, clip_speed=speed)) >= abs(gap):
+            # 没变短也没变长（素材拉不动了），就别再试第三次。
+            break
+        edit_list = retried
+    return edit_list
