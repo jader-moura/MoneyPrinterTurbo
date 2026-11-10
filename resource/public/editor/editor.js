@@ -29,7 +29,7 @@ const ui = {
   musicTrack: el("music-track"), musicVolume: el("music-volume"),
   musicPreview: el("music-preview"), musicSave: el("music-save"),
   musicClose: el("music-close"), musicNote: el("music-note"),
-  musicTrackRow: el("music-track"), musicBed: el("music-bed"),
+  musicLane: el("music-lane"), musicBed: el("music-bed"),
 };
 
 const state = {
@@ -1695,7 +1695,7 @@ ui.scriptSave.addEventListener("click", () => run("Saving the script", async () 
 /* 时间线上的配乐轨。一条从头铺到尾的横条：配乐属于整条片子，没有"哪一段"
    的概念，所以它不分块，只说明"这里一直有音乐,是哪一首,多响"。 */
 function drawMusicTrack() {
-  ui.musicTrackRow.innerHTML = "";
+  ui.musicLane.innerHTML = "";
   const total = projectTotal();
   if (!total) return;
 
@@ -1725,7 +1725,7 @@ function drawMusicTrack() {
       : `${music.track} at ${volume}% — click to change it.`;
   }
   bar.addEventListener("click", openMusic);
-  ui.musicTrackRow.appendChild(bar);
+  ui.musicLane.appendChild(bar);
 }
 
 /* 预览时跟着旁白一起放的那一条配乐。
