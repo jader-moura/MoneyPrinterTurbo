@@ -734,3 +734,39 @@ class TestTheCutSoundForTheWholeVideo:
         response = client.get(f"/api/v1/tasks/{task_id}/subtitles/style")
         assert response.status_code == 200
         assert "positions" in response.json()["data"]
+
+
+class TestPreviewingTheCutSound:
+    """试听那一声。和背景音乐一样走自己的口子，白名单也一样。"""
+
+    @pytest.fixture
+    def client(self):
+        from fastapi.testclient import TestClient
+
+        from app import asgi
+
+        return TestClient(asgi.app)
+
+    def test_a_sound_from_the_library_is_served(self, client, tmp_path):
+        sound = tmp_path / "whoosh.mp3"
+        sound.write_bytes(b"ID3fake")
+        with patch.object(
+            scene_editor.transition_sound, "resolve_transition_sound",
+            return_value=str(sound),
+        ):
+            response = client.get("/api/v1/cut-sound/whoosh.mp3")
+        assert response.status_code == 200
+        assert response.content == b"ID3fake"
+
+    def test_a_path_outside_the_library_is_refused(self, client):
+        """这个口子不能变成"按路径下载服务器上任意文件"。"""
+        response = client.get("/api/v1/cut-sound/..%2F..%2Fconfig.toml")
+        assert response.status_code in (400, 404)
+
+    def test_a_name_the_library_resolves_but_has_lost_is_a_404(self, client, tmp_path):
+        with patch.object(
+            scene_editor.transition_sound, "resolve_transition_sound",
+            return_value=str(tmp_path / "gone.mp3"),
+        ):
+            response = client.get("/api/v1/cut-sound/gone.mp3")
+        assert response.status_code == 404

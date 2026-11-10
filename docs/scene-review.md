@@ -111,6 +111,7 @@ curl -X POST localhost:8080/api/v1/tasks/$TASK/render
 | `PUT /api/v1/tasks/{id}/subtitles/{i}` | fix one caption's words, leaving the voice alone |
 | `GET`/`PUT /api/v1/tasks/{id}/subtitles/style` | caption font, size, colour, outline, box, position |
 | `GET`/`PUT /api/v1/tasks/{id}/cut-sound` | the sound at every cut, or `""` to remove it |
+| `GET /api/v1/cut-sound/{name}` | play one transition sound in the editor |
 | `GET /api/v1/fonts/{name}` | serve one subtitle font to the editor's preview |
 | `GET`/`PUT /api/v1/tasks/{id}/music` | the background music of this video and its volume |
 | `GET /api/v1/music/{name}` | play one track from the music library |

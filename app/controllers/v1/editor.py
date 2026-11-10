@@ -53,6 +53,7 @@ from app.models.schema import (
 )
 from app.controllers.manager.base_manager import TaskQueueFullError
 from app.services import bgm as bgm_service
+from app.services import transition_sound as transition_sound_service
 from app.services import scene_editor, scene_manifest, scene_regen_queue
 from app.services import state as sm
 from app.services import task as tm
@@ -245,6 +246,27 @@ def update_cut_sound(
         ),
     )
     return utils.get_response(200, data)
+
+
+@router.get("/cut-sound/{name}", summary="Play one transition sound")
+def stream_cut_sound(request: Request, name: str = Path(..., description="Sound file name")):
+    """让编辑器能先听一下那一声再决定用不用。
+
+    和背景音乐那个口子一个道理：``/stream`` 只认任务目录，而音效库在别处。
+    解析仍然走 ``transition_sound.resolve_transition_sound`` 那张白名单。
+    """
+    request_id = base.get_task_id(request)
+    try:
+        resolved = transition_sound_service.resolve_transition_sound(name)
+    except ValueError as exc:
+        raise HttpException(
+            task_id="", status_code=400, message=f"{request_id}: {exc}"
+        ) from exc
+    if not os.path.isfile(resolved):
+        raise HttpException(
+            task_id="", status_code=404, message=f"{request_id}: no such sound file"
+        )
+    return FileResponse(resolved)
 
 
 @router.get("/fonts/{name:path}", summary="Serve one subtitle font to the editor")

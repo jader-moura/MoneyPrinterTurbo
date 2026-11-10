@@ -43,6 +43,7 @@ const ui = {
   subsBg: el("subs-bg"), subsBgField: el("subs-bg-field"),
   subsSave: el("subs-save"), subsClose: el("subs-close"), subsNote: el("subs-note"),
   cutSound: el("cut-sound"), cutVolume: el("cut-volume"),
+  cutPreview: el("cut-preview"),
 };
 
 const state = {
@@ -2114,7 +2115,29 @@ function drawCutSound(settings) {
   const known = entries.some(([value]) => value === (settings.sound || ""));
   ui.cutSound.value = known ? (settings.sound || "") : "";
   ui.cutVolume.value = String(settings.volume ?? 0.5);
+  syncCutPreview();
 }
+
+/** 试听那一声。"None" 没有文件可放，就不给播放器。
+
+    音量照搬要存的那个值，和背景音乐那边一个道理：在这里听到的轻重和成片
+    里一致，否则试听只能回答"是哪一声",回答不了"会不会太吵"。 */
+function syncCutPreview() {
+  const name = ui.cutSound.value;
+  ui.cutPreview.hidden = !name;
+  if (!name) { ui.cutPreview.removeAttribute("src"); return; }
+  ui.cutPreview.src = `${API}/cut-sound/${encodeURIComponent(name)}`;
+  const level = Number(ui.cutVolume.value);
+  ui.cutPreview.volume = Number.isFinite(level) ? Math.min(1, Math.max(0, level)) : 0.5;
+}
+
+ui.cutSound.addEventListener("change", syncCutPreview);
+ui.cutVolume.addEventListener("input", () => {
+  const level = Number(ui.cutVolume.value);
+  if (Number.isFinite(level)) {
+    ui.cutPreview.volume = Math.min(1, Math.max(0, level));
+  }
+});
 
 async function openMusic() {
   ui.musicPanel.hidden = false;
@@ -2134,6 +2157,7 @@ function closeMusic() {
   ui.musicPanel.hidden = true;
   // 关掉面板就停声，否则试听会一直放到用户去找哪里在响。
   try { ui.musicPreview.pause(); } catch { /* 还没加载 */ }
+  try { ui.cutPreview.pause(); } catch { /* 还没加载 */ }
 }
 
 ui.musicToggle.addEventListener("click", () => {
