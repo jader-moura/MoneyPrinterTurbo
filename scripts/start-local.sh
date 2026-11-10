@@ -354,6 +354,45 @@ print(f"       {device.get('name')}, {free} of {total} MB free, "
 PY
 fi
 
+# A running genserver that config.toml does not point at is the same as no
+# genserver, and it fails much later: the run spends an LLM call and a full
+# TTS pass before the materials stage says "openai_image_base_url is not set".
+# There is deliberately no default for it in the code (the endpoint may be a
+# paid relay, so it has to be stated), and config.example.toml ships these two
+# lines -- but a config.toml the WebUI has rewritten keeps only the keys that
+# were in memory, so a config predating the image source silently loses them.
+if [ -n "$PYTHON_BIN" ]; then
+  missing_image_keys=$("$PYTHON_BIN" - <<'PY' 2>/dev/null
+import re
+try:
+    text = open("config.toml", encoding="utf8").read()
+except OSError:
+    text = ""
+
+
+def value(key):
+    match = re.search(rf'^\s*{key}\s*=\s*"([^"]*)"', text, re.M)
+    return (match.group(1) if match else "").strip()
+
+
+if value("video_source") == "openai_image":
+    for key in ("openai_image_base_url", "openai_image_model"):
+        if not value(key):
+            print(key)
+PY
+)
+  if [ -n "$missing_image_keys" ]; then
+    warn "config.toml does not say where to generate images"
+    detail "video_source is \"openai_image\" but these are unset in [app]:"
+    for key in $missing_image_keys; do
+      detail "  $key"
+    done
+    detail "for the local genserver, add to [app] in config.toml:"
+    detail "  openai_image_base_url = \"$GEN_URL/v1\""
+    detail "  openai_image_model = \"zimage-turbo\""
+  fi
+fi
+
 # --- 3. Kokoro ---------------------------------------------------------------
 
 if http_ok "$KOKORO_URL/v1/audio/voices" 10; then
