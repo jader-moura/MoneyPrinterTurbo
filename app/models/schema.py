@@ -740,6 +740,31 @@ class SceneEffectsRequest(BaseModel):
     cut_sound: Optional[str] = None
 
 
+class BackgroundMusicRequest(BaseModel):
+    """这条片子的背景音乐。只提交想改的字段。
+
+    ``track`` 空字符串是"不要背景音乐"，``"random"`` 是每次渲染随机挑一首，
+    其余是音乐库里的文件名。音量是 0 到 1。
+    """
+
+    track: Optional[str] = None
+    volume: Optional[float] = None
+
+
+class BackgroundMusicData(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    track: str = ""
+    kind: str = ""
+    volume: float = 0.0
+    tracks: List[str] = []
+    external: bool = False
+
+
+class BackgroundMusicResponse(BaseResponse):
+    data: BackgroundMusicData
+
+
 class NarrationScriptRequest(BaseModel):
     """整条旁白的文字，一次改完。
 

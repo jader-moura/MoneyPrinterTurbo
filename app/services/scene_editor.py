@@ -44,7 +44,7 @@ from app.models.schema import (
     VideoTransitionMode,
 )
 from app.services import material, scene_manifest, task_artifacts, timeline
-from app.services import transition_sound
+from app.services import bgm, transition_sound
 from app.services import state as sm
 from app.services import task as tm
 from app.utils import utils
@@ -1113,6 +1113,101 @@ def set_effects(
 
         scene_manifest.save_scenes(task_id, scenes)
         return scenes[position]
+
+
+RANDOM_BACKGROUND = "random"
+
+
+def background_music(task_id: str) -> dict:
+    """这条片子的背景音乐：选了什么、多响，以及这台机器上有哪些可选。"""
+    params = load_params(task_id)
+    chosen = str(getattr(params, "bgm_file", "") or "").strip()
+    kind = str(getattr(params, "bgm_type", "") or "").strip()
+    try:
+        tracks = bgm.list_bgm_files()
+    except Exception as exc:  # pragma: no cover - 列目录失败不该挡住审片
+        logger.warning(f"cannot list the background music: {exc}")
+        tracks = []
+    return {
+        # 界面只认三种：不要、随机、某一首。bgm_type 里那些外部提供商
+        # (sonilo/elevenlabs) 这里原样显示为"由设置决定"，不去改它。
+        "track": (
+            os.path.basename(chosen)
+            if chosen
+            else (RANDOM_BACKGROUND if kind == RANDOM_BACKGROUND else "")
+        ),
+        "kind": kind,
+        "volume": float(getattr(params, "bgm_volume", 0.0) or 0.0),
+        "tracks": [os.path.basename(path) for path in tracks],
+        # 这条片子交给外部服务生成配乐时，界面不该假装能在这里换曲子。
+        "external": kind in {"sonilo", "elevenlabs"},
+    }
+
+
+def set_background_music(
+    task_id: str,
+    *,
+    track: str | None = None,
+    volume: float | None = None,
+) -> dict:
+    """换掉这条片子的背景音乐，或者调它的音量。
+
+    ``track`` 空字符串是"不要背景音乐"，``"random"`` 是每次渲染随机挑一首，
+    其余按文件名解析。名字当场校验：等渲染完才发现这台机器上没有这首曲子,
+    用户已经白等了一整次渲染,而片子里就是没有音乐。
+
+    改的是任务清单里的 ``params``——审片之后的渲染读的就是那一份，不是
+    WebUI 的 session，也不是全局配置。所以这里换的曲子只影响这一条片子。
+    """
+    _require_idle(task_id)
+    with _editing(task_id):
+        params = load_params(task_id)
+        payload = scene_manifest.load_raw(task_id)
+        stored = payload.get("params")
+        if not isinstance(stored, dict):
+            raise SceneError(
+                "this task has no saved parameters; its music cannot be changed"
+            )
+
+        if track is not None:
+            wanted = str(track).strip()
+            if not wanted:
+                stored["bgm_type"] = ""
+                stored["bgm_file"] = ""
+            elif wanted == RANDOM_BACKGROUND:
+                stored["bgm_type"] = RANDOM_BACKGROUND
+                stored["bgm_file"] = ""
+            else:
+                try:
+                    resolved = bgm.resolve_bgm_file(wanted)
+                except ValueError as exc:
+                    raise SceneError(
+                        f"unknown background music {wanted!r}: {exc}"
+                    ) from exc
+                # 内置歌曲和用户自己丢进去的分别记成 preset/custom，WebUI 的
+                # 来源下拉框据此显示，不至于把一首内置曲子说成"自定义"。
+                builtin = {
+                    os.path.basename(path) for path in bgm.list_builtin_bgm_files()
+                }
+                stored["bgm_type"] = (
+                    "preset" if os.path.basename(resolved) in builtin else "custom"
+                )
+                stored["bgm_file"] = resolved
+
+        if volume is not None:
+            try:
+                level = float(volume)
+            except (TypeError, ValueError) as exc:
+                raise SceneError("the music volume must be a number") from exc
+            if not 0.0 <= level <= 1.0:
+                raise SceneError(
+                    f"the music volume must be between 0 and 1, got {level}"
+                )
+            stored["bgm_volume"] = round(level, 3)
+
+        if not task_artifacts.patch_script_data(task_id, params=stored):
+            raise SceneError("failed to save the background music")
+    return background_music(task_id)
 
 
 def _apply_scene_motion(task_id: str, scene: dict, motion: str) -> None:

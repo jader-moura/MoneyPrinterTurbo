@@ -334,3 +334,141 @@ class TestGroupingTheCutSounds:
                 [1.0, 2.0], ["gone.mp3", "ok.mp3"], ""
             )
         assert grouped == {"/sounds/ok.mp3": [2.0]}
+
+
+class TestBackgroundMusic:
+    """整条片子的配乐。改的是这条任务自己的参数，不是全局设置。"""
+
+    def test_reading_it_back_lists_what_is_available(self, task_root):
+        task_id, _ = _reviewed_task(task_root)
+        with patch.object(
+            scene_editor.bgm, "list_bgm_files",
+            return_value=["/songs/Kurt - Cheel.mp3", "/songs/Coupe.mp3"],
+        ):
+            music = scene_editor.background_music(task_id)
+        assert music["tracks"] == ["Kurt - Cheel.mp3", "Coupe.mp3"]
+        assert music["external"] is False
+
+    def test_choosing_a_track_writes_it_to_this_task_only(self, task_root):
+        task_id, _ = _reviewed_task(task_root)
+        with (
+            patch.object(
+                scene_editor.bgm, "resolve_bgm_file",
+                return_value="/songs/Kurt - Cheel.mp3",
+            ),
+            patch.object(
+                scene_editor.bgm, "list_builtin_bgm_files",
+                return_value=["/songs/Kurt - Cheel.mp3"],
+            ),
+            patch.object(scene_editor.bgm, "list_bgm_files", return_value=[]),
+        ):
+            scene_editor.set_background_music(task_id, track="Kurt - Cheel.mp3")
+        params = scene_editor.load_params(task_id)
+        assert params.bgm_file == "/songs/Kurt - Cheel.mp3"
+        assert params.bgm_type == "preset"
+
+    def test_an_uploaded_track_is_recorded_as_custom(self, task_root):
+        task_id, _ = _reviewed_task(task_root)
+        with (
+            patch.object(
+                scene_editor.bgm, "resolve_bgm_file", return_value="/bgm/mine.mp3"
+            ),
+            patch.object(
+                scene_editor.bgm, "list_builtin_bgm_files", return_value=[]
+            ),
+            patch.object(scene_editor.bgm, "list_bgm_files", return_value=[]),
+        ):
+            scene_editor.set_background_music(task_id, track="mine.mp3")
+        assert scene_editor.load_params(task_id).bgm_type == "custom"
+
+    def test_no_music_clears_both_the_type_and_the_file(self, task_root):
+        """音量留着不动：用户下次选回来时不该从 0 开始。"""
+        task_id, _ = _reviewed_task(task_root)
+        with patch.object(scene_editor.bgm, "list_bgm_files", return_value=[]):
+            music = scene_editor.set_background_music(task_id, track="")
+        params = scene_editor.load_params(task_id)
+        assert params.bgm_type == "" and params.bgm_file == ""
+        assert music["track"] == ""
+
+    def test_random_keeps_the_choice_for_render_time(self, task_root):
+        task_id, _ = _reviewed_task(task_root)
+        with patch.object(scene_editor.bgm, "list_bgm_files", return_value=[]):
+            music = scene_editor.set_background_music(task_id, track="random")
+        params = scene_editor.load_params(task_id)
+        assert params.bgm_type == "random" and params.bgm_file == ""
+        assert music["track"] == "random"
+
+    def test_a_track_this_machine_does_not_have_is_refused(self, task_root):
+        task_id, _ = _reviewed_task(task_root)
+        with patch.object(
+            scene_editor.bgm, "resolve_bgm_file", side_effect=ValueError("not allowed")
+        ):
+            with pytest.raises(scene_editor.SceneError) as error:
+                scene_editor.set_background_music(task_id, track="../../secrets.toml")
+        assert "unknown background music" in str(error.value)
+
+    def test_the_volume_is_checked(self, task_root):
+        task_id, _ = _reviewed_task(task_root)
+        with pytest.raises(scene_editor.SceneError) as error:
+            scene_editor.set_background_music(task_id, volume=4)
+        assert "between 0 and 1" in str(error.value)
+        with pytest.raises(scene_editor.SceneError):
+            scene_editor.set_background_music(task_id, volume=-0.5)
+
+    def test_the_volume_alone_can_be_changed(self, task_root):
+        task_id, _ = _reviewed_task(task_root)
+        with patch.object(scene_editor.bgm, "list_bgm_files", return_value=[]):
+            scene_editor.set_background_music(task_id, volume=0.35)
+        assert scene_editor.load_params(task_id).bgm_volume == 0.35
+
+    def test_an_externally_scored_video_says_so(self, task_root):
+        task_id, _ = _reviewed_task(task_root)
+        payload = scene_manifest.load_raw(task_id)
+        payload["params"]["bgm_type"] = "sonilo"
+        task_artifacts.patch_script_data(task_id, params=payload["params"])
+        with patch.object(scene_editor.bgm, "list_bgm_files", return_value=[]):
+            assert scene_editor.background_music(task_id)["external"] is True
+
+
+class TestMusicOverHttp:
+    @pytest.fixture
+    def client(self):
+        from fastapi.testclient import TestClient
+
+        from app import asgi
+
+        return TestClient(asgi.app)
+
+    def test_reading_and_setting_over_http(self, client, task_root):
+        task_id, _ = _reviewed_task(task_root)
+        with patch.object(scene_editor.bgm, "list_bgm_files", return_value=[]):
+            read = client.get(f"/api/v1/tasks/{task_id}/music")
+        assert read.status_code == 200
+        with (
+            patch.object(
+                scene_editor.bgm, "resolve_bgm_file", return_value="/songs/a.mp3"
+            ),
+            patch.object(
+                scene_editor.bgm, "list_builtin_bgm_files",
+                return_value=["/songs/a.mp3"],
+            ),
+            patch.object(scene_editor.bgm, "list_bgm_files", return_value=["/songs/a.mp3"]),
+        ):
+            response = client.put(
+                f"/api/v1/tasks/{task_id}/music",
+                json={"track": "a.mp3", "volume": 0.3},
+            )
+        assert response.status_code == 200
+        assert response.json()["data"]["volume"] == 0.3
+
+    def test_a_bad_volume_is_a_400(self, client, task_root):
+        task_id, _ = _reviewed_task(task_root)
+        response = client.put(
+            f"/api/v1/tasks/{task_id}/music", json={"volume": 9}
+        )
+        assert response.status_code == 400
+
+    def test_previewing_refuses_a_path_outside_the_library(self, client):
+        """试听口子只认曲库那两个目录，不是任意文件下载。"""
+        response = client.get("/api/v1/music/..%2F..%2Fconfig.toml")
+        assert response.status_code in (400, 404)

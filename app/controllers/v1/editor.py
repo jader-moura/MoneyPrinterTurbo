@@ -19,7 +19,10 @@ what failed, with no silent provider substitution and no silently skipped
 scene, since seeing the real result is the entire point of a review.
 """
 
+import os
+
 from fastapi import Depends, Path, Request
+from fastapi.responses import FileResponse
 from loguru import logger
 
 from app.config import config
@@ -28,6 +31,8 @@ from app.controllers.v1.base import new_router
 from app.controllers.v1.video import create_task, task_manager
 from app.models.exception import HttpException
 from app.models.schema import (
+    BackgroundMusicRequest,
+    BackgroundMusicResponse,
     NarrationScriptRequest,
     SceneListResponse,
     SceneAddRequest,
@@ -44,6 +49,7 @@ from app.models.schema import (
     TaskVideoRequest,
 )
 from app.controllers.manager.base_manager import TaskQueueFullError
+from app.services import bgm as bgm_service
 from app.services import scene_editor, scene_manifest, scene_regen_queue
 from app.services import state as sm
 from app.services import task as tm
@@ -170,6 +176,73 @@ def add_scene(
 # 整数参数的路由并直接返回 422，而不是落到这里。
 # Declared before ``/scenes/{index}``: otherwise "reorder" matches that
 # integer-typed route first and returns 422 instead of reaching this one.
+@router.get(
+    "/tasks/{task_id}/music",
+    response_model=BackgroundMusicResponse,
+    summary="The background music of this video, and what else is available",
+)
+def read_background_music(
+    request: Request, task_id: str = Path(..., description="Task ID")
+):
+    request_id = base.get_task_id(request)
+    _require_task(task_id, request_id)
+    data = _handle(
+        task_id, request_id, lambda: scene_editor.background_music(task_id)
+    )
+    return utils.get_response(200, data)
+
+
+@router.get(
+    "/music/{name}",
+    summary="Play one background music file",
+)
+def stream_background_music(request: Request, name: str = Path(..., description="File name")):
+    """让编辑器能先听一下再选。
+
+    ``/stream`` 那条路由只认任务目录里的文件，而曲库在 resource/songs 和
+    storage/bgm，所以这里单开一个口子——解析仍然走 ``bgm.resolve_bgm_file``
+    那张白名单,它只认这两个目录。
+    """
+    request_id = base.get_task_id(request)
+    try:
+        resolved = bgm_service.resolve_bgm_file(name)
+    except ValueError as exc:
+        raise HttpException(
+            task_id="", status_code=400, message=f"{request_id}: {exc}"
+        ) from exc
+    if not os.path.isfile(resolved):
+        raise HttpException(
+            task_id="", status_code=404, message=f"{request_id}: no such music file"
+        )
+    return FileResponse(resolved)
+
+
+@router.put(
+    "/tasks/{task_id}/music",
+    response_model=BackgroundMusicResponse,
+    summary="Choose the background music and its volume",
+)
+def update_background_music(
+    request: Request,
+    body: BackgroundMusicRequest,
+    task_id: str = Path(..., description="Task ID"),
+):
+    """换这条片子的配乐。空的 ``track`` 是不要音乐，``random`` 是随机挑。
+
+    改的是这条任务自己的参数，不是全局设置，所以别的片子不受影响。
+    """
+    request_id = base.get_task_id(request)
+    _require_task(task_id, request_id)
+    data = _handle(
+        task_id,
+        request_id,
+        lambda: scene_editor.set_background_music(
+            task_id, track=body.track, volume=body.volume
+        ),
+    )
+    return utils.get_response(200, data)
+
+
 @router.put(
     "/tasks/{task_id}/script",
     response_model=SceneListResponse,

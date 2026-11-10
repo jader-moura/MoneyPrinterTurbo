@@ -148,6 +148,12 @@ body {
 
 /* 这一行是"两个按钮 + 一句说明"，不是等分的一排控件，所以不吃 .row 那条
    flex: 1——否则"Save script"会被拉到半屏宽。 */
+.script-panel audio {
+  width: 100%;
+  margin-top: 6px;
+  height: 32px;
+}
+
 .script-panel .row { margin-top: 8px; align-items: center; }
 .script-panel .row > .btn { flex: 0 0 auto; }
 .script-panel .row > .hint { flex: 1 1 auto; margin: 0; }

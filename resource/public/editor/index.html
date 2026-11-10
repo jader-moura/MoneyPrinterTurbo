@@ -14,6 +14,7 @@
   <span id="totals" class="totals"></span>
   <span class="spacer"></span>
   <button id="script-toggle" class="btn" disabled>Script</button>
+  <button id="music-toggle" class="btn" disabled>Music</button>
   <button id="rerecord" class="btn" disabled>Re-record narration</button>
   <button id="render" class="btn primary" disabled>Render video</button>
 </header>
@@ -43,6 +44,29 @@
     <button id="script-save" class="btn primary small">Save script</button>
     <button id="script-close" class="btn small">Close</button>
     <span id="script-note" class="hint"></span>
+  </div>
+</section>
+
+<!-- 背景音乐。和旁白正文一样浮着，不占布局：配乐属于整条片子，而且它只是
+     偶尔打开改一下的东西，不该一直占着画面的高度。 -->
+<section id="music-panel" class="script-panel" hidden>
+  <h2>Background music</h2>
+  <p class="hint">Plays under the whole video. The volume is relative to the
+    narration — 0.2 sits well behind a voice. Changing it here affects only
+    this video, not your other tasks.</p>
+  <div class="field">
+    <label for="music-track">Track</label>
+    <select id="music-track"></select>
+  </div>
+  <div class="field">
+    <label for="music-volume">Volume</label>
+    <input id="music-volume" type="number" min="0" max="1" step="0.05">
+  </div>
+  <audio id="music-preview" controls preload="none"></audio>
+  <div class="row">
+    <button id="music-save" class="btn primary small">Save music</button>
+    <button id="music-close" class="btn small">Close</button>
+    <span id="music-note" class="hint"></span>
   </div>
 </section>
 

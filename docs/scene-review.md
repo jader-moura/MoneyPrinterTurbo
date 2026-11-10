@@ -107,6 +107,9 @@ curl -X POST localhost:8080/api/v1/tasks/$TASK/render
 | `DELETE /api/v1/tasks/{id}/scenes/{i}` | drop a scene |
 | `POST /api/v1/tasks/{id}/scenes/reorder` | `order` must be a full permutation |
 | `PUT /api/v1/tasks/{id}/script` | rewrite the whole narration script |
+| `PUT /api/v1/tasks/{id}/scenes/{i}/effects` | `transition`, `image_motion`, `cut_sound` for one scene |
+| `GET`/`PUT /api/v1/tasks/{id}/music` | the background music of this video and its volume |
+| `GET /api/v1/music/{name}` | play one track from the music library |
 | `POST /api/v1/tasks/{id}/audio` | re-record narration and rebuild subtitles |
 | `POST /api/v1/tasks/{id}/render` | render the reviewed scenes |
 | `GET /api/v1/tasks/{id}/timeline` | the scene list plus each material's real length |
@@ -138,6 +141,23 @@ message says what. Nothing falls back to another provider silently.
   works and overrides just that stretch; clearing it drops those lines from the
   next recording. Either way the recorded voice goes stale and you choose when
   to re-record.
+* **Each scene can have its own look and sound on the cut.** `transition`
+  (fade, slide, zoom, shuffle, or `none` for a hard cut), `image_motion`
+  (`zoom` or `static`) and `cut_sound` (a file from the sound library, or
+  `none` for silence). Leave any of them empty and that scene follows the
+  video-wide setting; `none` is a choice and overrides it. Picking a
+  transition or a cut sound puts the task on the edit-list render path, the
+  same one dragging the timeline uses.
+* **Changing the motion re-renders that clip.** Motion is baked in when the
+  picture is made, not applied at render, so the clip is rebuilt from the
+  source PNG in the task folder — a few seconds, and instant once that
+  combination has been rendered before. Stock footage has no source image, so
+  it cannot change motion and says so.
+* **Background music belongs to the video, not to a scene.** `PUT
+  .../music` with a track name, `random`, or an empty string for none, plus a
+  volume between 0 and 1. It writes this task's own parameters, so other
+  videos are unaffected. A video scored by an external provider (Sonilo,
+  ElevenLabs) reports `external` and is left alone.
 * **A scene can lose its file** if something outside the app deletes it. The
   panel says so for that row, and Render refuses before queueing rather than
   failing halfway through.

@@ -25,6 +25,10 @@ const ui = {
   scriptToggle: el("script-toggle"), scriptPanel: el("script-panel"),
   scriptText: el("script-text"), scriptSave: el("script-save"),
   scriptClose: el("script-close"), scriptNote: el("script-note"),
+  musicToggle: el("music-toggle"), musicPanel: el("music-panel"),
+  musicTrack: el("music-track"), musicVolume: el("music-volume"),
+  musicPreview: el("music-preview"), musicSave: el("music-save"),
+  musicClose: el("music-close"), musicNote: el("music-note"),
 };
 
 const state = {
@@ -589,6 +593,7 @@ function draw() {
     || !!(state.data && state.data.audio_stale);
   ui.rerecord.disabled = !state.data || !state.data.audio_stale;
   ui.scriptToggle.disabled = !state.data;
+  ui.musicToggle.disabled = !state.data;
   ui.placeholder.hidden = ready;
   ui.playhead.hidden = !ready;
   ui.frame.classList.toggle("ready", ready);
@@ -1666,6 +1671,85 @@ ui.scriptSave.addEventListener("click", () => run("Saving the script", async () 
   closeScript();
   // 存完配音就不作数了，但不替用户按"重新配音"：那要跑一次 TTS。
   return "Script saved. Re-record the narration when you want it spoken.";
+}));
+
+/* ---------- 背景音乐 ----------
+
+   配乐属于整条片子，所以它和场景面板无关。曲库在服务端（内置歌曲加用户自己
+   丢进去的），所以列表和试听都要走接口。 */
+const NO_MUSIC = "";
+const RANDOM_MUSIC = "random";
+
+function musicPath() {
+  return `/tasks/${encodeURIComponent(state.taskId)}/music`;
+}
+
+function drawMusic(music) {
+  ui.musicTrack.innerHTML = "";
+  const entries = [
+    [NO_MUSIC, "No music"],
+    [RANDOM_MUSIC, "A different one each render"],
+    ...(music.tracks || []).map((name) => [name, name.replace(/\.[^.]+$/, "")]),
+  ];
+  for (const [value, label] of entries) {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = label;
+    ui.musicTrack.appendChild(option);
+  }
+  const known = entries.some(([value]) => value === music.track);
+  ui.musicTrack.value = known ? music.track : NO_MUSIC;
+  ui.musicVolume.value = String(music.volume ?? 0.2);
+  // 这条片子的配乐交给了外部服务（Sonilo / ElevenLabs）时别假装能在这里换：
+  // 换了也只是被那边生成的曲子盖掉。
+  ui.musicTrack.disabled = !!music.external;
+  ui.musicSave.disabled = !!music.external;
+  ui.musicNote.textContent = music.external
+    ? `This video gets its music from ${music.kind}; change that in the main `
+      + "settings."
+    : (!known && music.track ? `Currently: ${music.track}` : "");
+  syncMusicPreview();
+}
+
+/** 试听选中的那一首。"不要音乐"和"随机"没有具体文件，就不给播放器。 */
+function syncMusicPreview() {
+  const name = ui.musicTrack.value;
+  const playable = name && name !== RANDOM_MUSIC;
+  ui.musicPreview.hidden = !playable;
+  if (!playable) { ui.musicPreview.removeAttribute("src"); return; }
+  ui.musicPreview.src = `${API}/music/${encodeURIComponent(name)}`;
+}
+
+async function openMusic() {
+  ui.musicPanel.hidden = false;
+  ui.musicNote.textContent = "Loading…";
+  try {
+    drawMusic((await call("GET", musicPath())) || {});
+  } catch (error) {
+    ui.musicNote.textContent = String(error.message || error);
+  }
+}
+
+function closeMusic() {
+  ui.musicPanel.hidden = true;
+  // 关掉面板就停声，否则试听会一直放到用户去找哪里在响。
+  try { ui.musicPreview.pause(); } catch { /* 还没加载 */ }
+}
+
+ui.musicToggle.addEventListener("click", () => {
+  if (ui.musicPanel.hidden) openMusic(); else closeMusic();
+});
+ui.musicClose.addEventListener("click", closeMusic);
+ui.musicTrack.addEventListener("change", syncMusicPreview);
+
+ui.musicSave.addEventListener("click", () => run("Saving the music", async () => {
+  const music = await call("PUT", musicPath(), {
+    track: ui.musicTrack.value,
+    volume: Number(ui.musicVolume.value),
+  });
+  drawMusic(music || {});
+  closeMusic();
+  return "";
 }));
 
 ui.render.addEventListener("click", () => run("Submitting the render", async () => {
