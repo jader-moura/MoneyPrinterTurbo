@@ -1983,11 +1983,25 @@ async function loadLibrary(page) {
     const shown = ui.libraryGrid.children.length;
     ui.libraryCount.textContent = data.total
       ? `${shown} of ${data.total}`
-      : "nothing here yet";
+      : "";
+    if (!data.total) {
+      const empty = document.createElement("p");
+      empty.className = "hint";
+      empty.textContent = "No videos yet. Generate one, then come back here to "
+        + "edit and re-render it.";
+      ui.libraryGrid.appendChild(empty);
+    }
     state.libraryPage = wanted;
     ui.libraryMoreRow.hidden = shown >= (data.total || 0);
   } catch (error) {
-    ui.libraryCount.textContent = String(error.message || error);
+    ui.libraryCount.textContent = "";
+    // 失败要说在该出现视频的那块地方。只在角落里写一行小字，看起来就是
+    // "一条片子都没有"——而那是完全不同的一件事。
+    const failed = document.createElement("p");
+    failed.className = "hint";
+    failed.textContent = `Could not read your videos: ${error.message || error}. `
+      + "If you have just updated, the API needs restarting to serve this.";
+    ui.libraryGrid.appendChild(failed);
   }
 }
 

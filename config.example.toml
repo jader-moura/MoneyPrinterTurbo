@@ -107,6 +107,11 @@ tls_verify = true
 # and the pictures match the script, which stock footage rarely does. Start the
 # server with scripts/start-local.sh; see local_services/genserver/README.md.
 # Every stock and paid source below still works the moment you select it.
+# 改完代码自动重起 API。默认关着；开发时打开可以免去每次手动重起——新加的
+# 接口在旧进程里一律 404，而那看起来像功能坏了，不像进程旧了。
+# 渲染跑到一半时存一次代码会把它打断，所以出片时别开着。
+# reload_debug = true
+
 video_source = "openai_image"
 
 # API key lists support key rotation. Use straight ASCII double quotes and

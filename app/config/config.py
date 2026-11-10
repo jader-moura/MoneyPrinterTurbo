@@ -700,7 +700,13 @@ project_description = _cfg.get(
     "<a href='https://github.com/harry0703/MoneyPrinterTurbo'>https://github.com/harry0703/MoneyPrinterTurbo</a>",
 )
 project_version = _cfg.get("project_version", __version__)
-reload_debug = False
+# 改完代码要不要自动重起 API。默认关着，和以前一样——开着会让 uvicorn 多开
+# 一个监视进程,而且渲染跑到一半时存一次代码就会把它打断。
+#
+# 以前这里是写死的 False，于是"改了代码"和"API 还在跑旧代码"之间没有任何提
+# 示：新加的接口一律 404，而 404 看起来像功能坏了，不像进程旧了。开发时在
+# config.toml 的 [app] 里写 reload_debug = true 就不必每次手动重起。
+reload_debug = bool(app.get("reload_debug", False))
 
 app["redis_host"] = os.getenv(
     "MPT_APP_REDIS_HOST",
