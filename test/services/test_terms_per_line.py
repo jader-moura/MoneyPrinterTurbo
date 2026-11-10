@@ -176,10 +176,20 @@ class TestVisualPromptMode:
         return seen["prompt"]
 
     def test_the_visual_mode_asks_for_a_full_sentence(self):
+        """钉的是"一整句，不是短查询"，不是某一个具体字数。
+
+        字数会跟着提示词的要求变（要写清人物、动作、地点和年代，句子就得长
+        一点）。写死 "12-30 words" 会让每一次改措辞都红一次，而它想保证的
+        事——视觉模式要的是整句描述、不是 Pexels 查询——和具体数字无关。
+        """
         prompt = self._captured_prompt(visual_prompt=True)
         assert "Scene Image Prompt Writer" in prompt
-        assert "12-30 words" in prompt
         assert "2-6 words" not in prompt
+        import re
+
+        words = re.search(r"roughly (\d+)-(\d+) words", prompt)
+        assert words, "the visual prompt should still ask for a sentence length"
+        assert int(words.group(1)) >= 10
 
     def test_the_search_mode_still_asks_for_a_short_query(self):
         """库存素材源拿它去搜索：一整句描述在 Pexels 上搜不到东西。"""

@@ -996,6 +996,11 @@ function drawInspector() {
   ui.inspTitle.textContent = `Scene ${scene.index + 1}${scene.locked ? " · locked" : ""}`;
 
   const keyword = field("Keyword", "input", scene.keyword || "");
+  // 关键词空着的那几段（关键词常常比场景少）会拿主题加这一段的台词去画。
+  // 把它当占位文字摆出来，用户看得见要画什么，改一笔就是自己的。
+  if (!scene.keyword && scene.keyword_suggestion) {
+    keyword.input.placeholder = scene.keyword_suggestion;
+  }
   ui.inspBody.append(keyword.wrap);
 
   // 画风紧跟在关键词下面：关键词说画什么，画风说画成什么样，改完一起

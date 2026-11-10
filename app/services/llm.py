@@ -1405,6 +1405,26 @@ def _scene_image_prompt_request(
     becomes the prompt. Punctuation-split lines are often not depictable on
     their own, so the model is told to infer a concrete scene from the subject
     rather than illustrate the words literally.
+
+    为什么规则里要强调人、表情和时代
+    --------------------------------
+    这几条是从用户手改的提示词里学来的。同一条片子里，模型自己给的是
+    "bowl of rice"、"rice terraces"、"ancient stone tools"——没有人、没有动作、
+    没有年代，画出来就是一张张库存图，摆在哪一段都成立，也就等于什么都没讲。
+    用户改成 "The asian farmer makes a very angry face to the rice"、"asian
+    people from ten thousand years ago cutting wild rice with small stone
+    blades"、"Ancient Asian farmer selecting rice seeds to plant" 之后，画面
+    立刻开始替旁白讲故事。三点差别：
+
+    * **有人在做事**，而不是一件东西摆在那里；
+    * **情绪长在脸上**："难收"这句话配的是一张恼火的脸,而不是一株稻子;
+    * **年代和地点每一条都重写一遍**。每张图是分开画的,彼此没有记忆,所以
+      "一万年前"、"中国南方"不写进这一条,这一条就会画成现代。
+
+    These rules were learned from prompts a user rewrote by hand. The model's
+    own terms were objects with nobody in them, which read as stock imagery
+    that could sit under any line. The rewrites named a person, an action, a
+    feeling and a period, and the pictures began doing narrative work.
     """
     return f"""
 # Role: Scene Image Prompt Writer
@@ -1412,27 +1432,58 @@ def _scene_image_prompt_request(
 ## Goals:
 For each numbered narration line, write one English image-generation prompt
 describing exactly what the viewer should see on screen **while that line is
-spoken**, in a video about the subject below.
+spoken**, in a video about the subject below. The pictures have to carry the
+story, not merely decorate it: someone watching with the sound off should be
+able to follow what is happening from the pictures alone.
 
 ## Constrains:
 1. return a json-array of strings and nothing else.
 2. the array must have exactly {count} items, in the same order as the lines.
 3. item i must show what line i is saying, read in the context of the subject
    and of the lines around it - not the video as a whole.
-4. one sentence, roughly 12-30 words. name the subject of the picture, what it
-   is doing, and where. concrete and physically depictable.
-5. a line that cannot be drawn on its own ("Left untreated", "Keep going for
-   hours", "Now stop blinking") still gets a concrete scene: infer from the
-   subject what is happening at that moment and describe that.
-6. do not quote or spell out the narration, and never ask for text, captions,
-   numbers or letters inside the picture.
-7. no camera directions, no style words, no lighting or render instructions -
-   those are appended separately from the user's chosen style.
-8. english only.
+4. one sentence, roughly 15-35 words. concrete and physically depictable.
+5. **show a person or people doing something.** name who they are and the
+   action they are taking. a bare object with nobody in frame ("a bowl of
+   rice", "stone tools", "terraced fields") is a stock photo, not a story
+   beat - use one only when the line is genuinely about that object alone,
+   and even then show a hand or a person interacting with it.
+6. **when the line carries a feeling or a judgement, put it on a face.** lines
+   like "terrible for anyone trying to harvest it", "nobody expected this" or
+   "it changed everything" should show someone reacting - frustrated,
+   astonished, exhausted, delighted - not an illustration of the noun in the
+   sentence. the expression is what tells the viewer how to feel about the
+   fact.
+7. **repeat the setting in every prompt.** each picture is drawn separately,
+   with no memory of the others, so any period, place, culture or season the
+   narration establishes anywhere must be restated in every prompt where
+   people, clothing or landscape appear - "ten thousand years ago", "ancient",
+   "in southern China", "pre-industrial", and so on. leaving it out gives a
+   modern street scene in the middle of a stone-age story.
+8. **keep recurring people recognisably the same.** if the video follows one
+   farmer, inventor or patient, describe them the same way each time (age,
+   build, clothing) so the pictures read as one story rather than a slideshow
+   of strangers.
+9. a line that cannot be drawn on its own ("Left untreated", "Year after
+   year", "Keep going for hours") still gets a concrete scene: infer from the
+   subject and the neighbouring lines what is happening at that moment and
+   describe that, with people in it.
+10. do not quote or spell out the narration, and never ask for text, captions,
+    numbers or letters inside the picture.
+11. no camera directions, no style words, no lighting or render instructions -
+    those are appended separately from the user's chosen style.
+12. english only.
 
 ## Output Example:
-["a close-up of a human eye with a glistening film of tears across its surface",
- "a reddened irritated eye with dry patches, the lids held wide open"]
+Subject: "How rice farming was invented"; the narration establishes southern
+China about ten thousand years ago.
+["a wild rice plant heavy with ripe grain in a marsh in southern China ten
+  thousand years ago, seeds already scattering from the stalk",
+ "an ancient Chinese farmer in a straw hat crouched in the marsh, face tight
+  with frustration as the ripe grains fall from his hands",
+ "the same ancient farmer and two others cutting wild rice with small stone
+  blades, barefoot in the shallow water of a prehistoric paddy",
+ "an ancient Chinese farmer sorting the heaviest seed heads into a woven
+  basket, picking out the ones still clinging to the stalk"]
 
 ## Context:
 ### Video Subject

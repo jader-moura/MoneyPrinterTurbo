@@ -215,6 +215,8 @@ def check_regenerate(
         scene = dict(scenes[position])
     term = str(keyword if keyword is not None else scene.get("keyword") or "").strip()
     if not term:
+        term = suggested_keyword(task_id, position)
+    if not term:
         raise SceneError("no keyword to generate from; provide one with the request")
     # 风格 id 认不认识现在就说。不传就按这一段记着的那个风格验——真正出图时
     # 用的也是它。
@@ -891,6 +893,18 @@ def describe(task_id: str, endpoint: str = "", *, with_timing: bool = False) -> 
         record["transition"] = transition_id(scene.get("transition"))
         record["image_motion"] = str(scene.get("image_motion") or "")
         record["cut_sound"] = str(scene.get("cut_sound") or "")
+        # 关键词是空的那几段：告诉界面"不填的话会拿什么去画"，让它当占位文字
+        # 显示出来。空着的关键词原本在重生成那里直接被拒，用户只能逐段手敲。
+        if not str(scene.get("keyword") or "").strip():
+            line = " ".join(
+                str(spoken[scene["index"]] if scene["index"] < len(spoken) else "").split()
+            )
+            subject = str(getattr(params, "video_subject", "") or "").strip()
+            record["keyword_suggestion"] = ". ".join(
+                part for part in (subject, line) if part
+            )[:400]
+        else:
+            record["keyword_suggestion"] = ""
         window = windows[scene["index"]] if scene["index"] < len(windows) else None
         # 成片里的起止时间。界面靠它把"第 7 段画面"和"第 30 秒的旁白"对上。
         record["starts_at"] = window["start"] if window else None
@@ -1284,6 +1298,43 @@ def _library_entry(task_id: str, changed_at: float, endpoint: str) -> dict:
         "thumb_url": media_url(task_id, scenes[0]["material"], endpoint)
         if scenes else "",
     }
+
+
+def suggested_keyword(task_id: str, index: Any) -> str:
+    """这一段没有关键词时，拿什么去出图。
+
+    一条任务常常关键词比场景少——这条片子 25 段画面只拿到 12 个关键词，后面
+    13 段的关键词是空的。空关键词在重生成那里直接被拒，于是用户要么逐段手敲
+    一句，要么那几段永远换不了画面。
+
+    退回"片子主题 + 这一段念的那句话"。它不如模型逐句写出来的画面描述，但
+    它至少说的是这一刻的事，而且画风模板还会接在后面。界面也把这句话填进
+    关键词框当占位文字，所以用户看得见它要拿什么去画，改一笔就是自己的。
+
+    Keyword lists are routinely shorter than the scene list, and an empty
+    keyword is refused outright, which leaves those scenes unregenerable. The
+    subject plus the line spoken over this scene is a weaker prompt than a
+    written-out visual description, but it is about this moment rather than
+    about nothing.
+    """
+    manifest = scene_manifest.load(task_id)
+    scenes = manifest["scenes"]
+    try:
+        position = _scene_at(scenes, index)
+    except SceneError:
+        return ""
+    spoken = narration_for_scenes(task_id, manifest)
+    line = " ".join(
+        str(spoken[position] if position < len(spoken) else "").split()
+    )
+    try:
+        subject = str(
+            getattr(load_params(task_id), "video_subject", "") or ""
+        ).strip()
+    except SceneError:
+        subject = ""
+    parts = [part for part in (subject, line) if part]
+    return ". ".join(parts)[:400]
 
 
 def _patch_params(task_id: str, **fields: Any) -> dict:
