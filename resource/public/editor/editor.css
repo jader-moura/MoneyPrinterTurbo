@@ -22,6 +22,14 @@
 
 * { box-sizing: border-box; }
 
+/* hidden 属性必须真的能把东西藏起来。
+   浏览器自带的 ``[hidden] { display: none }`` 优先级只有 (0,1,0)，任何一条
+   给元素自己写了 display 的类规则都压得过它——于是 .modal{display:flex} 那块
+   挡板永远挂在屏幕上说"正在渲染"，而根本没有东西在渲染；.subs{display:flex}
+   那行字幕也永远不消失，两句台词之间还留着上一句。
+   一条带 !important 的全局规则比逐个去猜哪条类规则会撞上可靠。 */
+[hidden] { display: none !important; }
+
 html, body { height: 100%; }
 
 body {
@@ -316,11 +324,6 @@ body {
 /* 这一行是"两个按钮 + 一句说明"，不是等分的一排控件，所以不吃 .row 那条
    flex: 1——否则"Save script"会被拉到半屏宽。 */
 /* 面板里的两列：颜色、字号这类短控件并排放，省得面板拉得老长。 */
-/* [hidden] 是 UA 样式里的 display:none，优先级低于 .field 自己的 display，
-   于是"只在选了 custom 时才出现"的那几个输入框永远露在外面。这里用一条更
-   具体的规则把它按回去。 */
-.script-panel [hidden] { display: none; }
-
 /* 字幕面板靠边站：它每改一下，画面上那行字就跟着变，而一个盖住画面的面板
    等于把这件事废掉了。窄一点、贴左边,中间那块画面就一直看得见。 */
 .script-panel.aside {
