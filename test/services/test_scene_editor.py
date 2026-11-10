@@ -139,7 +139,13 @@ class TestRegenerateMaterial:
         ) as download:
             scene = scene_editor.regenerate_material(task_id, 0)
         # 单关键词、单片长：不能为一个场景重新规划一整批素材。
-        assert download.call_args.kwargs["search_terms"] == ["a"]
+        #
+        # 比"包含"而不是"等于"：文生图的源拿到的不再是光秃秃一个关键词，还
+        # 带着这条片子的主题和这一段念的话（见 ``_written_image_prompt``）。
+        # 这条用例钉的是"只取一份素材",不是提示词的具体措辞。
+        terms = download.call_args.kwargs["search_terms"]
+        assert len(terms) == 1
+        assert "a" in terms[0]
         assert download.call_args.kwargs["audio_duration"] == 5.0
         assert download.call_args.kwargs["source"] == "openai_image"
         assert scene["material"] == replacement
@@ -158,7 +164,8 @@ class TestRegenerateMaterial:
             material, "download_videos", return_value=[replacement]
         ) as download:
             scene_editor.regenerate_material(task_id, 0, keyword="a farmer sowing")
-        assert download.call_args.kwargs["search_terms"] == ["a farmer sowing"]
+        # 用户填的那个关键词必须真的到出图模型手上（现在还会带上主题和台词）。
+        assert "a farmer sowing" in download.call_args.kwargs["search_terms"][0]
         assert scene_manifest.load(task_id)["scenes"][0]["keyword"] == "a farmer sowing"
 
     def test_other_scenes_are_untouched(self, task_root):

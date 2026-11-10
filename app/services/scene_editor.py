@@ -44,7 +44,7 @@ from app.models.schema import (
     VideoParams,
     VideoTransitionMode,
 )
-from app.services import material, scene_manifest, task_artifacts, timeline
+from app.services import llm, material, scene_manifest, task_artifacts, timeline
 from app.services import bgm, transition_sound
 from app.utils import subtitle_reader, subtitle_writer
 from app.services import state as sm
@@ -279,11 +279,19 @@ def regenerate_material(
         else:
             style = str(image_style).strip()
         anchor = str(expect_material or scene.get("material") or "")
+        # 这一段上会念到的那几句。画面要讲的就是这一刻的事，所以它得跟着去
+        # 写提示词——以前只有关键词能到出图模型手上。
+        shown = narration_for_scenes(task_id)
+        spoken = str(shown[position] if position < len(shown) else "")
 
     # 出图在锁外面。本机一张图要几分钟，拿着锁出图等于这几分钟里这个任务
     # 什么都改不了。
     new_path, source = _produce_material(
-        task_id, term, what=f"scene {position}", image_style=style
+        task_id,
+        term,
+        what=f"scene {position}",
+        image_style=style,
+        narration=spoken,
     )
 
     # 重新读一遍清单：刚才那几分钟里用户完全可能改过别的场景，拿出图之前
@@ -330,6 +338,79 @@ def _image_prompt_template(params: VideoParams, image_style: str | None) -> str:
     return template
 
 
+def _written_image_prompt(
+    params: Any, term: str, narration: str, prompt_template: str
+) -> str:
+    """把关键词写成一句带上下文的画面描述，写不出来就用关键词原文。
+
+    为什么重生成也要走这一步
+    ------------------------
+    出片那条路上的提示词是模型读着主题和整篇旁白逐句写出来的。重生成却只把
+    关键词替进画风模板——主题和这一段的台词一个字都没带上。所以在界面上填
+    "bowl of rice" 得到的就是一张库存图：它摆在哪一段下面都成立,也就等于什么
+    都没讲。用户手改提示词之所以有效,正是因为他把上下文自己敲了进去。
+
+    本机 LLM 跑一次只要一两秒，而出一张图要几分钟，所以这一步的代价可以忽略。
+
+    写不出来时退回关键词原文并写日志。这不是"换了一个出图源"——出图的还是同
+    一个服务，只是提示词少了一层润色，所以不按"不许静默回退"那条处理,但必须
+    在日志里留痕,否则画面质量变差时没人知道是这里断了。
+    """
+    style = str(prompt_template or "")
+    try:
+        written = llm.generate_scene_image_prompt(
+            video_subject=str(getattr(params, "video_subject", "") or ""),
+            narration=narration,
+            keyword=term,
+            image_style=style,
+            # 这条任务自己指定过 LLM 的话就用它那一个，和出片时一致。
+            **tm._llm_override_kwargs(params),
+        )
+    except Exception as exc:  # pragma: no cover - LLM 出问题不该挡住出图
+        logger.warning(f"cannot write an image prompt, using the keyword: {exc}")
+        return term
+    if not written:
+        composed = _composed_image_prompt(params, term, narration)
+        logger.warning(
+            "could not write an image prompt with the LLM (set "
+            "ollama_model_name, or another llm_provider, in config.toml for a "
+            f"written one); drawing from {composed!r}"
+        )
+        return composed
+    return written
+
+
+def _composed_image_prompt(params: Any, term: str, narration: str) -> str:
+    """没有 LLM 可用时，把上下文直接拼在关键词后面。
+
+    这是退而求其次，但退的不是"只剩关键词"。关键词说的是"要什么东西"，而
+    "bowl of rice" 这种词出来的是一张库存图——这正是用户在抱怨的事。把这条片
+    子的主题和这一刻念的话接在后面，至少让出图模型看见年代、地点和这一段在
+    讲什么。扩散模型本来就更像在读一袋概念而不是一句话,所以拼起来是有用的。
+
+    顺序是"先关键词、再这一刻、最后主题"：靠前的词在扩散模型里权重更高，而
+    用户亲手填的那个关键词必须最重。
+
+    Falling back to the keyword alone would leave the picture exactly as
+    context-free as the complaint describes. The subject and the line spoken
+    here are appended instead, so the image model at least sees the period,
+    the place and what this moment is about.
+    """
+    subject = str(getattr(params, "video_subject", "") or "").strip()
+    spoken = " ".join(str(narration or "").split()).strip()
+    parts = [part for part in (str(term or "").strip(), spoken, subject) if part]
+    # 去掉重复。关键词本身可能就是 ``suggested_keyword`` 兜底出来的"主题 +
+    # 台词"，那时主题和台词已经在里面了——按整段比对不出来，要按"包含"比,
+    # 否则同一句话会在提示词里出现三遍。
+    kept: list[str] = []
+    for part in parts:
+        joined = " ".join(kept).lower()
+        if part.lower() in joined:
+            continue
+        kept.append(part)
+    return ", ".join(kept)[:600]
+
+
 def _produce_material(
     task_id: str,
     term: str,
@@ -337,11 +418,15 @@ def _produce_material(
     what: str,
     advice: str = "replace this scene with your own file instead",
     image_style: str | None = None,
+    narration: str = "",
 ) -> tuple[str, str]:
     """按关键词取一份素材，返回 ``(文件路径, 素材源)``。
 
     重生成一段画面和新增一段画面要走完全相同的取材路径，否则两者会在
     画幅、片长、图片动效上慢慢长出差异,最后拼进同一条片子里对不上。
+
+    文生图的源还会先把提示词写一遍：关键词只说"要什么东西"，而画面还需要
+    知道这条片子在讲什么、这一刻在说什么。见 ``_written_image_prompt``。
     """
     params = load_params(task_id)
     source = str(getattr(params, "video_source", "") or "")
@@ -357,14 +442,21 @@ def _produce_material(
 
     clip_duration = int(getattr(params, "video_clip_duration", 5) or 5)
     prompt_template = _image_prompt_template(params, image_style)
+    # 文生图的源：把主题和这一段的台词也带上，别让模型只看见一个关键词。
+    drawn_from = (
+        _written_image_prompt(params, term, narration, prompt_template)
+        if source in material.GENERATED_IMAGE_SOURCES
+        else term
+    )
     logger.info(
         f"generating {what} of task {task_id} "
         f"from source {source!r} with keyword {term!r}"
+        + (f" written up as {drawn_from!r}" if drawn_from != term else "")
     )
     try:
         produced = material.download_videos(
             task_id=task_id,
-            search_terms=[term],
+            search_terms=[drawn_from],
             source=source,
             video_aspect=VideoAspect(
                 getattr(params, "video_aspect", None) or VideoAspect.portrait
@@ -431,6 +523,7 @@ def add_scene(
         what="a new scene",
         advice="add your own file as a scene instead",
         image_style=style,
+        narration=str(narration or ""),
     )
 
     scene = {

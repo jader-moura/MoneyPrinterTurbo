@@ -1494,6 +1494,112 @@ China about ten thousand years ago.
 """.strip()
 
 
+def _one_scene_image_prompt_request(
+    subject: str, narration: str, keyword: str, style: str = ""
+) -> str:
+    """重出一张图时，把主题、这一段念的话和用户的关键词一起交给模型。"""
+    steer = (
+        f"\n### What the user asked to see\n{keyword}\n"
+        if str(keyword or "").strip()
+        else ""
+    )
+    spoken = str(narration or "").strip() or "(this scene has no narration)"
+    return f"""
+# Role: Scene Image Prompt Writer
+
+## Goals:
+Write ONE English image-generation prompt for a single scene of a video about
+the subject below. The picture has to carry what is being said at this moment,
+not merely decorate it.
+
+## Constrains:
+1. reply with the prompt sentence only - no json, no quotes, no preamble.
+2. one sentence, roughly 15-35 words, concrete and physically depictable.
+3. show what the narration below is saying, read in the context of the subject.
+4. **show a person or people doing something.** name who they are and the
+   action they are taking. a bare object with nobody in frame is a stock photo,
+   not a story beat.
+5. **when the narration carries a feeling or a judgement, put it on a face** -
+   frustrated, astonished, exhausted, delighted - rather than illustrating the
+   noun in the sentence.
+6. **state the period, place and culture explicitly**, taking them from the
+   subject and the narration ("ten thousand years ago", "ancient", "in
+   southern China"). the picture is drawn with no knowledge of the rest of the
+   video, so leaving this out gives a modern scene in a historical story.
+7. if the user asked for something specific below, that is the instruction:
+   keep their subject, their action and their mood, and add the context,
+   period and place around it. do not replace their idea with your own.
+8. never ask for text, captions, numbers or letters inside the picture.
+9. no camera directions, no style words, no lighting or render instructions.
+10. english only.
+
+## Context:
+### Video Subject
+{subject}
+{_style_guidance(style)}
+### What is said over this scene
+{spoken}{steer}
+""".strip()
+
+
+def generate_scene_image_prompt(
+    video_subject: str,
+    narration: str,
+    keyword: str = "",
+    app_config=None,
+    *,
+    image_style: str = "",
+) -> str:
+    """为**一段**画面写一句提示词，失败时返回空串。
+
+    为什么需要它
+    ------------
+    出片那条路上，提示词是模型读着主题和整篇旁白逐句写出来的,所以画面知道
+    "这一刻在讲什么"。但在审片界面里重出一张图走的是另一条路：只把关键词替
+    进画风模板,主题和这一段的台词一个字都没带上(见
+    ``material._openai_image_prompt``)。于是 "bowl of rice" 这种词出来的就是
+    一张库存图,它摆在哪一段下面都成立,也就等于什么都没讲。
+
+    这里把重生成也接回同一条路：主题是上下文，台词是这一刻的事，关键词是用
+    户要的东西，三样一起交给模型，让它写出该看到的画面。
+
+    The pipeline writes prompts from the subject and the whole narration, so
+    the picture knows what this moment is about. Regenerating from the review
+    screen did not: it substituted the keyword into the style template and sent
+    nothing else. The subject, the line spoken here and the user's keyword now
+    all reach the writer.
+    """
+    subject = str(video_subject or "").strip()
+    spoken = str(narration or "").strip()
+    steer = str(keyword or "").strip()
+    if not subject and not spoken and not steer:
+        return ""
+
+    prompt = _one_scene_image_prompt_request(subject, spoken, steer, image_style)
+    try:
+        if app_config is None:
+            response = _generate_response(prompt)
+        else:
+            response = _generate_response(prompt, app_config=app_config)
+    except Exception as exc:
+        logger.warning(f"failed to write a scene image prompt: {exc}")
+        return ""
+    if not response or response.startswith("Error: "):
+        logger.warning(f"failed to write a scene image prompt: {response}")
+        return ""
+
+    # 模型偶尔会裹一层引号或者前面带一句"Here is the prompt:"。
+    written = _strip_code_fence(str(response)).strip().strip('"').strip()
+    written = written.split("\n")[-1].strip() if "\n" in written else written
+    if not written:
+        return ""
+    # 写跑偏了（整段解释、或者把旁白原样抄回来）就不要，交回去用原始关键词。
+    if len(written) > 600:
+        logger.warning("the written scene image prompt was too long; ignoring it")
+        return ""
+    return written
+
+
 def generate_terms_per_line(
     video_subject: str,
     narration_lines: List[str],

@@ -145,7 +145,9 @@ class TestEditing:
             )
         assert response.status_code == 200
         assert download.call_count == 1
-        assert download.call_args.kwargs["search_terms"] == ["a farmer sowing"]
+        # 比"包含"而不是"等于"：文生图的源拿到的是"关键词 + 这一段的台词
+        # + 片子主题"拼出来的提示词，见 scene_editor._written_image_prompt。
+        assert "a farmer sowing" in download.call_args.kwargs["search_terms"][0]
 
     def test_deleting_a_scene_returns_the_remaining_list(self, client, reviewed):
         response = client.delete(f"/api/v1/tasks/{reviewed}/scenes/0")

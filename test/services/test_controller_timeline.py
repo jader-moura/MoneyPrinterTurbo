@@ -325,9 +325,12 @@ class TestAddScene:
                 json={"keyword": "a hand dropping a coin into a jar"},
             )
         assert response.status_code == 200
-        assert download.call_args.kwargs["search_terms"] == [
+        # 比"包含"而不是"等于"：文生图的源拿到的是"关键词 + 这一段的台词
+        # + 片子主题"拼出来的提示词，见 scene_editor._written_image_prompt。
+        assert (
             "a hand dropping a coin into a jar"
-        ]
+            in download.call_args.kwargs["search_terms"][0]
+        )
         scenes = client.get(f"/api/v1/tasks/{reviewed}/scenes").json()["data"]["scenes"]
         assert len(scenes) == 3
         assert scenes[2]["keyword"] == "a hand dropping a coin into a jar"
