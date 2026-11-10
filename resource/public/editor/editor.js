@@ -132,7 +132,12 @@ function say(message, kind) {
   ui.banner.hidden = !message;
   ui.banner.textContent = message || "";
   ui.banner.className = "banner" + (kind ? " " + kind : "");
+  ui.banner.title = message ? "Click to dismiss" : "";
 }
+
+// 点一下关掉。它浮在画面上，所以得有办法让它走开——尤其是报错那一条：
+// 看完了就只剩挡着。
+ui.banner.addEventListener("click", () => say(""));
 
 /** API key 存在 localStorage，只有管理员配置过 api_key 的部署才需要。
     注意 <video src> 没法带请求头，所以配了 key 的部署里预览画面会取不到。 */

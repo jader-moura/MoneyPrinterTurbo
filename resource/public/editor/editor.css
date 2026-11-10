@@ -79,27 +79,48 @@ body {
 .btn.danger { border-color: var(--danger); color: var(--danger); }
 .btn.small { padding: 4px 8px; font-size: 12px; }
 
+/* 状态条。浮在顶栏下面、画面上方，不占布局：它只是一句话，出现和消失都
+   不该把舞台和时间线推上推下——那会让"排进队列了"这种好消息看起来像界面
+   出了故障。点一下关掉。 */
 .banner {
-  padding: 8px 14px;
+  position: fixed;
+  top: 46px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 60;
+  max-width: min(560px, calc(100vw - 24px));
+  padding: 6px 12px;
   background: var(--accent-soft);
-  border-bottom: 1px solid var(--line);
-  font-size: 13px;
-  flex: 0 0 auto;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: 0 6px 20px rgba(0, 0, 0, 0.45);
+  font-size: 12px;
+  line-height: 1.45;
+  text-align: center;
+  overflow-wrap: anywhere;
+  cursor: pointer;
 }
 .banner.error { background: #4a2626; }
 .banner.warn { background: #4a3c1e; }
 
 /* ---------- narration script ---------- */
 
-/* 旁白正文。和横幅、队列栏一样横贯整行：这段文字属于整条片子，不属于右边
-   面板里那一段画面。 */
+/* 旁白正文。浮在正中，不占布局：它是打开来改一阵子的东西，排在文档流里
+   会在打开的瞬间把画面和时间线整体压下去一大截。 */
 .script-panel {
-  flex: 0 0 auto;
-  max-height: 46vh;
+  position: fixed;
+  top: 56px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 50;
+  width: min(720px, calc(100vw - 24px));
+  max-height: 70vh;
   overflow-y: auto;
-  padding: 10px 14px 12px;
+  padding: 12px 14px 14px;
   background: var(--panel-2);
-  border-bottom: 1px solid var(--line);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  box-shadow: 0 10px 34px rgba(0, 0, 0, 0.55);
 }
 
 .script-panel h2 {
