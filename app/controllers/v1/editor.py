@@ -33,7 +33,9 @@ from app.models.exception import HttpException
 from app.models.schema import (
     BackgroundMusicRequest,
     BackgroundMusicResponse,
+    CutSoundRequest,
     SubtitleEditRequest,
+    SubtitleStyleRequest,
     NarrationScriptRequest,
     SceneListResponse,
     SceneAddRequest,
@@ -177,6 +179,94 @@ def add_scene(
 # 整数参数的路由并直接返回 422，而不是落到这里。
 # Declared before ``/scenes/{index}``: otherwise "reorder" matches that
 # integer-typed route first and returns 422 instead of reaching this one.
+@router.get(
+    "/tasks/{task_id}/subtitles/style",
+    summary="How the captions look, and the fonts available",
+)
+def read_subtitle_style(
+    request: Request, task_id: str = Path(..., description="Task ID")
+):
+    request_id = base.get_task_id(request)
+    _require_task(task_id, request_id)
+    data = _handle(task_id, request_id, lambda: scene_editor.subtitle_style(task_id))
+    return utils.get_response(200, data)
+
+
+@router.put(
+    "/tasks/{task_id}/subtitles/style",
+    summary="Set the caption font, size, colour, outline and position",
+)
+def update_subtitle_style(
+    request: Request,
+    body: SubtitleStyleRequest,
+    task_id: str = Path(..., description="Task ID"),
+):
+    """改字幕的样子。只影响这一条片子，不动字幕文件，也不动配音。"""
+    request_id = base.get_task_id(request)
+    _require_task(task_id, request_id)
+    data = _handle(
+        task_id,
+        request_id,
+        lambda: scene_editor.set_subtitle_style(
+            task_id, **body.model_dump(exclude_none=True)
+        ),
+    )
+    return utils.get_response(200, data)
+
+
+@router.get(
+    "/tasks/{task_id}/cut-sound",
+    summary="The sound played at every cut, and what else is available",
+)
+def read_cut_sound(request: Request, task_id: str = Path(..., description="Task ID")):
+    request_id = base.get_task_id(request)
+    _require_task(task_id, request_id)
+    data = _handle(task_id, request_id, lambda: scene_editor.cut_sound_settings(task_id))
+    return utils.get_response(200, data)
+
+
+@router.put(
+    "/tasks/{task_id}/cut-sound",
+    summary="Change the sound at every cut, or turn it off entirely",
+)
+def update_cut_sound(
+    request: Request,
+    body: CutSoundRequest,
+    task_id: str = Path(..., description="Task ID"),
+):
+    """换整条片子的转场音效，或者把它整个关掉（``sound`` 给空字符串）。"""
+    request_id = base.get_task_id(request)
+    _require_task(task_id, request_id)
+    data = _handle(
+        task_id,
+        request_id,
+        lambda: scene_editor.set_cut_sound(
+            task_id, sound=body.sound, volume=body.volume
+        ),
+    )
+    return utils.get_response(200, data)
+
+
+@router.get("/fonts/{name:path}", summary="Serve one subtitle font to the editor")
+def stream_font(request: Request, name: str = Path(..., description="Font file name")):
+    """把字体文件交给编辑器，让预览用真正要烧进成片的那一款字。
+
+    只认字体目录里列得出来的那几个名字,别的一律 400——这个口子不能变成
+    "按路径下载服务器上任意文件"。
+    """
+    request_id = base.get_task_id(request)
+    if name not in scene_editor.available_fonts():
+        raise HttpException(
+            task_id="", status_code=400, message=f"{request_id}: unknown font"
+        )
+    resolved = os.path.join(utils.font_dir(), *name.split("/"))
+    if not os.path.isfile(resolved):
+        raise HttpException(
+            task_id="", status_code=404, message=f"{request_id}: no such font file"
+        )
+    return FileResponse(resolved)
+
+
 @router.put(
     "/tasks/{task_id}/subtitles/{index}",
     summary="Edit one caption without re-recording",

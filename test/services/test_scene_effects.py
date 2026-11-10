@@ -609,3 +609,128 @@ class TestEditingACaption:
             f"/api/v1/tasks/{task_id}/subtitles/99", json={"text": "Nope."}
         )
         assert bad.status_code == 400
+
+
+class TestSubtitleStyle:
+    """字幕的样子：只影响这一条片子，不动字幕文件，也不动配音。"""
+
+    def test_reading_it_back_lists_the_fonts_and_positions(self, task_root):
+        task_id, _ = _reviewed_task(task_root)
+        style = scene_editor.subtitle_style(task_id)
+        assert "bottom" in style["positions"]
+        assert isinstance(style["fonts"], list)
+        assert style["enabled"] is True
+
+    def test_setting_the_look_writes_this_task_only(self, task_root):
+        task_id, _ = _reviewed_task(task_root)
+        scene_editor.set_subtitle_style(
+            task_id, color="#ffcc00", font_size=72, position="top", stroke_width=3
+        )
+        params = scene_editor.load_params(task_id)
+        assert params.text_fore_color == "#FFCC00"
+        assert params.font_size == 72
+        assert params.subtitle_position == "top"
+        assert params.stroke_width == 3
+
+    def test_a_colour_that_is_not_a_hex_triple_is_refused(self, task_root):
+        """渲染那边把颜色交给 Pillow，一个拼错的名字要到最后一步才炸。"""
+        task_id, _ = _reviewed_task(task_root)
+        with pytest.raises(scene_editor.SceneError) as error:
+            scene_editor.set_subtitle_style(task_id, color="yellowish")
+        assert "#RRGGBB" in str(error.value)
+
+    def test_an_unknown_font_is_refused(self, task_root):
+        task_id, _ = _reviewed_task(task_root)
+        with pytest.raises(scene_editor.SceneError) as error:
+            scene_editor.set_subtitle_style(task_id, font_name="NotInstalled.ttf")
+        assert "unknown font" in str(error.value)
+
+    def test_an_unknown_position_is_refused(self, task_root):
+        task_id, _ = _reviewed_task(task_root)
+        with pytest.raises(scene_editor.SceneError) as error:
+            scene_editor.set_subtitle_style(task_id, position="sideways")
+        assert "unknown caption position" in str(error.value)
+
+    def test_the_sizes_are_bounded(self, task_root):
+        task_id, _ = _reviewed_task(task_root)
+        for bad in ({"font_size": 2}, {"font_size": 900},
+                    {"stroke_width": -1}, {"custom_position": 150}):
+            with pytest.raises(scene_editor.SceneError):
+                scene_editor.set_subtitle_style(task_id, **bad)
+
+    def test_the_box_behind_the_text_can_be_set_and_cleared(self, task_root):
+        task_id, _ = _reviewed_task(task_root)
+        scene_editor.set_subtitle_style(task_id, background="#101010")
+        assert scene_editor.load_params(task_id).text_background_color == "#101010"
+        scene_editor.set_subtitle_style(task_id, background=False)
+        assert scene_editor.load_params(task_id).text_background_color is False
+
+    def test_turning_captions_off_is_remembered(self, task_root):
+        task_id, _ = _reviewed_task(task_root)
+        scene_editor.set_subtitle_style(task_id, enabled=False)
+        assert scene_editor.subtitle_style(task_id)["enabled"] is False
+
+
+class TestTheCutSoundForTheWholeVideo:
+    """整条片子那一声，以及把它整个关掉的唯一入口。"""
+
+    def test_an_empty_sound_takes_it_off_the_whole_video(self, task_root):
+        task_id, _ = _reviewed_task(task_root)
+        with patch.object(
+            scene_editor.transition_sound, "resolve_transition_sound",
+            return_value="/sounds/whoosh.mp3",
+        ):
+            scene_editor.set_cut_sound(task_id, sound="whoosh.mp3")
+        assert scene_editor.load_params(task_id).transition_sound == "whoosh.mp3"
+        with patch.object(
+            scene_editor.transition_sound, "list_transition_sounds", return_value=[]
+        ):
+            settings = scene_editor.set_cut_sound(task_id, sound="")
+        assert settings["sound"] == ""
+        assert scene_editor.load_params(task_id).transition_sound == ""
+
+    def test_a_sound_this_machine_does_not_have_is_refused(self, task_root):
+        task_id, _ = _reviewed_task(task_root)
+        with patch.object(
+            scene_editor.transition_sound, "resolve_transition_sound",
+            side_effect=ValueError("no such sound"),
+        ):
+            with pytest.raises(scene_editor.SceneError) as error:
+                scene_editor.set_cut_sound(task_id, sound="missing.mp3")
+        assert "unknown transition sound" in str(error.value)
+
+    def test_the_volume_is_bounded(self, task_root):
+        task_id, _ = _reviewed_task(task_root)
+        with pytest.raises(scene_editor.SceneError) as error:
+            scene_editor.set_cut_sound(task_id, volume=3)
+        assert "between 0 and 1" in str(error.value)
+
+    def test_over_http(self, task_root):
+        from fastapi.testclient import TestClient
+
+        from app import asgi
+
+        client = TestClient(asgi.app)
+        task_id, _ = _reviewed_task(task_root)
+        with patch.object(
+            scene_editor.transition_sound, "list_transition_sounds", return_value=[]
+        ):
+            read = client.get(f"/api/v1/tasks/{task_id}/cut-sound")
+            assert read.status_code == 200
+            off = client.put(
+                f"/api/v1/tasks/{task_id}/cut-sound", json={"sound": "", "volume": 0.4}
+            )
+        assert off.status_code == 200
+        assert off.json()["data"]["sound"] == ""
+
+    def test_the_style_route_is_not_shadowed_by_the_caption_route(self, task_root):
+        """``/subtitles/style`` 必须先于 ``/subtitles/{index}`` 匹配。"""
+        from fastapi.testclient import TestClient
+
+        from app import asgi
+
+        client = TestClient(asgi.app)
+        task_id, _ = _reviewed_task(task_root)
+        response = client.get(f"/api/v1/tasks/{task_id}/subtitles/style")
+        assert response.status_code == 200
+        assert "positions" in response.json()["data"]

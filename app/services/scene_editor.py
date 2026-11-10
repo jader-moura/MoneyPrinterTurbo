@@ -29,6 +29,7 @@ at once and is the wrong entry point for a single scene.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import threading
 from contextlib import contextmanager
@@ -1207,6 +1208,218 @@ def _subtitle_file(task_id: str) -> str:
     if not os.path.isfile(path):
         raise SceneError(f"the subtitle file is missing: {os.path.basename(path)}")
     return path
+
+
+def _patch_params(task_id: str, **fields: Any) -> dict:
+    """改这条任务自己存着的渲染参数。
+
+    审片之后的渲染读的是清单里的 ``params``，不是 WebUI 的 session，也不是全局
+    配置。所以在编辑器里改的每一项都只影响这一条片子——这正是用户要的：为了
+    眼前这条片子调一下字幕颜色,不该把下一条也改了。
+    """
+    payload = scene_manifest.load_raw(task_id)
+    stored = payload.get("params")
+    if not isinstance(stored, dict):
+        raise SceneError("this task has no saved parameters; it cannot be changed")
+    stored.update(fields)
+    if not task_artifacts.patch_script_data(task_id, params=stored):
+        raise SceneError("failed to save the render settings")
+    return stored
+
+
+SUBTITLE_POSITIONS: tuple[str, ...] = (
+    "top",
+    "center",
+    "bottom",
+    "two_thirds_bottom",
+    "custom",
+)
+
+_COLOUR = re.compile(r"^#[0-9a-fA-F]{6}$")
+
+
+def available_fonts() -> list[str]:
+    """字体目录里的字体文件名，含子目录。"""
+    directory = utils.font_dir()
+    found: list[str] = []
+    for root, _dirs, files in os.walk(directory):
+        for name in files:
+            if name.lower().endswith((".ttf", ".ttc", ".otf")):
+                relative = os.path.relpath(os.path.join(root, name), directory)
+                found.append(relative.replace(os.sep, "/"))
+    return sorted(found)
+
+
+def subtitle_style(task_id: str) -> dict:
+    """字幕的样子，以及这台机器上有哪些字体可选。"""
+    params = load_params(task_id)
+    background = getattr(params, "text_background_color", False)
+    return {
+        "enabled": bool(getattr(params, "subtitle_enabled", True)),
+        "font_name": str(getattr(params, "font_name", "") or ""),
+        "font_size": int(getattr(params, "font_size", 60) or 60),
+        "color": str(getattr(params, "text_fore_color", "") or "#FFFFFF"),
+        "stroke_color": str(getattr(params, "stroke_color", "") or "#000000"),
+        "stroke_width": float(getattr(params, "stroke_width", 0) or 0.0),
+        "background": background if isinstance(background, str) else bool(background),
+        "position": str(getattr(params, "subtitle_position", "") or "bottom"),
+        "custom_position": float(getattr(params, "custom_position", 70.0) or 0.0),
+        "positions": list(SUBTITLE_POSITIONS),
+        "fonts": available_fonts(),
+    }
+
+
+def set_subtitle_style(task_id: str, **wanted: Any) -> dict:
+    """改字幕的样子：字体、字号、颜色、描边、底色、位置。
+
+    只校验、只落盘，不碰字幕文件本身：这些是渲染时才用到的样式，改它们既不
+    会动时间轴，也不会让配音失效。
+
+    颜色一律按 ``#RRGGBB`` 收：渲染那边把它交给 Pillow，一个拼错的颜色名会
+    在渲染的最后一步才炸，那时用户已经等完了整条片子。
+    """
+    _require_idle(task_id)
+    fields: dict[str, Any] = {}
+    with _editing(task_id):
+        if "enabled" in wanted and wanted["enabled"] is not None:
+            fields["subtitle_enabled"] = bool(wanted["enabled"])
+
+        font = wanted.get("font_name")
+        if font is not None:
+            name = str(font).strip()
+            if name and name not in available_fonts():
+                raise SceneError(
+                    f"unknown font {name!r}; pick one of the fonts in "
+                    "resource/fonts"
+                )
+            fields["font_name"] = name
+
+        size = wanted.get("font_size")
+        if size is not None:
+            try:
+                value = int(size)
+            except (TypeError, ValueError) as exc:
+                raise SceneError("the font size must be a whole number") from exc
+            if not 8 <= value <= 300:
+                raise SceneError(f"the font size must be between 8 and 300, got {value}")
+            fields["font_size"] = value
+
+        for key, field in (("color", "text_fore_color"), ("stroke_color", "stroke_color")):
+            colour = wanted.get(key)
+            if colour is None:
+                continue
+            text = str(colour).strip()
+            if not _COLOUR.match(text):
+                raise SceneError(
+                    f"{key} must look like #RRGGBB, got {text!r}"
+                )
+            fields[field] = text.upper()
+
+        width = wanted.get("stroke_width")
+        if width is not None:
+            try:
+                value = float(width)
+            except (TypeError, ValueError) as exc:
+                raise SceneError("the outline width must be a number") from exc
+            if not 0 <= value <= 20:
+                raise SceneError(
+                    f"the outline width must be between 0 and 20, got {value}"
+                )
+            fields["stroke_width"] = round(value, 2)
+
+        background = wanted.get("background")
+        if background is not None:
+            # False 是"不要底色"，字符串是颜色。两者都是渲染器认的写法。
+            if isinstance(background, bool) or background == "":
+                fields["text_background_color"] = False
+            else:
+                text = str(background).strip()
+                if not _COLOUR.match(text):
+                    raise SceneError(
+                        f"the caption background must look like #RRGGBB or be "
+                        f"turned off, got {text!r}"
+                    )
+                fields["text_background_color"] = text.upper()
+
+        position = wanted.get("position")
+        if position is not None:
+            text = str(position).strip()
+            if text not in SUBTITLE_POSITIONS:
+                raise SceneError(
+                    f"unknown caption position {text!r}; pick one of: "
+                    f"{', '.join(SUBTITLE_POSITIONS)}"
+                )
+            fields["subtitle_position"] = text
+
+        custom = wanted.get("custom_position")
+        if custom is not None:
+            try:
+                value = float(custom)
+            except (TypeError, ValueError) as exc:
+                raise SceneError("the custom position must be a number") from exc
+            if not 0 <= value <= 100:
+                raise SceneError(
+                    f"the custom position must be between 0 and 100, got {value}"
+                )
+            fields["custom_position"] = round(value, 1)
+
+        if fields:
+            _patch_params(task_id, **fields)
+    return subtitle_style(task_id)
+
+
+def cut_sound_settings(task_id: str) -> dict:
+    """整条片子在每一刀上响的那一声，以及可选的音效。"""
+    params = load_params(task_id)
+    try:
+        library = [os.path.basename(p) for p in transition_sound.list_transition_sounds()]
+    except Exception as exc:  # pragma: no cover - 列目录失败不该挡住审片
+        logger.warning(f"cannot list the transition sounds: {exc}")
+        library = []
+    return {
+        "sound": str(getattr(params, "transition_sound", "") or ""),
+        "volume": float(getattr(params, "transition_sound_volume", 0.0) or 0.0),
+        "sounds": library,
+    }
+
+
+def set_cut_sound(
+    task_id: str,
+    *,
+    sound: str | None = None,
+    volume: float | None = None,
+) -> dict:
+    """换整条片子的转场音效，或者把它整个关掉。
+
+    ``sound`` 空字符串就是"一刀都不要响"——这是唯一一个能把它从整条片子上
+    拿掉的入口。每一段自己挑的那个"静音"只管自己那一刀。
+    """
+    _require_idle(task_id)
+    fields: dict[str, Any] = {}
+    with _editing(task_id):
+        if sound is not None:
+            name = str(sound).strip()
+            if name:
+                try:
+                    transition_sound.resolve_transition_sound(name)
+                except ValueError as exc:
+                    raise SceneError(f"unknown transition sound {name!r}: {exc}") from exc
+            fields["transition_sound"] = name
+
+        if volume is not None:
+            try:
+                level = float(volume)
+            except (TypeError, ValueError) as exc:
+                raise SceneError("the sound volume must be a number") from exc
+            if not 0.0 <= level <= 1.0:
+                raise SceneError(
+                    f"the sound volume must be between 0 and 1, got {level}"
+                )
+            fields["transition_sound_volume"] = round(level, 3)
+
+        if fields:
+            _patch_params(task_id, **fields)
+    return cut_sound_settings(task_id)
 
 
 RANDOM_BACKGROUND = "random"

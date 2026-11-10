@@ -14,7 +14,8 @@
   <span id="totals" class="totals"></span>
   <span class="spacer"></span>
   <button id="script-toggle" class="btn" disabled>Script</button>
-  <button id="music-toggle" class="btn" disabled>Music</button>
+  <button id="subs-toggle" class="btn" disabled>Subtitles</button>
+  <button id="music-toggle" class="btn" disabled>Sound</button>
   <button id="rerecord" class="btn" disabled>Re-record narration</button>
   <button id="render" class="btn primary" disabled>Render video</button>
 </header>
@@ -47,6 +48,60 @@
   </div>
 </section>
 
+<!-- 字幕的样子。改的时候画面上那行字立刻跟着变——"这个颜色压在这张图上
+     看不看得清"只能这样判断,光看一个色值没有意义。 -->
+<section id="subs-panel" class="script-panel aside" hidden>
+  <h2>Subtitles</h2>
+  <p class="hint">How the captions look in the finished video. The preview
+    above updates as you change these, in the real font and at the real size.
+    To fix the <i>words</i>, click the caption on the picture.</p>
+  <label class="check"><input id="subs-enabled" type="checkbox"> Burn captions into the video</label>
+  <div class="field">
+    <label for="subs-font">Font</label>
+    <select id="subs-font"></select>
+  </div>
+  <div class="grid-2">
+    <div class="field">
+      <label for="subs-size">Size (in the finished video)</label>
+      <input id="subs-size" type="number" min="8" max="300" step="1">
+    </div>
+    <div class="field">
+      <label for="subs-position">Position</label>
+      <select id="subs-position"></select>
+    </div>
+  </div>
+  <div class="grid-2">
+    <div class="field">
+      <label for="subs-color">Text colour</label>
+      <input id="subs-color" type="color">
+    </div>
+    <div class="field">
+      <label for="subs-stroke-color">Outline colour</label>
+      <input id="subs-stroke-color" type="color">
+    </div>
+  </div>
+  <div class="grid-2">
+    <div class="field">
+      <label for="subs-stroke-width">Outline width</label>
+      <input id="subs-stroke-width" type="number" min="0" max="20" step="0.5">
+    </div>
+    <div class="field" id="subs-custom-field" hidden>
+      <label for="subs-custom">Distance from the top (%)</label>
+      <input id="subs-custom" type="number" min="0" max="100" step="1">
+    </div>
+  </div>
+  <label class="check"><input id="subs-bg-on" type="checkbox"> Box behind the text</label>
+  <div class="field" id="subs-bg-field" hidden>
+    <label for="subs-bg">Box colour</label>
+    <input id="subs-bg" type="color">
+  </div>
+  <div class="row">
+    <button id="subs-save" class="btn primary small">Save subtitles</button>
+    <button id="subs-close" class="btn small">Close</button>
+    <span id="subs-note" class="hint"></span>
+  </div>
+</section>
+
 <!-- 字幕。点画面上那行字就打开它。 -->
 <section id="caption-panel" class="script-panel" hidden>
   <h2>Caption</h2>
@@ -65,7 +120,7 @@
 <!-- 背景音乐。和旁白正文一样浮着，不占布局：配乐属于整条片子，而且它只是
      偶尔打开改一下的东西，不该一直占着画面的高度。 -->
 <section id="music-panel" class="script-panel" hidden>
-  <h2>Background music</h2>
+  <h2>Sound</h2>
   <p class="hint">Plays under the whole video. The volume is relative to the
     narration — 0.2 sits well behind a voice. Changing it here affects only
     this video, not your other tasks.</p>
@@ -78,8 +133,22 @@
     <input id="music-volume" type="number" min="0" max="1" step="0.05">
   </div>
   <audio id="music-preview" controls preload="none"></audio>
+
+  <h2 style="margin-top:14px">Sound on every cut</h2>
+  <p class="hint">Played each time the video cuts to the next picture. Choose
+    <b>None</b> to take it off the whole video. A scene can still override this
+    one cut at a time, in its own panel.</p>
+  <div class="field">
+    <label for="cut-sound">Sound</label>
+    <select id="cut-sound"></select>
+  </div>
+  <div class="field">
+    <label for="cut-volume">Volume</label>
+    <input id="cut-volume" type="number" min="0" max="1" step="0.05">
+  </div>
+
   <div class="row">
-    <button id="music-save" class="btn primary small">Save music</button>
+    <button id="music-save" class="btn primary small">Save sound</button>
     <button id="music-close" class="btn small">Close</button>
     <span id="music-note" class="hint"></span>
   </div>

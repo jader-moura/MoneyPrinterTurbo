@@ -34,6 +34,15 @@ const ui = {
   captionPanel: el("caption-panel"), captionText: el("caption-text"),
   captionWhen: el("caption-when"), captionSave: el("caption-save"),
   captionClose: el("caption-close"), captionNote: el("caption-note"),
+  subsToggle: el("subs-toggle"), subsPanel: el("subs-panel"),
+  subsEnabled: el("subs-enabled"), subsFont: el("subs-font"),
+  subsSize: el("subs-size"), subsPosition: el("subs-position"),
+  subsColor: el("subs-color"), subsStrokeColor: el("subs-stroke-color"),
+  subsStrokeWidth: el("subs-stroke-width"), subsCustom: el("subs-custom"),
+  subsCustomField: el("subs-custom-field"), subsBgOn: el("subs-bg-on"),
+  subsBg: el("subs-bg"), subsBgField: el("subs-bg-field"),
+  subsSave: el("subs-save"), subsClose: el("subs-close"), subsNote: el("subs-note"),
+  cutSound: el("cut-sound"), cutVolume: el("cut-volume"),
 };
 
 const state = {
@@ -611,6 +620,7 @@ function draw() {
   ui.rerecord.disabled = !state.data || !state.data.audio_stale;
   ui.scriptToggle.disabled = !state.data;
   ui.musicToggle.disabled = !state.data;
+  ui.subsToggle.disabled = !state.data;
   ui.placeholder.hidden = ready;
   ui.playhead.hidden = !ready;
   ui.frame.classList.toggle("ready", ready);
@@ -1873,6 +1883,138 @@ async function loadMusic() {
   drawMusicTrack();
 }
 
+/* ---------- 字幕的样子 ----------
+
+   改的时候画面上那行字立刻跟着变："这个颜色压在这张图上看不看得清"只能这样
+   判断,光看一个 #RRGGBB 没有任何意义。所以这个面板每动一下就把当前值写进
+   render_settings 再重画一次,保存只是把同一份值落盘。 */
+const POSITION_LABELS = {
+  top: "Top", center: "Centre", bottom: "Bottom",
+  two_thirds_bottom: "Two thirds down", custom: "A set distance down",
+};
+
+/** 把真正要烧进成片的那款字加载进浏览器，失败就退回系统字体。 */
+async function useFont(name) {
+  const family = "mpt-subtitle";
+  if (!name) { ui.subsText.style.fontFamily = ""; return; }
+  try {
+    const face = new FontFace(family, `url("${API}/fonts/${encodeURI(name)}")`);
+    await face.load();
+    document.fonts.add(face);
+    ui.subsText.style.fontFamily = `"${family}"`;
+    ui.subsNote.textContent = "";
+  } catch {
+    // .ttc（字体合集）浏览器基本都不认。预览用系统字体，但字号、颜色、
+    // 描边和位置仍然是真的——所以要说清楚哪一项不作数。
+    ui.subsText.style.fontFamily = "";
+    ui.subsNote.textContent =
+      "This font cannot be shown in the browser, so the preview uses a "
+      + "stand-in typeface. Everything else here is accurate.";
+  }
+}
+
+/** 把面板里的值写进预览用的那份设置，并立刻重画。 */
+function previewSubtitleStyle() {
+  const settings = (state.data && state.data.render_settings) || {};
+  const style = settings.subtitle || (settings.subtitle = {});
+  style.enabled = ui.subsEnabled.checked;
+  style.font_size = Number(ui.subsSize.value) || 60;
+  style.color = ui.subsColor.value;
+  style.stroke_color = ui.subsStrokeColor.value;
+  style.stroke_width = Number(ui.subsStrokeWidth.value) || 0;
+  style.position = ui.subsPosition.value;
+  style.custom_position = Number(ui.subsCustom.value) || 0;
+  style.background = ui.subsBgOn.checked ? ui.subsBg.value : false;
+  ui.subsCustomField.hidden = style.position !== "custom";
+  ui.subsBgField.hidden = !ui.subsBgOn.checked;
+  // 此刻没有字幕在屏幕上就挪到第一条上去，否则这个面板改了半天看不见效果。
+  const segments = (state.data && state.data.narration_segments) || [];
+  if (!activeCue() && segments.length) {
+    state.playhead = (segments[0].start + segments[0].end) / 2;
+    syncPreview(true);
+    movePlayhead();
+  }
+  drawSubtitle();
+}
+
+function fillSubtitlePanel(style) {
+  ui.subsFont.innerHTML = "";
+  for (const name of style.fonts || []) {
+    const option = document.createElement("option");
+    option.value = name;
+    option.textContent = name.replace(/\.[^.]+$/, "");
+    ui.subsFont.appendChild(option);
+  }
+  if (style.font_name) ui.subsFont.value = style.font_name;
+
+  ui.subsPosition.innerHTML = "";
+  for (const id of style.positions || []) {
+    const option = document.createElement("option");
+    option.value = id;
+    option.textContent = POSITION_LABELS[id] || id;
+    ui.subsPosition.appendChild(option);
+  }
+  ui.subsPosition.value = style.position || "bottom";
+
+  ui.subsEnabled.checked = style.enabled !== false;
+  ui.subsSize.value = String(style.font_size ?? 60);
+  ui.subsColor.value = style.color || "#FFFFFF";
+  ui.subsStrokeColor.value = style.stroke_color || "#000000";
+  ui.subsStrokeWidth.value = String(style.stroke_width ?? 0);
+  ui.subsCustom.value = String(style.custom_position ?? 70);
+  const background = typeof style.background === "string" ? style.background : "";
+  ui.subsBgOn.checked = !!background;
+  ui.subsBg.value = background || "#000000";
+  useFont(ui.subsFont.value);
+  previewSubtitleStyle();
+}
+
+async function openSubtitles() {
+  ui.subsPanel.hidden = false;
+  ui.subsNote.textContent = "Loading…";
+  try {
+    const style = await call("GET",
+      `/tasks/${encodeURIComponent(state.taskId)}/subtitles/style`);
+    ui.subsNote.textContent = "";
+    fillSubtitlePanel(style || {});
+  } catch (error) {
+    ui.subsNote.textContent = String(error.message || error);
+  }
+}
+
+function closeSubtitles() {
+  ui.subsPanel.hidden = true;
+  // 面板关了就把预览恢复成磁盘上那一份，免得没保存的改动留在画面上骗人。
+  refresh().catch(() => {});
+}
+
+ui.subsToggle.addEventListener("click", () => {
+  if (ui.subsPanel.hidden) openSubtitles(); else closeSubtitles();
+});
+ui.subsClose.addEventListener("click", closeSubtitles);
+ui.subsFont.addEventListener("change", () => useFont(ui.subsFont.value));
+for (const node of [ui.subsEnabled, ui.subsSize, ui.subsPosition, ui.subsColor,
+  ui.subsStrokeColor, ui.subsStrokeWidth, ui.subsCustom, ui.subsBgOn, ui.subsBg]) {
+  node.addEventListener("input", previewSubtitleStyle);
+  node.addEventListener("change", previewSubtitleStyle);
+}
+
+ui.subsSave.addEventListener("click", () => run("Saving the subtitles", async () => {
+  await call("PUT", `/tasks/${encodeURIComponent(state.taskId)}/subtitles/style`, {
+    enabled: ui.subsEnabled.checked,
+    font_name: ui.subsFont.value,
+    font_size: Number(ui.subsSize.value),
+    color: ui.subsColor.value,
+    stroke_color: ui.subsStrokeColor.value,
+    stroke_width: Number(ui.subsStrokeWidth.value),
+    background: ui.subsBgOn.checked ? ui.subsBg.value : false,
+    position: ui.subsPosition.value,
+    custom_position: Number(ui.subsCustom.value),
+  });
+  ui.subsPanel.hidden = true;
+  return "";
+}));
+
 /* ---------- 改一条字幕 ----------
 
    改的只是屏幕上那行字：配音和时间点都不动。听写把一个词认错时要改的就是
@@ -1958,6 +2100,22 @@ function syncMusicPreview() {
   ui.musicPreview.src = `${API}/music/${encodeURIComponent(name)}`;
 }
 
+/** 整条片子在每一刀上响的那一声。空选项就是"一刀都不要响"。 */
+function drawCutSound(settings) {
+  ui.cutSound.innerHTML = "";
+  const entries = [["", "None"],
+    ...(settings.sounds || []).map((name) => [name, name.replace(/\.[^.]+$/, "")])];
+  for (const [value, label] of entries) {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = label;
+    ui.cutSound.appendChild(option);
+  }
+  const known = entries.some(([value]) => value === (settings.sound || ""));
+  ui.cutSound.value = known ? (settings.sound || "") : "";
+  ui.cutVolume.value = String(settings.volume ?? 0.5);
+}
+
 async function openMusic() {
   ui.musicPanel.hidden = false;
   ui.musicNote.textContent = "Loading…";
@@ -1965,6 +2123,8 @@ async function openMusic() {
     state.music = (await call("GET", musicPath())) || null;
     drawMusic(state.music || {});
     drawMusicTrack();
+    drawCutSound((await call("GET",
+      `/tasks/${encodeURIComponent(state.taskId)}/cut-sound`)) || {});
   } catch (error) {
     ui.musicNote.textContent = String(error.message || error);
   }
@@ -1982,7 +2142,12 @@ ui.musicToggle.addEventListener("click", () => {
 ui.musicClose.addEventListener("click", closeMusic);
 ui.musicTrack.addEventListener("change", syncMusicPreview);
 
-ui.musicSave.addEventListener("click", () => run("Saving the music", async () => {
+ui.musicSave.addEventListener("click", () => run("Saving the sound", async () => {
+  // 两项分开提交：一项被拒时另一项不该跟着丢掉。
+  await call("PUT", `/tasks/${encodeURIComponent(state.taskId)}/cut-sound`, {
+    sound: ui.cutSound.value,
+    volume: Number(ui.cutVolume.value),
+  });
   const music = await call("PUT", musicPath(), {
     track: ui.musicTrack.value,
     volume: Number(ui.musicVolume.value),

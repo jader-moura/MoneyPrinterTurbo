@@ -740,6 +740,30 @@ class SceneEffectsRequest(BaseModel):
     cut_sound: Optional[str] = None
 
 
+class SubtitleStyleRequest(BaseModel):
+    """字幕的样子。只提交想改的字段。
+
+    颜色一律 ``#RRGGBB``。``background`` 给 ``false`` 或空字符串表示不要底色。
+    """
+
+    enabled: Optional[bool] = None
+    font_name: Optional[str] = None
+    font_size: Optional[int] = None
+    color: Optional[str] = None
+    stroke_color: Optional[str] = None
+    stroke_width: Optional[float] = None
+    background: Union[bool, str, None] = None
+    position: Optional[str] = None
+    custom_position: Optional[float] = None
+
+
+class CutSoundRequest(BaseModel):
+    """整条片子在每一刀上响的那一声。``sound`` 空字符串表示一刀都不响。"""
+
+    sound: Optional[str] = None
+    volume: Optional[float] = None
+
+
 class SubtitleEditRequest(BaseModel):
     """改一条字幕的文字。时间轴和配音都不动。"""
 

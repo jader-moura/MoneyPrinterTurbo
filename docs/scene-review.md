@@ -109,6 +109,9 @@ curl -X POST localhost:8080/api/v1/tasks/$TASK/render
 | `PUT /api/v1/tasks/{id}/script` | rewrite the whole narration script |
 | `PUT /api/v1/tasks/{id}/scenes/{i}/effects` | `transition`, `image_motion`, `cut_sound` for one scene |
 | `PUT /api/v1/tasks/{id}/subtitles/{i}` | fix one caption's words, leaving the voice alone |
+| `GET`/`PUT /api/v1/tasks/{id}/subtitles/style` | caption font, size, colour, outline, box, position |
+| `GET`/`PUT /api/v1/tasks/{id}/cut-sound` | the sound at every cut, or `""` to remove it |
+| `GET /api/v1/fonts/{name}` | serve one subtitle font to the editor's preview |
 | `GET`/`PUT /api/v1/tasks/{id}/music` | the background music of this video and its volume |
 | `GET /api/v1/music/{name}` | play one track from the music library |
 | `POST /api/v1/tasks/{id}/audio` | re-record narration and rebuild subtitles |
@@ -160,6 +163,15 @@ message says what. Nothing falls back to another provider silently.
   leaving the voice and every timing untouched — that is the one to use when
   the transcription misheard a word. A re-record afterwards discards
   caption-only edits, because the captions are rebuilt from the new voice.
+* **The caption's look is a video-wide setting.** Font, size, colour,
+  outline, the box behind the text and the vertical position all live in
+  `.../subtitles/style`, and the editor previews them on the picture in the
+  real font at the real size. Colours are `#RRGGBB`; an unknown font or
+  position is refused when it is chosen, not when the render reaches the last
+  step.
+* **The cut sound can be taken off entirely.** `PUT .../cut-sound` with an
+  empty `sound` removes it from the whole video; a scene's own `cut_sound`
+  only ever silences its own cut. The volume stays video-wide.
 * **Background music belongs to the video, not to a scene.** `PUT
   .../music` with a track name, `random`, or an empty string for none, plus a
   volume between 0 and 1. It writes this task's own parameters, so other
