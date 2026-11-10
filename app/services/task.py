@@ -1216,6 +1216,10 @@ def generate_final_videos(
         # 知道——合成之后就只剩一条拼好的 MP4 了。没选音效时这个列表照样会填,
         # 但不会有人读它。
         clip_boundaries: list[float] = []
+        # 每一刀响哪一声，与 clip_boundaries 一一对应。空字符串是"跟整条片子
+        # 一样"，"none" 是这一刀不要响。每段自己挑的音效只有切片那一层知道是
+        # 哪一段切到哪一段。
+        clip_cut_sounds: list[str] = []
         batch_options = (
             {
                 "source_usage": source_usage,
@@ -1244,6 +1248,7 @@ def generate_final_videos(
             # 空列表时 combine_videos 走原来那条路，行为与本功能上线前一致。
             edit_list=edit_list or None,
             clip_boundaries=clip_boundaries,
+            clip_cut_sounds=clip_cut_sounds,
             **batch_options,
         )
         if allocate_batch_materials:
@@ -1311,6 +1316,7 @@ def generate_final_videos(
             params=params,
             bgm_file_override=bgm_file_override,
             transition_sound_times=clip_boundaries,
+            transition_sound_names=clip_cut_sounds,
         )
         if (
             video_music_provider is not None

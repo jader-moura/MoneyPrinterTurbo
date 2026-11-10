@@ -418,6 +418,9 @@ def build_edit_list(
         transition = str(scene.get("transition") or "").strip()
         if transition:
             entry["transition"] = transition
+        cut_sound = str(scene.get("cut_sound") or "").strip()
+        if cut_sound:
+            entry["cut_sound"] = cut_sound
         edit_list.append(entry)
 
     if not edit_list:

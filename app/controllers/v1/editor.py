@@ -396,6 +396,7 @@ def update_scene_effects(
             index,
             transition=body.transition,
             image_motion=body.image_motion,
+            cut_sound=body.cut_sound,
         ),
     )
     return utils.get_response(200, _scene_payload(task_id, index))

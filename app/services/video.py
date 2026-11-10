@@ -59,6 +59,7 @@ class SubClippedVideoClip:
         duration=None,
         source_file_path=None,
         transition=None,
+        cut_sound=None,
     ):
         self.file_path = file_path
         self.start_time = start_time
@@ -69,6 +70,9 @@ class SubClippedVideoClip:
         # 这一段自己挑的转场。None 表示"跟整条片子一样"——自动切片那条路上
         # 每一段都是 None，所以一键出片的结果一个字节都不会变。
         self.transition = transition
+        # 切到这一段时响的那一声。None 同样是"跟整条片子一样"，"none" 是
+        # "这一刀不要响"。
+        self.cut_sound = cut_sound
         if duration is None:
             self.duration = end_time - start_time
         else:
@@ -1021,6 +1025,7 @@ def _subclips_from_edit_list(edit_list: List[dict]) -> List[SubClippedVideoClip]
                 height=clip_h,
                 source_file_path=path,
                 transition=str(entry.get("transition") or "").strip() or None,
+                cut_sound=str(entry.get("cut_sound") or "").strip() or None,
             )
         )
     return items
@@ -1041,6 +1046,7 @@ def combine_videos(
     source_groups: dict[str, str] | None = None,
     used_video_paths: List[str] | None = None,
     clip_boundaries: List[float] | None = None,
+    clip_cut_sounds: List[str] | None = None,
     progress_callback: Callable[[float], None] | None = None,
     edit_list: List[dict] | None = None,
 ) -> str:
@@ -1050,6 +1056,10 @@ def combine_videos(
     进来,这里会把每两段画面的交界时刻(相对成片开头的秒数)填进去。转场音效
     要知道"什么时候切的"才能响在点上,而这件事只有切片这一层知道——到了
     ``generate_video`` 手里就只剩一条拼好的 MP4 了。不给则一切照旧。
+
+    ``clip_cut_sounds`` 与 ``clip_boundaries`` 一一对应,说的是每一刀该响哪
+    一声：空字符串表示"跟整条片子一样","none" 表示这一刀不要响。每段自己挑
+    的音效同样只有这一层知道是哪一段切到哪一段。
 
     ``edit_list`` 是时间线编辑用的可选入口：给定时按 ``[{path, start, end}]``
     原样渲染,跳过自动切片、去重排序、补时长和循环填充。不给时行为与以前
@@ -1281,6 +1291,8 @@ def combine_videos(
                 width=clip_w,
                 height=clip_h,
                 source_file_path=subclipped_item.source_file_path,
+                # 交界时刻是从处理完的片段上数出来的，所以这一声要跟着传下去。
+                cut_sound=getattr(subclipped_item, "cut_sound", None),
             )
             clip_file = None
             return processed_clip
@@ -1401,7 +1413,7 @@ def combine_videos(
             elapsed = 0.0
             # 时间线模式不按旁白截断，所以每一段都真的进了成片。
             usable_duration = video_duration if render_edit_list else audio_duration
-            for clip in processed_clips:
+            for position, clip in enumerate(processed_clips):
                 if elapsed >= usable_duration:
                     break
                 if used_video_paths is not None:
@@ -1411,6 +1423,18 @@ def combine_videos(
                 # 没有下一段，成片也到头了，那里不该再响一声。
                 if clip_boundaries is not None and 0.0 < elapsed < usable_duration:
                     clip_boundaries.append(elapsed)
+                    # 这一刀响什么，由**切过去的那一段**说了算：用户在界面上
+                    # 挑的是"这一段怎么出场"。所以取下一段的选择，不是这一段的。
+                    if clip_cut_sounds is not None:
+                        following = processed_clips[position + 1:position + 2]
+                        clip_cut_sounds.append(
+                            (
+                                getattr(following[0], "cut_sound", None)
+                                if following
+                                else None
+                            )
+                            or ""
+                        )
     finally:
         # FFmpeg failures and timeouts must not strand one encoded MP4 per clip.
         # Repeated clips share a path; delete_files already deduplicates them.
@@ -1780,6 +1804,43 @@ def _load_transition_sound_samples(sound_file: str) -> tuple[np.ndarray, int]:
     return samples, fps
 
 
+def _resolve_cut_sounds(
+    times: List[float],
+    names: List[str] | None,
+    default_name: str,
+) -> dict[str, List[float]]:
+    """把"每一刀响哪一声"整理成 ``{音效文件: [时刻...]}``。
+
+    按文件分组而不是逐刀解析：同一个音效在一条片子里会用上十几次，而解析
+    一次要读盘、重采样。分组之后每个文件只解析一次。
+
+    名字解析不出来（换了台机器、音效被删了）时跳过那一刀并写日志，而不是让
+    整次渲染失败：渲染已经走到最后一步，为一声 whoosh 丢掉整条片子不值得，
+    但必须把名字写进日志，否则用户只会觉得"选了却没响"。
+    """
+    grouped: dict[str, List[float]] = {}
+    for position, start in enumerate(times):
+        chosen = ""
+        if names is not None and position < len(names):
+            chosen = str(names[position] or "").strip()
+        if chosen == "none":
+            # 这一刀被显式关掉了。
+            continue
+        name = chosen or default_name
+        if not name or name == "none":
+            continue
+        try:
+            resolved = transition_sound_service.resolve_transition_sound(str(name))
+        except ValueError as exc:
+            logger.error(
+                f"skipping the transition sound at {float(start):.2f}s because "
+                f"it cannot be resolved: name={name}, error={str(exc)}"
+            )
+            continue
+        grouped.setdefault(resolved, []).append(float(start))
+    return grouped
+
+
 def _build_transition_sound_clips(
     sound_file: str,
     times: List[float],
@@ -1820,6 +1881,7 @@ def generate_video(
     params: VideoParams,
     bgm_file_override: str | None = None,
     transition_sound_times: List[float] | None = None,
+    transition_sound_names: List[str] | None = None,
 ) -> bool:
     """
     合成最终视频，并返回本次背景音乐处理是否成功。
@@ -2160,31 +2222,30 @@ def generate_video(
                     f"file={bgm_file}"
                 )
 
-        # 转场音效。没选音效、音量为 0，或者这条片子根本没有剪辑点（只有一段
-        # 画面）时，下面整段都不会执行，成片与本功能上线前逐字节一致。
-        transition_sound_file = ""
-        if transition_sound_times and transition_sound_service.should_use_transition_sound(
-            params.transition_sound, params.transition_sound_volume
-        ):
-            try:
-                transition_sound_file = (
-                    transition_sound_service.resolve_transition_sound(
-                        str(params.transition_sound)
-                    )
-                )
-            except ValueError as exc:
-                # 名字来自任务参数，可能是另一台机器上存在、这里没有的音效。
-                # 渲染已经走到最后一步，为一声 whoosh 丢掉整条片子不值得，
-                # 但必须把名字写进日志，否则用户只会觉得"选了却没响"。
-                logger.error(
-                    f"skipping transition sound because it cannot be resolved: "
-                    f"name={params.transition_sound}, error={str(exc)}"
-                )
-        if transition_sound_file:
+        # 转场音效。这条片子根本没有剪辑点（只有一段画面）时，下面整段都不会
+        # 执行；整条片子没选音效、每一段也都没自己挑过时同样不会执行，成片与
+        # 本功能上线前逐字节一致。
+        #
+        # 音量仍然是整条片子一个值：每一段挑的是"响哪一声"，不是"响多大"。
+        video_wide_sound = (
+            str(params.transition_sound or "")
+            if transition_sound_service.should_use_transition_sound(
+                params.transition_sound, params.transition_sound_volume
+            )
+            else ""
+        )
+        cut_sounds: dict[str, List[float]] = {}
+        if transition_sound_times and float(params.transition_sound_volume or 0) > 0:
+            cut_sounds = _resolve_cut_sounds(
+                list(transition_sound_times),
+                list(transition_sound_names) if transition_sound_names else None,
+                video_wide_sound,
+            )
+        for sound_file, times in cut_sounds.items():
             try:
                 transition_sound_clips = _build_transition_sound_clips(
-                    transition_sound_file,
-                    list(transition_sound_times),
+                    sound_file,
+                    times,
                     float(params.transition_sound_volume),
                     float(video_clip.duration),
                 )
@@ -2194,12 +2255,12 @@ def generate_video(
                     )
                     logger.info(
                         f"mixed transition sound at {len(transition_sound_clips)} cuts: "
-                        f"file={os.path.basename(transition_sound_file)}"
+                        f"file={os.path.basename(sound_file)}"
                     )
             except Exception:
                 logger.exception(
                     "failed to mix transition sound: "
-                    f"file={os.path.basename(transition_sound_file)}"
+                    f"file={os.path.basename(sound_file)}"
                 )
 
         final_video_clip = video_clip.with_audio(audio_clip)

@@ -206,6 +206,11 @@ def _normalise_scene(raw: Any, index: int) -> dict:
     motion = str(record.get("image_motion") or "").strip()
     if motion:
         scene["image_motion"] = motion
+    # 切到这一段时响的那一声。文件名由 transition_sound 音效库校验，这里只
+    # 原样存；"none" 是"这一刀不要响"，不存在则跟着整条片子走。
+    cut_sound = str(record.get("cut_sound") or "").strip()
+    if cut_sound:
+        scene["cut_sound"] = cut_sound
     # 用户亲手改过这一段的台词。按"有才带"处理，理由同上。
     #
     # 为什么要记：台词平时是按时间算出来的（这段画面播放时真正会念到的那
@@ -395,6 +400,9 @@ def edit_list_for_render(task_id: str) -> list[dict]:
         transition = str(entry.get("transition") or "").strip()
         if transition:
             item["transition"] = transition
+        cut_sound = str(entry.get("cut_sound") or "").strip()
+        if cut_sound:
+            item["cut_sound"] = cut_sound
         resolved.append(item)
     return resolved
 
@@ -490,7 +498,11 @@ def has_render_overrides(scenes: Any) -> bool:
     """
     if has_timing_edits(scenes):
         return True
-    return any(str(scene.get("transition") or "").strip() for scene in scenes or [])
+    return any(
+        str(scene.get("transition") or "").strip()
+        or str(scene.get("cut_sound") or "").strip()
+        for scene in scenes or []
+    )
 
 
 def patch_scene_timing(

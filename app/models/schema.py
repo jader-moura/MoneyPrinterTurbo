@@ -737,6 +737,7 @@ class SceneEffectsRequest(BaseModel):
 
     transition: Optional[str] = None
     image_motion: Optional[str] = None
+    cut_sound: Optional[str] = None
 
 
 class NarrationScriptRequest(BaseModel):

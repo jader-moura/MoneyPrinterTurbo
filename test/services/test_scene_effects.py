@@ -222,3 +222,115 @@ class TestOverHttp:
         data = client.get(f"/api/v1/tasks/{task_id}/scenes").json()["data"]
         assert "fade_in" in data["transitions"]
         assert data["image_motions"] == ["zoom", "static"]
+
+
+class TestTheSoundOnTheCut:
+    """每一刀响哪一声，由切过去的那一段说了算。"""
+
+    def test_a_scene_remembers_its_cut_sound(self, task_root):
+        task_id, _ = _reviewed_task(task_root)
+        with patch.object(
+            scene_editor.transition_sound, "resolve_transition_sound",
+            return_value="/sounds/whoosh.mp3",
+        ):
+            scene_editor.set_effects(task_id, 1, cut_sound="whoosh.mp3")
+        assert scene_manifest.load(task_id)["scenes"][1]["cut_sound"] == "whoosh.mp3"
+        assert scene_editor.describe(task_id)["scenes"][1]["cut_sound"] == "whoosh.mp3"
+
+    def test_silent_is_a_choice_and_needs_no_file(self, task_root):
+        """"这一刀不要响"不是一个文件名，不该去音效库里找它。"""
+        task_id, _ = _reviewed_task(task_root)
+        with patch.object(
+            scene_editor.transition_sound, "resolve_transition_sound"
+        ) as resolve:
+            scene_editor.set_effects(task_id, 0, cut_sound="none")
+        resolve.assert_not_called()
+        assert scene_manifest.load(task_id)["scenes"][0]["cut_sound"] == "none"
+
+    def test_a_sound_this_machine_does_not_have_is_refused_now(self, task_root):
+        """现在就拒绝，而不是渲染完才发现片子里没响。"""
+        task_id, _ = _reviewed_task(task_root)
+        with patch.object(
+            scene_editor.transition_sound, "resolve_transition_sound",
+            side_effect=ValueError("no such sound"),
+        ):
+            with pytest.raises(scene_editor.SceneError) as error:
+                scene_editor.set_effects(task_id, 0, cut_sound="missing.mp3")
+        assert "unknown transition sound" in str(error.value)
+        assert "cut_sound" not in scene_manifest.load(task_id)["scenes"][0]
+
+    def test_choosing_a_sound_puts_the_task_on_the_edit_list_path(self, task_root):
+        task_id, _ = _reviewed_task(task_root)
+        with patch.object(
+            scene_editor.transition_sound, "resolve_transition_sound",
+            return_value="/sounds/whoosh.mp3",
+        ):
+            scene_editor.set_effects(task_id, 1, cut_sound="whoosh.mp3")
+        with patch.object(timeline, "probe_duration", return_value=5.0):
+            scene_editor.prepare_render(task_id)
+        edit_list = scene_manifest.edit_list_for_render(task_id)
+        assert edit_list[1]["cut_sound"] == "whoosh.mp3"
+        assert "cut_sound" not in edit_list[0]
+
+
+class TestGroupingTheCutSounds:
+    """渲染那一层：每一刀取哪一个文件，以及为什么按文件分组。"""
+
+    def test_each_cut_takes_the_sound_of_the_scene_it_cuts_into(self):
+        with patch.object(
+            video_service.transition_sound_service, "resolve_transition_sound",
+            side_effect=lambda name: f"/sounds/{name}",
+        ):
+            grouped = video_service._resolve_cut_sounds(
+                [2.0, 4.0, 6.0], ["a.mp3", "", "b.mp3"], "default.mp3"
+            )
+        assert grouped == {
+            "/sounds/a.mp3": [2.0],
+            "/sounds/default.mp3": [4.0],
+            "/sounds/b.mp3": [6.0],
+        }
+
+    def test_repeats_of_one_sound_are_grouped_so_it_is_decoded_once(self):
+        with patch.object(
+            video_service.transition_sound_service, "resolve_transition_sound",
+            side_effect=lambda name: f"/sounds/{name}",
+        ) as resolve:
+            grouped = video_service._resolve_cut_sounds(
+                [1.0, 2.0, 3.0], None, "whoosh.mp3"
+            )
+        assert grouped == {"/sounds/whoosh.mp3": [1.0, 2.0, 3.0]}
+        assert resolve.call_count == 3
+
+    def test_a_silent_scene_drops_only_its_own_cut(self):
+        with patch.object(
+            video_service.transition_sound_service, "resolve_transition_sound",
+            side_effect=lambda name: f"/sounds/{name}",
+        ):
+            grouped = video_service._resolve_cut_sounds(
+                [1.0, 2.0], ["none", ""], "whoosh.mp3"
+            )
+        assert grouped == {"/sounds/whoosh.mp3": [2.0]}
+
+    def test_no_video_wide_sound_means_only_the_scenes_that_asked(self):
+        with patch.object(
+            video_service.transition_sound_service, "resolve_transition_sound",
+            side_effect=lambda name: f"/sounds/{name}",
+        ):
+            grouped = video_service._resolve_cut_sounds([1.0, 2.0], ["", "b.mp3"], "")
+        assert grouped == {"/sounds/b.mp3": [2.0]}
+
+    def test_an_unresolvable_sound_drops_that_cut_and_not_the_render(self):
+        """渲染已经走到最后一步，为一声 whoosh 丢掉整条片子不值得。"""
+        def resolve(name):
+            if name == "gone.mp3":
+                raise ValueError("no such sound")
+            return f"/sounds/{name}"
+
+        with patch.object(
+            video_service.transition_sound_service, "resolve_transition_sound",
+            side_effect=resolve,
+        ):
+            grouped = video_service._resolve_cut_sounds(
+                [1.0, 2.0], ["gone.mp3", "ok.mp3"], ""
+            )
+        assert grouped == {"/sounds/ok.mp3": [2.0]}

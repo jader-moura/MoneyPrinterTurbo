@@ -1002,15 +1002,27 @@ function drawInspector() {
       ? inheritPicker("Picture motion", motions, MOTION_LABELS,
           scene.image_motion || "", videoMotionLabel())
       : null;
+    // 切到这一段时响的那一声。音效库是本机目录，所以列表来自接口。
+    const sounds = (state.data && state.data.cut_sounds) || [];
+    const soundLabels = {};
+    for (const name of sounds) soundLabels[name] = name.replace(/\.[^.]+$/, "");
+    soundLabels.none = "Silent";
+    const sound = sounds.length
+      ? inheritPicker("Sound on the cut", ["none", ...sounds], soundLabels,
+          scene.cut_sound || "", videoCutSoundLabel())
+      : null;
+
     if (cut) ui.inspBody.append(cut.wrap);
     if (motion) ui.inspBody.append(motion.wrap);
+    if (sound) ui.inspBody.append(sound.wrap);
 
     const effectsNote = document.createElement("p");
     effectsNote.className = "hint";
-    effectsNote.textContent = "The transition is added when the video is "
-      + "rendered. The motion is baked into this scene's clip, so changing it "
-      + "re-renders the clip from its picture — a few seconds, and instant "
-      + "once you have used that setting before.";
+    effectsNote.textContent = "The transition and the sound are added when "
+      + "the video is rendered. The motion is baked into this scene's clip, so "
+      + "changing it re-renders the clip from its picture — a few seconds, and "
+      + "instant once you have used that setting before. The sound plays on "
+      + "the cut into this scene, at the video's transition-sound volume.";
     ui.inspBody.appendChild(effectsNote);
 
     ui.inspBody.appendChild(button("Apply effects", "small", () =>
@@ -1018,6 +1030,7 @@ function drawInspector() {
         call("PUT", scenePath(scene.index) + "/effects", {
           transition: cut ? cut.input.value : null,
           image_motion: motion ? motion.input.value : null,
+          cut_sound: sound ? sound.input.value : null,
         }))));
   }
 
@@ -1228,6 +1241,14 @@ function videoTransitionLabel() {
 function labelOfRenderTransition(id) {
   return id === "shuffle" ? "Shuffle"
     : id.split("_").map((part) => part[0].toUpperCase() + part.slice(1)).join("");
+}
+
+/* 整条片子现在用的那一声。音量是整条片子一个值，每一段挑的是"响哪一声"。 */
+function videoCutSoundLabel() {
+  const settings = (state.data && state.data.render_settings) || {};
+  const raw = String(settings.transition_sound || "").trim();
+  if (!raw) return "Same as the video (silent)";
+  return `Same as the video (${raw.replace(/\.[^.]+$/, "")})`;
 }
 
 function videoMotionLabel() {

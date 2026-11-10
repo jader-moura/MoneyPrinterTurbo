@@ -44,6 +44,7 @@ from app.models.schema import (
     VideoTransitionMode,
 )
 from app.services import material, scene_manifest, task_artifacts, timeline
+from app.services import transition_sound
 from app.services import state as sm
 from app.services import task as tm
 from app.utils import utils
@@ -887,6 +888,7 @@ def describe(task_id: str, endpoint: str = "", *, with_timing: bool = False) -> 
         # 据此把下拉框停在第一项上。
         record["transition"] = transition_id(scene.get("transition"))
         record["image_motion"] = str(scene.get("image_motion") or "")
+        record["cut_sound"] = str(scene.get("cut_sound") or "")
         window = windows[scene["index"]] if scene["index"] < len(windows) else None
         # 成片里的起止时间。界面靠它把"第 7 段画面"和"第 30 秒的旁白"对上。
         record["starts_at"] = window["start"] if window else None
@@ -947,6 +949,13 @@ def describe(task_id: str, endpoint: str = "", *, with_timing: bool = False) -> 
     # 写死一份迟早和它对不上。
     payload["transitions"] = list(SCENE_TRANSITIONS)
     payload["image_motions"] = list(SCENE_MOTIONS)
+    # 这台机器上装着的转场音效。界面不写死：音效库是本机目录加用户自己丢进
+    # 去的文件，只有服务端知道里面有什么。
+    try:
+        payload["cut_sounds"] = transition_sound.list_transition_sounds()
+    except Exception as exc:  # pragma: no cover - 列目录失败不该挡住审片
+        logger.warning(f"cannot list the transition sounds: {exc}")
+        payload["cut_sounds"] = []
     payload["planned_total"] = round(windows[-1]["end"], 3) if windows else 0.0
     # 旁白总长无条件带上：审片列表要靠它说清楚"画面铺不满旁白,所以会轮播"。
     # 这只是读一次清单，不探测素材，所以不必等 with_timing。
@@ -972,6 +981,12 @@ def describe(task_id: str, endpoint: str = "", *, with_timing: bool = False) -> 
             "aspect": _enum_value(getattr(params, "video_aspect", "")),
             "image_motion": _enum_value(getattr(params, "image_motion", "")),
             "transition": _enum_value(getattr(params, "video_transition_mode", "")),
+            # 整条片子的那一声，以及音量。界面要靠它写出"跟片子一样（whoosh）"，
+            # 而音量是整条片子一个值——每一段挑的是"响哪一声"，不是"响多大"。
+            "transition_sound": str(getattr(params, "transition_sound", "") or ""),
+            "transition_sound_volume": float(
+                getattr(params, "transition_sound_volume", 0.0) or 0.0
+            ),
             "concat_mode": _enum_value(getattr(params, "video_concat_mode", "")),
             "clip_duration": getattr(params, "video_clip_duration", None),
             # 预览要照搬渲染器的适配方式，否则这里看到的构图和成片不一致：
@@ -1039,6 +1054,7 @@ def set_effects(
     *,
     transition: str | None = None,
     image_motion: str | None = None,
+    cut_sound: str | None = None,
 ) -> dict:
     """设置这一段画面的转场和运镜。
 
@@ -1069,6 +1085,22 @@ def set_effects(
                 scene["transition"] = SCENE_TRANSITIONS[chosen]
             else:
                 scene.pop("transition", None)
+
+        if cut_sound is not None:
+            sound = str(cut_sound).strip()
+            if sound and sound != "none":
+                # 名字必须当场校验。等到渲染那一刻才发现"这台机器上没有这个
+                # 音效"，用户已经等完了一整次渲染,而片子里就是没响。
+                try:
+                    transition_sound.resolve_transition_sound(sound)
+                except ValueError as exc:
+                    raise SceneError(
+                        f"unknown transition sound {sound!r}: {exc}"
+                    ) from exc
+            if sound:
+                scene["cut_sound"] = sound
+            else:
+                scene.pop("cut_sound", None)
 
         if image_motion is not None:
             motion = str(image_motion).strip()
@@ -1298,6 +1330,11 @@ def prepare_render(task_id: str) -> VideoParams:
                     **(
                         {"transition": item["transition"]}
                         if item.get("transition")
+                        else {}
+                    ),
+                    **(
+                        {"cut_sound": item["cut_sound"]}
+                        if item.get("cut_sound")
                         else {}
                     ),
                 }

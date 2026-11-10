@@ -204,10 +204,20 @@ class TestKimiCodeOAuth(unittest.TestCase):
         self.assertEqual(on_disk["app"]["kimi_code_access_token"], "at-1")
         self.assertEqual(on_disk["app"]["kimi_code_refresh_token"], "rt-new")
         # 模拟重启：清空内存配置，只从磁盘内容恢复。
-        config.app.clear()
-        config.app.update(on_disk["app"])
-        self.assertTrue(oauth.is_authorized())
-        self.assertEqual(oauth.get_valid_access_token(), "at-1")
+        #
+        # 退出时必须还回去。这个 dict 是模块级的，整个测试进程共用一份：
+        # 留着一份"只剩 kimi 几个键"的 config.app，后面任何一次真正的
+        # save_config() 都会把它按原样写回**仓库里那个 config.toml**，用户的
+        # video_source、本地出图地址等等就此消失。
+        restore_app = dict(config.app)
+        try:
+            config.app.clear()
+            config.app.update(on_disk["app"])
+            self.assertTrue(oauth.is_authorized())
+            self.assertEqual(oauth.get_valid_access_token(), "at-1")
+        finally:
+            config.app.clear()
+            config.app.update(restore_app)
 
     # ---- get_valid_access_token ----
 
