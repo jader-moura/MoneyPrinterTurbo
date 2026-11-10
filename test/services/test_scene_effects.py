@@ -508,3 +508,104 @@ class TestSubtitleSettingsForThePreview:
         task_artifacts.patch_script_data(task_id, params=payload["params"])
         settings = scene_editor.describe(task_id, with_timing=True)["render_settings"]
         assert settings["subtitle"]["enabled"] is False
+
+
+SRT = """1
+00:00:00,000 --> 00:00:02,000
+One.
+
+2
+00:00:02,000 --> 00:00:04,000
+Two.
+
+3
+00:00:04,000 --> 00:00:06,000
+Three.
+"""
+
+
+def _task_with_subtitles(task_root, task_id="subs"):
+    task_id, _ = _reviewed_task(task_root, task_id=task_id)
+    directory = task_root / task_id
+    path = directory / "subtitle.srt"
+    path.write_text(SRT, encoding="utf-8")
+    payload = scene_manifest.load_raw(task_id)
+    task_artifacts.patch_script_data(task_id, subtitle_path=str(path))
+    assert payload is not None
+    return task_id, path
+
+
+class TestEditingACaption:
+    """改字幕只改屏幕上那行字：配音和时间轴都不动。"""
+
+    def test_the_text_is_replaced(self, task_root):
+        task_id, path = _task_with_subtitles(task_root)
+        scene_editor.edit_subtitle(task_id, 1, "Two, corrected.")
+        assert "Two, corrected." in path.read_text(encoding="utf-8")
+        assert "Two.\n" not in path.read_text(encoding="utf-8")
+
+    def test_the_timings_are_copied_through_untouched(self, task_root):
+        """时间戳按原样抄回去，不重新格式化——那会在浮点换算上丢精度。"""
+        task_id, path = _task_with_subtitles(task_root)
+        scene_editor.edit_subtitle(task_id, 0, "One, corrected.")
+        body = path.read_text(encoding="utf-8")
+        for stamp in ("00:00:00,000 --> 00:00:02,000",
+                      "00:00:02,000 --> 00:00:04,000",
+                      "00:00:04,000 --> 00:00:06,000"):
+            assert stamp in body
+
+    def test_the_other_captions_are_left_alone(self, task_root):
+        task_id, path = _task_with_subtitles(task_root)
+        scene_editor.edit_subtitle(task_id, 1, "Changed.")
+        body = path.read_text(encoding="utf-8")
+        assert "One." in body and "Three." in body
+
+    def test_the_recording_is_not_invalidated(self, task_root):
+        """这正是存在的理由：为一个字重跑一次 TTS 完全不成比例。"""
+        task_id, _ = _task_with_subtitles(task_root)
+        scene_editor.edit_subtitle(task_id, 0, "Corrected.")
+        assert scene_manifest.load(task_id)["audio_stale"] is False
+
+    def test_the_editor_reads_the_new_text_back(self, task_root):
+        task_id, _ = _task_with_subtitles(task_root)
+        scene_editor.edit_subtitle(task_id, 2, "Three, corrected.")
+        shown = [s["text"] for s in scene_manifest.narration_segments(task_id)]
+        assert shown == ["One.", "Two.", "Three, corrected."]
+
+    def test_an_index_past_the_end_is_refused(self, task_root):
+        task_id, _ = _task_with_subtitles(task_root)
+        with pytest.raises(scene_editor.SceneError) as error:
+            scene_editor.edit_subtitle(task_id, 9, "Nope.")
+        assert "there is no subtitle 9" in str(error.value)
+
+    def test_an_empty_caption_is_refused(self, task_root):
+        """空正文会让字幕文件少一条，而用户以为自己只是清空了一行。"""
+        task_id, path = _task_with_subtitles(task_root)
+        before = path.read_text(encoding="utf-8")
+        with pytest.raises(scene_editor.SceneError) as error:
+            scene_editor.edit_subtitle(task_id, 0, "   ")
+        assert "cannot be empty" in str(error.value)
+        assert path.read_text(encoding="utf-8") == before
+
+    def test_a_task_without_subtitles_says_so(self, task_root):
+        task_id, _ = _reviewed_task(task_root, task_id="nosubs")
+        with pytest.raises(scene_editor.SceneError) as error:
+            scene_editor.edit_subtitle(task_id, 0, "Anything.")
+        assert "no subtitle file" in str(error.value)
+
+    def test_over_http(self, task_root):
+        from fastapi.testclient import TestClient
+
+        from app import asgi
+
+        client = TestClient(asgi.app)
+        task_id, path = _task_with_subtitles(task_root)
+        response = client.put(
+            f"/api/v1/tasks/{task_id}/subtitles/1", json={"text": "Via HTTP."}
+        )
+        assert response.status_code == 200
+        assert "Via HTTP." in path.read_text(encoding="utf-8")
+        bad = client.put(
+            f"/api/v1/tasks/{task_id}/subtitles/99", json={"text": "Nope."}
+        )
+        assert bad.status_code == 400

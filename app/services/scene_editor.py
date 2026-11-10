@@ -45,6 +45,7 @@ from app.models.schema import (
 )
 from app.services import material, scene_manifest, task_artifacts, timeline
 from app.services import bgm, transition_sound
+from app.utils import subtitle_reader, subtitle_writer
 from app.services import state as sm
 from app.services import task as tm
 from app.utils import utils
@@ -1141,6 +1142,71 @@ def set_effects(
 
         scene_manifest.save_scenes(task_id, scenes)
         return scenes[position]
+
+
+def edit_subtitle(task_id: str, index: Any, text: str) -> dict:
+    """改一条字幕的文字，时间轴和配音都不动。
+
+    这和改脚本是两件事，不能混在一起：
+
+    * 改脚本是改**要念的词**，必须重新配音才算数，整条字幕的时间点也会跟着
+      重来；
+    * 改字幕只是改**屏幕上那行字**。听写把 "paddy" 认成 "padding" 的时候，
+      要改的就是这一条——为一个字重跑一遍 TTS 并作废全部时间点，代价完全不
+      成比例。
+
+    所以这里只重写字幕文件里那一条的正文，时间戳按原样抄回去（不重新格式
+    化，免得在浮点换算上丢精度），配音文件一个字节都不动。
+
+    代价要说在前面：之后真去重新配音时，字幕是按新配音重新生成的，这里的
+    改动会被盖掉。界面上写明了这一点。
+    """
+    _require_idle(task_id)
+    with _editing(task_id):
+        path = _subtitle_file(task_id)
+        cues = subtitle_reader.file_to_subtitles(path)
+        if not cues:
+            raise SceneError("this task has no subtitles to edit")
+        try:
+            position = int(index)
+        except (TypeError, ValueError) as exc:
+            raise SceneError(f"subtitle index must be a whole number, got {index!r}") from exc
+        if not 0 <= position < len(cues):
+            raise SceneError(
+                f"there is no subtitle {position}; this task has {len(cues)}"
+            )
+
+        wanted = str(text or "").strip()
+        if not wanted:
+            raise SceneError(
+                "a caption cannot be empty; put a space-free dash in it if you "
+                "want it blank on screen"
+            )
+
+        blocks = []
+        for order, (_number, times, body) in enumerate(cues):
+            blocks.append(
+                f"{order + 1}\n{times}\n{wanted if order == position else body}\n"
+            )
+        if not subtitle_writer.write_subtitle_file(path, "\n".join(blocks)):
+            raise SceneError("failed to save the caption")
+        logger.info(f"edited subtitle {position} of task {task_id}")
+    return {"index": position, "text": wanted}
+
+
+def _subtitle_file(task_id: str) -> str:
+    """这条任务的字幕文件，没有就报错点名。"""
+    payload = scene_manifest.load_raw(task_id)
+    stored = str(payload.get("subtitle_path") or "").strip()
+    if not stored:
+        raise SceneError(
+            "this task has no subtitle file; it was generated with subtitles "
+            "turned off"
+        )
+    path = scene_manifest.resolve_task_file(task_id, stored)
+    if not os.path.isfile(path):
+        raise SceneError(f"the subtitle file is missing: {os.path.basename(path)}")
+    return path
 
 
 RANDOM_BACKGROUND = "random"

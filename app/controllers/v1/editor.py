@@ -33,6 +33,7 @@ from app.models.exception import HttpException
 from app.models.schema import (
     BackgroundMusicRequest,
     BackgroundMusicResponse,
+    SubtitleEditRequest,
     NarrationScriptRequest,
     SceneListResponse,
     SceneAddRequest,
@@ -176,6 +177,29 @@ def add_scene(
 # 整数参数的路由并直接返回 422，而不是落到这里。
 # Declared before ``/scenes/{index}``: otherwise "reorder" matches that
 # integer-typed route first and returns 422 instead of reaching this one.
+@router.put(
+    "/tasks/{task_id}/subtitles/{index}",
+    summary="Edit one caption without re-recording",
+)
+def update_subtitle(
+    request: Request,
+    body: SubtitleEditRequest,
+    task_id: str = Path(..., description="Task ID"),
+    index: int = Path(..., ge=0, description="Caption index"),
+):
+    """改屏幕上那行字，不碰配音，也不碰时间轴。
+
+    听写把一个词认错时要改的就是这里：为一个字重跑一遍 TTS 并作废全部字幕
+    时间点，代价完全不成比例。想改**念出来**的词请走 ``PUT /script``。
+    """
+    request_id = base.get_task_id(request)
+    _require_task(task_id, request_id)
+    data = _handle(
+        task_id, request_id, lambda: scene_editor.edit_subtitle(task_id, index, body.text)
+    )
+    return utils.get_response(200, data)
+
+
 @router.get(
     "/tasks/{task_id}/music",
     response_model=BackgroundMusicResponse,

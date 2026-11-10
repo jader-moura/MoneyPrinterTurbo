@@ -47,6 +47,21 @@
   </div>
 </section>
 
+<!-- 字幕。点画面上那行字就打开它。 -->
+<section id="caption-panel" class="script-panel" hidden>
+  <h2>Caption</h2>
+  <p class="hint">The words on screen at <b id="caption-when"></b>. This changes
+    the caption only — the voice and the timing stay exactly as they are. To
+    change what is <i>spoken</i>, use <b>Script</b> and re-record; that
+    regenerates the captions and will discard edits made here.</p>
+  <textarea id="caption-text" spellcheck="true" rows="3"></textarea>
+  <div class="row">
+    <button id="caption-save" class="btn primary small">Save caption</button>
+    <button id="caption-close" class="btn small">Close</button>
+    <span id="caption-note" class="hint"></span>
+  </div>
+</section>
+
 <!-- 背景音乐。和旁白正文一样浮着，不占布局：配乐属于整条片子，而且它只是
      偶尔打开改一下的东西，不该一直占着画面的高度。 -->
 <section id="music-panel" class="script-panel" hidden>

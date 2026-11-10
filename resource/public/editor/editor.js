@@ -31,6 +31,9 @@ const ui = {
   musicClose: el("music-close"), musicNote: el("music-note"),
   musicLane: el("music-lane"), musicBed: el("music-bed"),
   subs: el("subs"), subsText: el("subs-text"),
+  captionPanel: el("caption-panel"), captionText: el("caption-text"),
+  captionWhen: el("caption-when"), captionSave: el("caption-save"),
+  captionClose: el("caption-close"), captionNote: el("caption-note"),
 };
 
 const state = {
@@ -53,6 +56,8 @@ const state = {
   queueSeen: [],
   // 这条片子的配乐。时间线上要画出来，预览时要跟着响。
   music: null,
+  // 屏幕上那条字幕是第几条。-1 表示此刻没有字幕。
+  cueIndex: -1,
   // 队列浮层收起没有。只是这台浏览器上的一点顺手，读不出来就当没收起。
   queueCollapsed: (() => {
     try { return !!localStorage.getItem("mpt_queue_collapsed"); } catch { return false; }
@@ -873,6 +878,13 @@ function drawVoice() {
       syncPreview(true);
       movePlayhead();
     });
+    // 双击直接改这一条的文字。画面上那行字也能点开同一个面板，但旁白比
+    // 画面长的时候后面那几句没有画面可点，这里是它们唯一的入口。
+    bar.addEventListener("dblclick", (event) => {
+      event.stopPropagation();
+      openCaption(index);
+    });
+    bar.title += "\nDouble-click to edit this caption";
     ui.audioTrack.appendChild(bar);
   });
 }
@@ -1713,7 +1725,7 @@ function activeCue() {
   // 从后往前找：时间轴是有序的，而播放时命中的多半是靠后的那几条。
   for (let index = segments.length - 1; index >= 0; index -= 1) {
     const cue = segments[index];
-    if (at >= cue.start && at < cue.end) return cue;
+    if (at >= cue.start && at < cue.end) return { ...cue, index };
   }
   return null;
 }
@@ -1728,6 +1740,7 @@ function drawSubtitle() {
   const cue = style && style.enabled ? activeCue() : null;
   if (!cue || !String(cue.text || "").trim()) {
     ui.subs.hidden = true;
+    state.cueIndex = -1;
     return;
   }
 
@@ -1740,6 +1753,9 @@ function drawSubtitle() {
 
   ui.subs.hidden = false;
   ui.subsText.textContent = String(cue.text);
+  // 哪一条正在屏幕上。点它就是改这一条。
+  state.cueIndex = cue.index;
+  ui.subsText.title = "Click to edit this caption";
   const text = ui.subsText.style;
   text.fontSize = Math.max(8, (Number(style.font_size) || 60) * scale) + "px";
   text.color = style.color || "#FFFFFF";
@@ -1856,6 +1872,44 @@ async function loadMusic() {
   syncMusicBed();
   drawMusicTrack();
 }
+
+/* ---------- 改一条字幕 ----------
+
+   改的只是屏幕上那行字：配音和时间点都不动。听写把一个词认错时要改的就是
+   这里——为一个字重跑一遍 TTS 并作废全部时间点，代价完全不成比例。
+
+   想改**念出来**的词是另一件事，走 Script 那个面板，然后重新配音。 */
+function openCaption(index) {
+  const segments = (state.data && state.data.narration_segments) || [];
+  const cue = segments[index];
+  if (!cue) return;
+  state.cueIndex = index;
+  ui.captionText.value = String(cue.text || "");
+  ui.captionWhen.textContent = `${fmt(cue.start)} – ${fmt(cue.end)}`;
+  ui.captionNote.textContent = "";
+  ui.captionPanel.hidden = false;
+  ui.captionText.focus();
+  ui.captionText.select();
+}
+
+function closeCaption() {
+  ui.captionPanel.hidden = true;
+}
+
+ui.subsText.addEventListener("click", () => {
+  if (state.cueIndex >= 0) openCaption(state.cueIndex);
+});
+ui.captionClose.addEventListener("click", closeCaption);
+
+ui.captionSave.addEventListener("click", () => run("Saving the caption", async () => {
+  const index = state.cueIndex;
+  if (index < 0) return "";
+  await call("PUT",
+    `/tasks/${encodeURIComponent(state.taskId)}/subtitles/${index}`,
+    { text: ui.captionText.value });
+  closeCaption();
+  return "";
+}));
 
 /* ---------- 背景音乐 ----------
 

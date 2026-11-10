@@ -740,6 +740,12 @@ class SceneEffectsRequest(BaseModel):
     cut_sound: Optional[str] = None
 
 
+class SubtitleEditRequest(BaseModel):
+    """改一条字幕的文字。时间轴和配音都不动。"""
+
+    text: str
+
+
 class BackgroundMusicRequest(BaseModel):
     """这条片子的背景音乐。只提交想改的字段。
 

@@ -108,6 +108,7 @@ curl -X POST localhost:8080/api/v1/tasks/$TASK/render
 | `POST /api/v1/tasks/{id}/scenes/reorder` | `order` must be a full permutation |
 | `PUT /api/v1/tasks/{id}/script` | rewrite the whole narration script |
 | `PUT /api/v1/tasks/{id}/scenes/{i}/effects` | `transition`, `image_motion`, `cut_sound` for one scene |
+| `PUT /api/v1/tasks/{id}/subtitles/{i}` | fix one caption's words, leaving the voice alone |
 | `GET`/`PUT /api/v1/tasks/{id}/music` | the background music of this video and its volume |
 | `GET /api/v1/music/{name}` | play one track from the music library |
 | `POST /api/v1/tasks/{id}/audio` | re-record narration and rebuild subtitles |
@@ -153,6 +154,12 @@ message says what. Nothing falls back to another provider silently.
   source PNG in the task folder — a few seconds, and instant once that
   combination has been rendered before. Stock footage has no source image, so
   it cannot change motion and says so.
+* **Captions and the script are different things.** `PUT .../script` changes
+  what is *spoken*; it needs a re-record, which regenerates the captions from
+  the new audio. `PUT .../subtitles/{i}` changes only the words on screen,
+  leaving the voice and every timing untouched — that is the one to use when
+  the transcription misheard a word. A re-record afterwards discards
+  caption-only edits, because the captions are rebuilt from the new voice.
 * **Background music belongs to the video, not to a scene.** `PUT
   .../music` with a track name, `random`, or an empty string for none, plus a
   volume between 0 and 1. It writes this task's own parameters, so other
