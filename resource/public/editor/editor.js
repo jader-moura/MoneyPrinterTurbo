@@ -2132,6 +2132,18 @@ function syncCutPreview() {
 }
 
 ui.cutSound.addEventListener("change", syncCutPreview);
+
+/* 取不到音频文件时说出来。一个按了没反应的播放条是最难查的那种故障：
+   用户只能看到"没声音"，看不到那是一个 404。 */
+function sayPreviewFailed(player, note, what) {
+  player.addEventListener("error", () => {
+    if (!player.getAttribute("src")) return;
+    note.textContent = `${what} could not be loaded. If you have just `
+      + "updated, the API needs restarting to serve it.";
+  });
+}
+sayPreviewFailed(ui.cutPreview, ui.musicNote, "That sound");
+sayPreviewFailed(ui.musicPreview, ui.musicNote, "That track");
 ui.cutVolume.addEventListener("input", () => {
   const level = Number(ui.cutVolume.value);
   if (Number.isFinite(level)) {
