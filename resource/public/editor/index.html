@@ -11,6 +11,7 @@
   <span class="brand">Timeline</span>
   <input id="task" class="task" placeholder="task id" spellcheck="false" autocomplete="off">
   <button id="load" class="btn">Load</button>
+  <button id="library-toggle" class="btn">My videos</button>
   <span id="totals" class="totals"></span>
   <span class="spacer"></span>
   <button id="script-toggle" class="btn" disabled>Script</button>
@@ -152,6 +153,21 @@
     <button id="music-save" class="btn primary small">Save sound</button>
     <button id="music-close" class="btn small">Close</button>
     <span id="music-note" class="hint"></span>
+  </div>
+</section>
+
+<!-- 做过的片子。编辑器原来只能靠粘一个 uuid 进来，而第二天回来想接着改
+     前天那条片子时，那串 id 早就找不着了。 -->
+<section id="library" class="library" hidden>
+  <div class="library-head">
+    <h2>My videos</h2>
+    <span id="library-count" class="hint"></span>
+    <span class="spacer"></span>
+    <button id="library-close" class="btn small">Close</button>
+  </div>
+  <div id="library-grid" class="library-grid"></div>
+  <div class="row" id="library-more-row" hidden>
+    <button id="library-more" class="btn small">Show more</button>
   </div>
 </section>
 

@@ -21,7 +21,7 @@ scene, since seeing the real result is the entire point of a review.
 
 import os
 
-from fastapi import Depends, Path, Request
+from fastapi import Depends, Path, Query, Request
 from fastapi.responses import FileResponse
 from loguru import logger
 
@@ -245,6 +245,22 @@ def update_cut_sound(
             task_id, sound=body.sound, volume=body.volume
         ),
     )
+    return utils.get_response(200, data)
+
+
+@router.get("/library", summary="Every task on disk, newest first")
+def list_library(
+    request: Request,
+    page: int = Query(1, ge=1),
+    page_size: int = Query(24, ge=1, le=200),
+):
+    """做过的片子，用来在编辑器里直接挑一条接着改。
+
+    不用 ``GET /tasks``：那一份是进程内存里的任务表，API 一重启就空了，而
+    "我做过哪些片子"的真正记录在磁盘上。
+    """
+    base.get_task_id(request)
+    data = scene_editor.library(_endpoint(), page=page, page_size=page_size)
     return utils.get_response(200, data)
 
 

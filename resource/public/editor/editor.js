@@ -44,6 +44,10 @@ const ui = {
   subsSave: el("subs-save"), subsClose: el("subs-close"), subsNote: el("subs-note"),
   cutSound: el("cut-sound"), cutVolume: el("cut-volume"),
   cutPreview: el("cut-preview"),
+  libraryToggle: el("library-toggle"), library: el("library"),
+  libraryGrid: el("library-grid"), libraryCount: el("library-count"),
+  libraryClose: el("library-close"), libraryMore: el("library-more"),
+  libraryMoreRow: el("library-more-row"),
 };
 
 const state = {
@@ -68,6 +72,8 @@ const state = {
   music: null,
   // 屏幕上那条字幕是第几条。-1 表示此刻没有字幕。
   cueIndex: -1,
+  // "做过的片子"翻到第几页了。
+  libraryPage: 1,
   // 队列浮层收起没有。只是这台浏览器上的一点顺手，读不出来就当没收起。
   queueCollapsed: (() => {
     try { return !!localStorage.getItem("mpt_queue_collapsed"); } catch { return false; }
@@ -1884,6 +1890,118 @@ async function loadMusic() {
   drawMusicTrack();
 }
 
+/* ---------- 做过的片子 ----------
+
+   编辑器原来只能靠粘一个 uuid 进来。第二天回来想接着改前天那条片子时，那
+   串 id 早就找不着了——而磁盘上明明记着每一条。
+
+   列表来自 ``/library``（磁盘），不是 ``/tasks``（进程内存）：后者 API 一
+   重启就空了，正好是"隔了一天回来"这种情况下必然为空。 */
+const LIBRARY_PAGE = 24;
+
+function libraryCard(row) {
+  const card = document.createElement("div");
+  card.className = "card";
+  card.title = row.task_id;
+
+  if (row.thumb_url) {
+    // 封面用第一段画面。<video> 比 <img> 麻烦，但这些素材本来就是 mp4。
+    const shot = document.createElement("video");
+    shot.className = "shot";
+    shot.muted = true;
+    shot.preload = "metadata";
+    // #t=0.1 让浏览器真的去解一帧出来，否则多半是一块黑。
+    shot.src = row.thumb_url + "#t=0.1";
+    card.appendChild(shot);
+  } else {
+    const blank = document.createElement("div");
+    blank.className = "shot";
+    card.appendChild(blank);
+  }
+
+  const body = document.createElement("div");
+  body.className = "body";
+
+  const title = document.createElement("div");
+  title.className = "title";
+  title.textContent = row.subject || row.task_id;
+  body.appendChild(title);
+
+  const meta = document.createElement("div");
+  meta.className = "meta";
+  const bits = [`${row.scenes} scene${row.scenes === 1 ? "" : "s"}`];
+  if (row.narration) bits.push(fmt(row.narration));
+  if (row.updated_at) bits.push(whenShort(row.updated_at));
+  meta.textContent = bits.join(" · ");
+  body.appendChild(meta);
+
+  const tags = document.createElement("div");
+  tags.className = "tags";
+  if (row.rendered) tags.appendChild(tag("rendered", "done"));
+  if (row.audio_stale) tags.appendChild(tag("needs re-record", "warn"));
+  if (!row.scenes) tags.appendChild(tag("no scenes", "warn"));
+  if (tags.children.length) body.appendChild(tags);
+
+  card.appendChild(body);
+  card.addEventListener("click", () => {
+    closeLibrary();
+    ui.task.value = row.task_id;
+    load(row.task_id);
+  });
+  return card;
+}
+
+function tag(text, kind) {
+  const node = document.createElement("span");
+  node.className = "tag" + (kind ? " " + kind : "");
+  node.textContent = text;
+  return node;
+}
+
+/** "3 天前" 这种。精确到分钟没有意义，用户要的是"哪一条比较新"。 */
+function whenShort(epochSeconds) {
+  const seconds = Math.max(0, Date.now() / 1000 - Number(epochSeconds));
+  if (seconds < 3600) return `${Math.max(1, Math.round(seconds / 60))}m ago`;
+  if (seconds < 86400) return `${Math.round(seconds / 3600)}h ago`;
+  const days = Math.round(seconds / 86400);
+  return days <= 30 ? `${days}d ago` : new Date(epochSeconds * 1000)
+    .toISOString().slice(0, 10);
+}
+
+async function loadLibrary(page) {
+  const wanted = page || 1;
+  ui.library.hidden = false;
+  if (wanted === 1) {
+    ui.libraryGrid.innerHTML = "";
+    ui.libraryCount.textContent = "Loading…";
+  }
+  try {
+    const data = await call("GET",
+      `/library?page=${wanted}&page_size=${LIBRARY_PAGE}`) || {};
+    const rows = data.tasks || [];
+    for (const row of rows) ui.libraryGrid.appendChild(libraryCard(row));
+    const shown = ui.libraryGrid.children.length;
+    ui.libraryCount.textContent = data.total
+      ? `${shown} of ${data.total}`
+      : "nothing here yet";
+    state.libraryPage = wanted;
+    ui.libraryMoreRow.hidden = shown >= (data.total || 0);
+  } catch (error) {
+    ui.libraryCount.textContent = String(error.message || error);
+  }
+}
+
+function closeLibrary() {
+  ui.library.hidden = true;
+}
+
+ui.libraryToggle.addEventListener("click", () => {
+  if (ui.library.hidden) loadLibrary(1); else closeLibrary();
+});
+ui.libraryClose.addEventListener("click", closeLibrary);
+ui.libraryMore.addEventListener("click", () =>
+  loadLibrary((state.libraryPage || 1) + 1));
+
 /* ---------- 字幕的样子 ----------
 
    改的时候画面上那行字立刻跟着变："这个颜色压在这张图上看不看得清"只能这样
@@ -2220,4 +2338,8 @@ const initial = new URLSearchParams(window.location.search).get("task");
 if (initial) {
   ui.task.value = initial;
   load(initial);
+} else {
+  // 没带 task 进来就先给一张"做过的片子"：空编辑器加一个要粘 uuid 的输入框
+  // 不是一个能开始工作的地方。
+  loadLibrary(1);
 }

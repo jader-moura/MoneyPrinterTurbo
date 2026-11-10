@@ -111,6 +111,7 @@ curl -X POST localhost:8080/api/v1/tasks/$TASK/render
 | `PUT /api/v1/tasks/{id}/subtitles/{i}` | fix one caption's words, leaving the voice alone |
 | `GET`/`PUT /api/v1/tasks/{id}/subtitles/style` | caption font, size, colour, outline, box, position |
 | `GET`/`PUT /api/v1/tasks/{id}/cut-sound` | the sound at every cut, or `""` to remove it |
+| `GET /api/v1/library` | every task on disk, newest first, paged |
 | `GET /api/v1/cut-sound/{name}` | play one transition sound in the editor |
 | `GET /api/v1/fonts/{name}` | serve one subtitle font to the editor's preview |
 | `GET`/`PUT /api/v1/tasks/{id}/music` | the background music of this video and its volume |
@@ -164,6 +165,11 @@ message says what. Nothing falls back to another provider silently.
   leaving the voice and every timing untouched — that is the one to use when
   the transcription misheard a word. A re-record afterwards discards
   caption-only edits, because the captions are rebuilt from the new voice.
+* **The editor opens on your videos.** Without a `?task=` it lists every task
+  that has a manifest on disk, newest first, with a frame, the subject, the
+  scene count and whether it has been rendered — click one to open it and
+  render again. It reads the disk rather than `GET /tasks`, which only holds
+  what the running process has seen and is empty after a restart.
 * **The caption's look is a video-wide setting.** Font, size, colour,
   outline, the box behind the text and the vertical position all live in
   `.../subtitles/style`, and the editor previews them on the picture in the

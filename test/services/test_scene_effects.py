@@ -770,3 +770,69 @@ class TestPreviewingTheCutSound:
         ):
             response = client.get("/api/v1/cut-sound/gone.mp3")
         assert response.status_code == 404
+
+
+class TestTheLibrary:
+    """做过的片子，从磁盘读，而不是从进程内存。"""
+
+    def test_it_lists_tasks_newest_first(self, task_root):
+        import time
+
+        first, _ = _reviewed_task(task_root, task_id="older")
+        time.sleep(0.02)
+        second, _ = _reviewed_task(task_root, task_id="newer")
+        listed = scene_editor.library()
+        assert [row["task_id"] for row in listed["tasks"]][:2] == [second, first]
+        assert listed["total"] == 2
+
+    def test_each_row_says_enough_to_recognise_the_video(self, task_root):
+        task_id, _ = _reviewed_task(task_root)
+        row = scene_editor.library()["tasks"][0]
+        assert row["task_id"] == task_id
+        assert row["scenes"] == 2
+        assert row["subject"] == "seeds"
+        assert row["rendered"] is False
+        assert row["narration"] == 8.0
+
+    def test_a_rendered_video_is_marked_and_linked(self, task_root):
+        task_id, _ = _reviewed_task(task_root)
+        (task_root / task_id / "final-1.mp4").write_bytes(b"x")
+        row = scene_editor.library("http://host:8080")["tasks"][0]
+        assert row["rendered"] is True
+        assert row["video_url"].startswith("http://host:8080/api/v1/stream/")
+
+    def test_folders_without_a_manifest_are_not_videos(self, task_root):
+        """半路失败留下的目录不是一条做过的片子。"""
+        _reviewed_task(task_root)
+        (task_root / "leftover").mkdir(parents=True, exist_ok=True)
+        assert scene_editor.library()["total"] == 1
+
+    def test_paging_walks_the_whole_list(self, task_root):
+        for index in range(5):
+            _reviewed_task(task_root, task_id=f"task-{index}")
+        first = scene_editor.library(page=1, page_size=2)
+        second = scene_editor.library(page=2, page_size=2)
+        assert first["total"] == 5
+        assert len(first["tasks"]) == 2 and len(second["tasks"]) == 2
+        ids = {row["task_id"] for row in first["tasks"] + second["tasks"]}
+        assert len(ids) == 4
+
+    def test_a_broken_manifest_does_not_break_the_page(self, task_root):
+        """一条读不出来不该让整页打不开。"""
+        _reviewed_task(task_root, task_id="good")
+        broken = task_root / "broken"
+        broken.mkdir(parents=True, exist_ok=True)
+        (broken / "script.json").write_text("{not json", encoding="utf-8")
+        listed = scene_editor.library()
+        assert "good" in [row["task_id"] for row in listed["tasks"]]
+
+    def test_over_http(self, task_root):
+        from fastapi.testclient import TestClient
+
+        from app import asgi
+
+        client = TestClient(asgi.app)
+        _reviewed_task(task_root)
+        response = client.get("/api/v1/library?page=1&page_size=5")
+        assert response.status_code == 200
+        assert response.json()["data"]["total"] == 1

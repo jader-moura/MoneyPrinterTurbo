@@ -1210,6 +1210,82 @@ def _subtitle_file(task_id: str) -> str:
     return path
 
 
+def library(endpoint: str = "", *, page: int = 1, page_size: int = 24) -> dict:
+    """磁盘上所有做过的片子，最近动过的排在前面。
+
+    为什么不用 ``GET /tasks``：那一份是进程内存里的任务表，API 一重启就空了。
+    而"我做过哪些片子"这件事的真正记录在磁盘上——每个任务目录里的
+    ``script.json``。用户隔天回来想接着改前天那条片子，内存里什么都没有。
+
+    先按修改时间排序、再只读这一页的清单：任务目录会一直攒下去（这台机器上
+    已经有一百多个），每次请求都把每一份清单读一遍是没必要的。
+    """
+    root = utils.task_dir()
+    try:
+        names = os.listdir(root)
+    except OSError as exc:
+        logger.warning(f"cannot list the task folder: {exc}")
+        return {"tasks": [], "total": 0, "page": page, "page_size": page_size}
+
+    found: list[tuple[float, str]] = []
+    for name in names:
+        manifest = os.path.join(root, name, "script.json")
+        try:
+            found.append((os.path.getmtime(manifest), name))
+        except OSError:
+            # 没有清单的目录不是一条做过的片子（半路失败、或别的东西留下的）。
+            continue
+    found.sort(reverse=True)
+
+    total = len(found)
+    start = max(0, (int(page) - 1) * int(page_size))
+    window = found[start:start + int(page_size)]
+
+    tasks = []
+    for changed_at, task_id in window:
+        try:
+            tasks.append(_library_entry(task_id, changed_at, endpoint))
+        except Exception as exc:  # pragma: no cover - 一条读不出来不该毁掉整页
+            logger.warning(f"skipping {task_id} in the library: {exc}")
+    return {"tasks": tasks, "total": total, "page": page, "page_size": page_size}
+
+
+def _library_entry(task_id: str, changed_at: float, endpoint: str) -> dict:
+    """列表里的一条：够用户认出这是哪条片子，不多读一个字节。"""
+    manifest = scene_manifest.load(task_id)
+    scenes = manifest["scenes"]
+    raw = scene_manifest.load_raw(task_id)
+    params = raw.get("params") if isinstance(raw.get("params"), dict) else {}
+
+    subject = str(params.get("video_subject") or "").strip()
+    if not subject:
+        # 没有主题就用脚本开头，总比一串 uuid 强。
+        subject = " ".join(str(manifest.get("script") or "").split())[:80]
+
+    # 出过片的任务要能一眼看出来，并且能直接点开看。
+    directory = utils.task_dir(task_id)
+    finals = sorted(
+        name for name in os.listdir(directory)
+        if name.startswith("final-") and name.endswith(".mp4")
+    ) if os.path.isdir(directory) else []
+
+    return {
+        "task_id": task_id,
+        "subject": subject,
+        "scenes": len(scenes),
+        "narration": round(float(manifest.get("audio_duration") or 0.0), 1),
+        "audio_stale": bool(manifest.get("audio_stale")),
+        "source": str(params.get("video_source") or ""),
+        "updated_at": round(float(changed_at), 3),
+        "rendered": bool(finals),
+        "video_url": media_url(task_id, os.path.join(directory, finals[-1]), endpoint)
+        if finals else "",
+        # 第一段画面当封面。读不出来就空着，界面画一个占位块。
+        "thumb_url": media_url(task_id, scenes[0]["material"], endpoint)
+        if scenes else "",
+    }
+
+
 def _patch_params(task_id: str, **fields: Any) -> dict:
     """改这条任务自己存着的渲染参数。
 
