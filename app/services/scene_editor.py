@@ -965,6 +965,14 @@ def describe(task_id: str, endpoint: str = "", *, with_timing: bool = False) -> 
     if with_timing:
         if params is None:
             params = load_params(task_id)
+        # 成片的像素尺寸，用来把字号换算到预览框里。比例认不出来时按竖版
+        # 算：那是这个项目的默认，猜错也只是预览里的字略大略小。
+        try:
+            frame_width, frame_height = VideoAspect(
+                getattr(params, "video_aspect", None) or VideoAspect.portrait
+            ).to_resolution()
+        except (ValueError, TypeError):
+            frame_width, frame_height = VideoAspect.portrait.to_resolution()
         payload["clip_speed"] = float(getattr(params, "video_clip_speed", 1.0) or 1.0)
         payload["audio_duration"] = float(manifest.get("audio_duration") or 0.0)
         payload["has_timing_edits"] = scene_manifest.has_timing_edits(
@@ -992,6 +1000,26 @@ def describe(task_id: str, endpoint: str = "", *, with_timing: bool = False) -> 
             # 预览要照搬渲染器的适配方式，否则这里看到的构图和成片不一致：
             # cover 会裁掉多余边缘，contain 会留黑边。
             "fit": _enum_value(getattr(params, "video_fit_mode", "")),
+            # 成片的像素尺寸。编辑器要按它把字号换算到预览框的大小上——
+            # 60 号字在 1920 高的画面里和在 400 高的预览框里完全是两回事。
+            "frame_width": frame_width,
+            "frame_height": frame_height,
+            # 字幕的样子。预览里要照着画，否则"字会不会挡住画面、够不够大"
+            # 这件事只能等渲完才知道。
+            "subtitle": {
+                "enabled": bool(getattr(params, "subtitle_enabled", True)),
+                "position": str(getattr(params, "subtitle_position", "") or "bottom"),
+                "custom_position": float(
+                    getattr(params, "custom_position", 70.0) or 0.0
+                ),
+                "font_size": int(getattr(params, "font_size", 60) or 60),
+                "color": str(getattr(params, "text_fore_color", "") or "#FFFFFF"),
+                "stroke_color": str(getattr(params, "stroke_color", "") or "#000000"),
+                "stroke_width": float(getattr(params, "stroke_width", 0) or 0.0),
+                # False 表示不要底色；字符串是颜色。两者都原样交给界面。
+                "background": getattr(params, "text_background_color", False),
+                "animation": str(getattr(params, "subtitle_animation", "") or "none"),
+            },
         }
     return payload
 

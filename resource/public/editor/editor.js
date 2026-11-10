@@ -30,6 +30,7 @@ const ui = {
   musicPreview: el("music-preview"), musicSave: el("music-save"),
   musicClose: el("music-close"), musicNote: el("music-note"),
   musicLane: el("music-lane"), musicBed: el("music-bed"),
+  subs: el("subs"), subsText: el("subs-text"),
 };
 
 const state = {
@@ -538,6 +539,9 @@ function fitFrame() {
   }
   ui.frame.style.width = Math.floor(width) + "px";
   ui.frame.style.height = Math.floor(height) + "px";
+  // 框的大小变了，字号和位置都是按它算的，要重算一次——否则缩放窗口之后
+  // 字会停在旧的位置上，甚至跑到画面外面。
+  drawSubtitle();
 }
 
 /** 把这次生成的渲染设置摆出来。
@@ -590,6 +594,7 @@ function draw() {
   drawTotals();
   drawSettings();
   drawQueue();
+  drawSubtitle();
   const ready = state.scenes.length > 0;
   ui.play.disabled = !ready;
   // 还有图没出完就不让开渲：渲染器要读的正是队列那边还在换的那几个文件，
@@ -1508,6 +1513,8 @@ function movePlayhead() {
   // 轨道名在滚动区外面，所以这里不再需要那个 70px 偏移。
   ui.playhead.style.left = state.playhead * state.pxPerSecond + "px";
   ui.clock.textContent = `${fmt(state.playhead)} / ${fmt(projectTotal())}`;
+  // 字幕跟着播放头走：播放时每帧都会走到这里，拖动时也一样。
+  drawSubtitle();
 }
 
 function tick() {
@@ -1691,6 +1698,90 @@ ui.scriptSave.addEventListener("click", () => run("Saving the script", async () 
   // 存完配音就不作数了，但不替用户按"重新配音"：那要跑一次 TTS。
   return "Script saved. Re-record the narration when you want it spoken.";
 }));
+
+/* ---------- 字幕预览 ----------
+
+   把成片里那一刻会压上去的字，按成片的字号、颜色、描边和位置画在预览框上。
+   审片时真正要判断的是"这行字会不会盖住主体、在手机上够不够大"，而这两件
+   事光看一份 SRT 文本是看不出来的。
+
+   句子的时间点就是字幕文件里的时间点（``narration_segments``），所以逐词
+   模式不需要特别处理：那种模式下字幕本身就是一词一条，这里照画即可。 */
+function activeCue() {
+  const segments = (state.data && state.data.narration_segments) || [];
+  const at = state.playhead;
+  // 从后往前找：时间轴是有序的，而播放时命中的多半是靠后的那几条。
+  for (let index = segments.length - 1; index >= 0; index -= 1) {
+    const cue = segments[index];
+    if (at >= cue.start && at < cue.end) return cue;
+  }
+  return null;
+}
+
+function subtitleSettings() {
+  const settings = (state.data && state.data.render_settings) || {};
+  return settings.subtitle || null;
+}
+
+function drawSubtitle() {
+  const style = subtitleSettings();
+  const cue = style && style.enabled ? activeCue() : null;
+  if (!cue || !String(cue.text || "").trim()) {
+    ui.subs.hidden = true;
+    return;
+  }
+
+  const settings = (state.data && state.data.render_settings) || {};
+  const videoHeight = Number(settings.frame_height) || 1920;
+  const frameHeight = ui.frame.clientHeight || 0;
+  if (!frameHeight) { ui.subs.hidden = true; return; }
+  // 预览框比成片小得多，所以字号、描边都要按同一个比例缩。
+  const scale = frameHeight / videoHeight;
+
+  ui.subs.hidden = false;
+  ui.subsText.textContent = String(cue.text);
+  const text = ui.subsText.style;
+  text.fontSize = Math.max(8, (Number(style.font_size) || 60) * scale) + "px";
+  text.color = style.color || "#FFFFFF";
+  const stroke = (Number(style.stroke_width) || 0) * scale;
+  text.webkitTextStrokeWidth = stroke > 0 ? stroke + "px" : "0";
+  text.webkitTextStrokeColor = style.stroke_color || "#000000";
+  // text_background_color 是 false 或一个颜色，和渲染器那边一个含义。
+  const background = style.background;
+  text.background = typeof background === "string" && background
+    ? background
+    : "transparent";
+  text.padding = typeof background === "string" && background
+    ? Math.max(2, 6 * scale * (videoHeight / 1920)) + "px " + Math.max(4, 14 * scale) + "px"
+    : "0";
+
+  placeSubtitle(style, frameHeight);
+}
+
+/** 字幕的纵向位置，照抄渲染器那几条规则（见 video.py 的 subtitle_position）。 */
+function placeSubtitle(style, frameHeight) {
+  // 先量一次它自己有多高：除了 top，其余几种位置都要用到。
+  ui.subs.style.top = "0px";
+  const height = ui.subs.offsetHeight || 0;
+  const position = String(style.position || "bottom");
+  let top;
+  if (position === "bottom") {
+    // 渲染器把字的**底边**放在 95% 处。
+    top = frameHeight * 0.95 - height;
+  } else if (position === "top") {
+    top = frameHeight * 0.05;
+  } else if (["two_thirds_bottom", "two_thirds", "2/3_bottom"].includes(position)) {
+    top = (frameHeight - height) / 3;
+  } else if (position === "custom") {
+    const margin = 10 * (frameHeight / (Number(
+      (state.data.render_settings || {}).frame_height) || 1920));
+    const wanted = (frameHeight - height) * (Number(style.custom_position) || 0) / 100;
+    top = Math.max(margin, Math.min(wanted, frameHeight - height - margin));
+  } else {
+    top = (frameHeight - height) / 2;
+  }
+  ui.subs.style.top = Math.max(0, top) + "px";
+}
 
 /* 时间线上的配乐轨。一条从头铺到尾的横条：配乐属于整条片子，没有"哪一段"
    的概念，所以它不分块，只说明"这里一直有音乐,是哪一首,多响"。 */

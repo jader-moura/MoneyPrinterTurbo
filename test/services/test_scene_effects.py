@@ -472,3 +472,39 @@ class TestMusicOverHttp:
         """试听口子只认曲库那两个目录，不是任意文件下载。"""
         response = client.get("/api/v1/music/..%2F..%2Fconfig.toml")
         assert response.status_code in (400, 404)
+
+
+class TestSubtitleSettingsForThePreview:
+    """编辑器要照着成片的字幕样式画，所以这些值必须交到界面手上。"""
+
+    def test_the_timeline_publishes_the_subtitle_style(self, task_root):
+        task_id, _ = _reviewed_task(task_root)
+        described = scene_editor.describe(task_id, with_timing=True)
+        subtitle = described["render_settings"]["subtitle"]
+        assert subtitle["enabled"] is True
+        assert subtitle["font_size"] > 0
+        assert subtitle["color"].startswith("#")
+        assert "position" in subtitle and "stroke_width" in subtitle
+
+    def test_the_frame_size_is_published_so_the_font_can_be_scaled(self, task_root):
+        """60 号字在 1920 高的画面和在 400 高的预览框里完全是两回事。"""
+        task_id, _ = _reviewed_task(task_root)
+        settings = scene_editor.describe(task_id, with_timing=True)["render_settings"]
+        assert (settings["frame_width"], settings["frame_height"]) == (1080, 1920)
+
+    def test_a_landscape_task_publishes_its_own_size(self, task_root):
+        task_id, _ = _reviewed_task(task_root)
+        payload = scene_manifest.load_raw(task_id)
+        payload["params"]["video_aspect"] = "16:9"
+        task_artifacts.patch_script_data(task_id, params=payload["params"])
+        settings = scene_editor.describe(task_id, with_timing=True)["render_settings"]
+        assert (settings["frame_width"], settings["frame_height"]) == (1920, 1080)
+
+    def test_subtitles_turned_off_are_reported_as_off(self, task_root):
+        """关掉字幕的任务，预览里也不该画出字来。"""
+        task_id, _ = _reviewed_task(task_root)
+        payload = scene_manifest.load_raw(task_id)
+        payload["params"]["subtitle_enabled"] = False
+        task_artifacts.patch_script_data(task_id, params=payload["params"])
+        settings = scene_editor.describe(task_id, with_timing=True)["render_settings"]
+        assert settings["subtitle"]["enabled"] is False

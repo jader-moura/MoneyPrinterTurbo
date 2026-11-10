@@ -103,6 +103,33 @@ body {
 .banner.error { background: #4a2626; }
 .banner.warn { background: #4a3c1e; }
 
+/* ---------- 字幕预览 ----------
+
+   位置、字号、描边都由 JS 按成片参数算好写进 style，这里只管"不挡操作、
+   不被裁掉"：整条宽度居中，鼠标穿透，超长了换行。 */
+.subs {
+  position: absolute;
+  left: 0;
+  right: 0;
+  display: flex;
+  justify-content: center;
+  pointer-events: none;
+  padding: 0 4%;
+  box-sizing: border-box;
+  z-index: 3;
+}
+
+.subs span {
+  display: inline-block;
+  max-width: 100%;
+  text-align: center;
+  line-height: 1.25;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  /* 描边画在字的外侧，不吃掉笔画本身——和渲染器那条描边看起来才一样。 */
+  paint-order: stroke fill;
+}
+
 /* ---------- narration script ---------- */
 
 /* 旁白正文。浮在正中，不占布局：它是打开来改一阵子的东西，排在文档流里
