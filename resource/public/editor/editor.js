@@ -58,6 +58,30 @@ const ui = {
   effectsApply: el("effects-apply"), effectsOwn: el("effects-own"),
   effectsSave: el("effects-save"), effectsClose: el("effects-close"),
   effectsNote: el("effects-note"),
+  publishToggle: el("publish-toggle"), publishPanel: el("publish-panel"),
+  publishShape: el("publish-shape"), publishWrite: el("publish-write"),
+  publishNote: el("publish-note"), publishTitle: el("publish-title"),
+  publishTitleCount: el("publish-title-count"),
+  publishDescription: el("publish-description"),
+  publishDescriptionCount: el("publish-description-count"),
+  publishTags: el("publish-tags"), publishPrompt: el("publish-prompt"),
+  publishPromptCount: el("publish-prompt-count"),
+  publishThumbHint: el("publish-thumb-hint"), publishDraw: el("publish-draw"),
+  publishScenes: el("publish-scenes"), publishPickHint: el("publish-pick-hint"),
+  publishThumbWhere: el("publish-thumb-where"), publishDrawBox: el("publish-draw-box"),
+  publishDownload: el("publish-download"), publishThumbNote: el("publish-thumb-note"),
+  publishThumb: el("publish-thumb"), publishThumbImg: el("publish-thumb-img"),
+  publishText: el("publish-text"), publishTextCount: el("publish-text-count"),
+  publishTextFont: el("publish-text-font"),
+  publishTextPosition: el("publish-text-position"),
+  publishTextSize: el("publish-text-size"),
+  publishTextStrokeWidth: el("publish-text-stroke-width"),
+  publishTextColor: el("publish-text-color"),
+  publishTextStrokeColor: el("publish-text-stroke-color"),
+  publishTextBand: el("publish-text-band"),
+  publishTextApply: el("publish-text-apply"), publishTextNote: el("publish-text-note"),
+  publishSave: el("publish-save"), publishClose: el("publish-close"),
+  publishSaved: el("publish-saved"),
 };
 
 const state = {
@@ -647,6 +671,7 @@ function draw() {
   ui.musicToggle.disabled = !state.data;
   ui.subsToggle.disabled = !state.data;
   ui.effectsToggle.disabled = !state.data;
+  ui.publishToggle.disabled = !state.data;
   ui.placeholder.hidden = ready;
   ui.playhead.hidden = !ready;
   ui.frame.classList.toggle("ready", ready);
@@ -2178,6 +2203,377 @@ ui.effectsSave.addEventListener("click", () => run("Saving the effects", async (
   closeEffects();
   return "";
 }));
+
+/* ---------- 发到 YouTube 的文案和封面 ----------
+
+   这个面板不改成片，一个字节都不改：它是上传时要粘进 YouTube 的那段文字和
+   那张图，跟着这条片子一起存着，第二天回来还在。
+
+   面板第一句话先说这条片子是竖的还是横的。封面的形状完全由画幅决定——9:16
+   的片子配一张横封面，传上去会被两边裁掉，而主体通常正在那里。所以这件事
+   必须在"画封面"那个按钮之前说清楚,而不是等图出来了让用户自己发现。 */
+
+/** 面板里当前这一份发布信息。上限（标题 100 字等）由服务端给，不写死在这里。 */
+let publish = null;
+
+/** "还能写多少字"。超了就标红——超长服务端会拒，提前说比保存时报错有用。 */
+function countLabel(node, used, limit) {
+  if (!limit) { node.textContent = ""; return; }
+  node.textContent = `${used} / ${limit}`;
+  node.classList.toggle("over", used > limit);
+}
+
+function drawPublishCounts() {
+  if (!publish) return;
+  countLabel(ui.publishTitleCount, ui.publishTitle.value.length, publish.title_max);
+  countLabel(ui.publishDescriptionCount, ui.publishDescription.value.length,
+    publish.description_max);
+  countLabel(ui.publishPromptCount, ui.publishPrompt.value.length, publish.prompt_max);
+  countLabel(ui.publishTextCount, ui.publishText.value.length, publish.text_max);
+}
+
+/** 这份草稿是不是降级拼出来的，是的话为什么。不是就返回空字符串。 */
+function fallbackReason(data) {
+  if (!data || data.text_source !== "fallback") return "";
+  // 供应商那句话自己带句号，照原样接上去会得到 "config.toml file.."。
+  const why = String(data.text_error || "").trim().replace(/\.+$/, "");
+  return "This draft was not written by a language model"
+    + (why ? ` — ${why}` : " because the model was unavailable")
+    + ". The title and tags below are a plain split of the subject. Fix the "
+    + "model, then press the button again.";
+}
+
+/** 这条片子在 YouTube 上是哪一种东西，以及封面会是什么形状、多大。 */
+function describeShape(data) {
+  const vertical = data.aspect === "9:16";
+  const shape = vertical ? "portrait" : data.aspect === "1:1" ? "square" : "landscape";
+  const where = data.kind === "short"
+    ? "This video is vertical, so it goes up as a Short."
+    : data.kind === "square"
+      ? "This video is square."
+      : "This video is widescreen, so it goes up as a normal video.";
+  return `${where} The thumbnail will be drawn ${shape}, `
+    + `${data.thumbnail_width}×${data.thumbnail_height} — the shape YouTube `
+    + `shows next to a ${data.aspect} video.`;
+}
+
+function fillPublishPanel(data) {
+  publish = data || {};
+  ui.publishShape.textContent = publish.aspect ? describeShape(publish) : "";
+  ui.publishTitle.value = publish.title || "";
+  ui.publishDescription.value = publish.description || "";
+  ui.publishTags.value = (publish.tags || []).join(", ");
+  ui.publishPrompt.value = publish.thumbnail_prompt || "";
+  drawPublishCounts();
+
+  // 没有脚本时文案会很单薄，说出来——否则用户只会觉得模型写得差。
+  if (!publish.has_script && !publish.has_subject) {
+    ui.publishNote.textContent =
+      "This video has neither a subject nor a script, so there is nothing to "
+      + "write a title from.";
+    ui.publishNote.className = "hint";
+    ui.publishWrite.disabled = true;
+  } else {
+    ui.publishNote.textContent = publish.has_script ? ""
+      : "This video has no saved script, so the text will be written from the "
+        + "subject alone.";
+    ui.publishNote.className = "hint";
+    ui.publishWrite.disabled = false;
+  }
+  // 降级写出来的那一份要署名。一个被拆成几个词的标题和一行分词标签是
+  // 很显眼的差，而"模型压根没跑"和"模型就这水平"是两件完全不同的事——
+  // 前者改一行配置就好了，所以原因也一并说出来。
+  const fallbackNote = fallbackReason(publish);
+  if (fallbackNote) {
+    ui.publishNote.textContent = fallbackNote;
+    ui.publishNote.className = "hint warn";
+  }
+
+  // 文生图没配就别让用户按下那个按钮再看报错。
+  ui.publishDraw.disabled = !publish.can_draw_thumbnail;
+  // 说出它要花多久，以及那个服务得开着。"配置填了"不等于"它在应答"——
+  // can_draw_thumbnail 只知道前者，所以这里不能说得像按下去一定成。
+  ui.publishThumbHint.textContent = publish.can_draw_thumbnail
+    ? "Drawn by the same image service that makes the pictures, at the shape "
+      + "above, so that service has to be running. One picture takes a few "
+      + "minutes on a local machine — the button counts the seconds while it "
+      + "works. Edit the description below first if it is not what you want."
+    : "No image service is configured, so the thumbnail cannot be drawn here. "
+      + "Set openai_image_base_url and openai_image_model in config.toml.";
+
+  drawScenePicker(publish);
+  fillTextPanel(publish);
+  showThumbnail(publish);
+}
+
+/** 压在封面上的那行字。字体和位置的选项由服务端给——装着哪些字体只有它
+    知道，界面写死一份迟早对不上。 */
+function fillTextPanel(data) {
+  const style = data.text || {};
+
+  ui.publishTextFont.innerHTML = "";
+  for (const name of data.text_fonts || []) {
+    const option = document.createElement("option");
+    option.value = name;
+    option.textContent = name.replace(/\.[^.]+$/, "");
+    ui.publishTextFont.appendChild(option);
+  }
+  if (style.font) ui.publishTextFont.value = style.font;
+
+  ui.publishTextPosition.innerHTML = "";
+  for (const id of data.text_positions || []) {
+    const option = document.createElement("option");
+    option.value = id;
+    option.textContent = TEXT_POSITION_LABELS[id] || id;
+    ui.publishTextPosition.appendChild(option);
+  }
+  ui.publishTextPosition.value = style.position || "bottom";
+
+  ui.publishText.value = style.text || "";
+  ui.publishTextSize.value = String(style.size ?? 9);
+  ui.publishTextStrokeWidth.value = String(style.stroke_width ?? 10);
+  ui.publishTextColor.value = style.color || "#FFFFFF";
+  ui.publishTextStrokeColor.value = style.stroke_color || "#000000";
+  ui.publishTextBand.checked = style.band !== false;
+
+  // 还没有图就先别让按：字要压在一张图上，没有图时按下去只会收到一句
+  // "先挑一张图"。
+  ui.publishTextApply.disabled = !data.has_picture;
+  ui.publishTextNote.textContent = data.has_picture
+    ? "" : "Choose a picture above first.";
+  // 数一遍字数。必须在这里数，不能只靠 fillPublishPanel 里那一次：那一次
+  // 跑在这个函数之前，那时文字框还是空的，计数器会一直显示 0。
+  drawPublishCounts();
+}
+
+function textBody() {
+  return {
+    text: ui.publishText.value,
+    font: ui.publishTextFont.value,
+    position: ui.publishTextPosition.value,
+    size: Number(ui.publishTextSize.value),
+    color: ui.publishTextColor.value,
+    stroke_color: ui.publishTextStrokeColor.value,
+    stroke_width: Number(ui.publishTextStrokeWidth.value),
+    band: ui.publishTextBand.checked,
+  };
+}
+
+/** 可以拿来当封面的那些画面，排成一条可点的小图。
+
+    素材本来就是 mp4（图片在出图时就烘成了带运镜的片段），所以这里和时间线、
+    "我做过的片子"一样用 <video>：``#t=0.1`` 是为了让浏览器真的去解一帧出来，
+    否则多半是一块黑。 */
+function drawScenePicker(data) {
+  ui.publishScenes.innerHTML = "";
+  const scenes = data.scenes || [];
+  if (!scenes.length) {
+    ui.publishPickHint.textContent =
+      "This video has no pictures on disk to choose from.";
+    return;
+  }
+  ui.publishPickHint.textContent =
+    `Click one of this video's own ${scenes.length} pictures to use it. `
+    + "It is cropped to the shape above.";
+
+  for (const scene of scenes) {
+    const pick = document.createElement("button");
+    pick.className = "pick";
+    pick.type = "button";
+    pick.title = scene.keyword || `Scene ${scene.index + 1}`;
+    if (data.thumbnail_from === "scene" && data.thumbnail_scene === scene.index) {
+      pick.classList.add("current");
+    }
+    const shot = scene.kind === "image"
+      ? document.createElement("img")
+      : document.createElement("video");
+    if (shot.tagName === "VIDEO") {
+      shot.muted = true;
+      shot.preload = "metadata";
+      shot.src = scene.url + "#t=0.1";
+    } else {
+      shot.src = scene.url;
+      shot.alt = "";
+    }
+    pick.appendChild(shot);
+    const label = document.createElement("span");
+    label.className = "n";
+    label.textContent = String(scene.index + 1);
+    pick.appendChild(label);
+    pick.addEventListener("click", () => useScene(scene.index));
+    ui.publishScenes.appendChild(pick);
+  }
+}
+
+const TEXT_POSITION_LABELS = {
+  top: "Across the top", middle: "Across the middle", bottom: "Across the bottom",
+};
+
+/** 这张封面是从哪儿来的。用户下一步想换的时候，这是唯一要知道的事。 */
+function thumbnailOrigin(data) {
+  if (!data.thumbnail) return "";
+  if (data.thumbnail_from === "scene" && data.thumbnail_scene != null) {
+    return `Using the picture from scene ${data.thumbnail_scene + 1}.`;
+  }
+  if (data.thumbnail_from === "drawn") return "Using a picture drawn for it.";
+  return "";
+}
+
+function useScene(index) {
+  return publishAction("Cropping", ui.publishThumbNote, "Done.", async () => {
+    // 先把面板里那几个字存下来再换图。不存的话，"先写字、再挑图"会用上一次
+    // 存着的旧文字去合成——用户刚打的那一行就白打了。
+    if (publish && publish.has_picture !== undefined) {
+      await call("PUT",
+        `/tasks/${encodeURIComponent(state.taskId)}/publish/thumbnail/text`,
+        textBody());
+    }
+    return call("POST",
+      `/tasks/${encodeURIComponent(state.taskId)}/publish/thumbnail/scene`,
+      { index, at: 0 });
+  });
+}
+
+function showThumbnail(data) {
+  ui.publishThumbWhere.textContent = thumbnailOrigin(data);
+  const url = data.thumbnail_url || "";
+  ui.publishThumb.hidden = !url;
+  ui.publishDownload.hidden = !url;
+  if (!url) { ui.publishThumbImg.removeAttribute("src"); return; }
+  ui.publishThumbImg.src = url;
+  // 下载走专门那条路由：它带 Content-Disposition 和一个认得出来的文件名，
+  // 而 /stream 另存下来的每一张都叫 youtube-thumbnail.png。
+  ui.publishDownload.href =
+    `${API}/tasks/${encodeURIComponent(state.taskId)}/publish/thumbnail`;
+  ui.publishDownload.setAttribute("download", `thumbnail-${state.taskId}.png`);
+  ui.publishThumb.style.aspectRatio =
+    `${data.thumbnail_width || 16} / ${data.thumbnail_height || 9}`;
+}
+
+async function openPublish() {
+  ui.publishPanel.hidden = false;
+  ui.publishSaved.textContent = "Loading…";
+  try {
+    const data = await call("GET",
+      `/tasks/${encodeURIComponent(state.taskId)}/publish`);
+    ui.publishSaved.textContent = "";
+    fillPublishPanel(data || {});
+  } catch (error) {
+    ui.publishSaved.textContent = String(error.message || error);
+  }
+}
+
+function closePublish() { ui.publishPanel.hidden = true; }
+
+ui.publishToggle.addEventListener("click", () => {
+  if (ui.publishPanel.hidden) openPublish(); else closePublish();
+});
+ui.publishClose.addEventListener("click", closePublish);
+for (const node of [ui.publishTitle, ui.publishDescription, ui.publishPrompt]) {
+  node.addEventListener("input", drawPublishCounts);
+}
+
+/** 面板里的四个框，一次提交。 */
+function publishBody() {
+  return {
+    title: ui.publishTitle.value,
+    description: ui.publishDescription.value,
+    tags: ui.publishTags.value,
+    thumbnail_prompt: ui.publishPrompt.value,
+  };
+}
+
+/* 这三个按钮不走 run()：run() 做完会 refresh() 整条时间线并把提示写到顶上
+   那条横幅上。而这里改的东西和时间线无关，面板又是开着的——提示应该留在
+   面板里,而且面板上没保存的输入不能被一次重读刷掉。 */
+
+/** 一边等一边报时，报在刚按下的那个按钮旁边。
+
+    出一张图在本机要好几分钟,而"按下去之后什么都没变"和"这个按钮是坏的"
+    长得一模一样。所以这里每秒把已经等了多久写出来——一个会走的秒数是
+    "它在跑"的唯一证据,而一句静止的"Drawing…"不是。
+
+    报在按钮旁边而不是面板最底下：那一行要滚到底才看得见,用户的眼睛在
+    他刚点的那个按钮上。 */
+function publishTicker(node, label) {
+  const started = Date.now();
+  const elapsed = () => Math.round((Date.now() - started) / 1000);
+  const tick = () => {
+    node.className = "hint pending";
+    node.textContent = `${label}… ${elapsed()}s`;
+  };
+  tick();
+  const timer = setInterval(tick, 1000);
+  return (message, kind) => {
+    clearInterval(timer);
+    node.className = kind ? `hint ${kind}` : "hint";
+    // 花了多久一并留着：下一次按之前，用户据此知道该等多久。
+    node.textContent = message ? `${message} (${elapsed()}s)` : "";
+  };
+}
+
+async function publishAction(label, note, success, operation) {
+  if (state.busy) return;
+  state.busy = true;
+  // 另外两处的提示先清掉，否则上一次那句"Saved."留在旁边，看起来像是
+  // 这一次的结果。
+  for (const other of [ui.publishNote, ui.publishThumbNote, ui.publishSaved,
+    ui.publishTextNote]) {
+    if (other !== note) { other.textContent = ""; other.className = "hint"; }
+  }
+  const done = publishTicker(note, label);
+  for (const node of [ui.publishWrite, ui.publishDraw, ui.publishSave]) {
+    node.disabled = true;
+  }
+  try {
+    const data = await operation();
+    fillPublishPanel(data);
+    // 成功文案可以取决于结果：降级拼出来的那一份不该报成一句干净的
+    // "Written."，否则面板上那条橙色警告和这里的绿灯自相矛盾。
+    const message = typeof success === "function" ? success(data) : success;
+    done(message, message && /not written by/.test(message) ? "warn" : "");
+  } catch (error) {
+    done(String(error.message || error), "warn");
+  } finally {
+    state.busy = false;
+    // 失败时 fillPublishPanel 没跑过，这三个按钮得自己解锁，否则一次网络
+    // 故障就把面板永久锁住了。
+    ui.publishSave.disabled = false;
+    if (publish) {
+      ui.publishWrite.disabled = !(publish.has_subject || publish.has_script);
+      ui.publishDraw.disabled = !publish.can_draw_thumbnail;
+    } else {
+      ui.publishWrite.disabled = false;
+      ui.publishDraw.disabled = false;
+    }
+  }
+}
+
+ui.publishSave.addEventListener("click", () =>
+  publishAction("Saving", ui.publishSaved, "Saved.", () =>
+    call("PUT", `/tasks/${encodeURIComponent(state.taskId)}/publish`,
+      publishBody())));
+
+ui.publishWrite.addEventListener("click", () =>
+  publishAction("Writing", ui.publishNote,
+    (data) => fallbackReason(data) || "Written.", () =>
+    // 先存一次：模型写出来的那一份会盖掉面板里的内容，而用户可能刚刚改过
+    // 封面说明。存下来至少让"上一版"留在磁盘上。
+    call("PUT", `/tasks/${encodeURIComponent(state.taskId)}/publish`, publishBody())
+      .then(() => call("POST",
+        `/tasks/${encodeURIComponent(state.taskId)}/publish/text`, {}))));
+
+ui.publishText.addEventListener("input", drawPublishCounts);
+
+ui.publishTextApply.addEventListener("click", () =>
+  publishAction("Lettering", ui.publishTextNote, "Done.", () =>
+    call("PUT", `/tasks/${encodeURIComponent(state.taskId)}/publish/thumbnail/text`,
+      textBody())));
+
+ui.publishDraw.addEventListener("click", () =>
+  publishAction("Drawing", ui.publishThumbNote, "Drawn.", () =>
+    call("POST", `/tasks/${encodeURIComponent(state.taskId)}/publish/thumbnail`,
+      { prompt: ui.publishPrompt.value })));
 
 /* ---------- 字幕的样子 ----------
 

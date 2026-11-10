@@ -38,6 +38,11 @@ from app.models.schema import (
     SubtitleEditRequest,
     SubtitleStyleRequest,
     NarrationScriptRequest,
+    PublishMetadataRequest,
+    PublishSceneThumbnailRequest,
+    PublishTextRequest,
+    PublishThumbnailRequest,
+    PublishThumbnailTextRequest,
     SceneListResponse,
     SceneAddRequest,
     SceneEffectsRequest,
@@ -55,6 +60,7 @@ from app.models.schema import (
 from app.controllers.manager.base_manager import TaskQueueFullError
 from app.services import bgm as bgm_service
 from app.services import transition_sound as transition_sound_service
+from app.services import publish_metadata
 from app.services import scene_editor, scene_manifest, scene_regen_queue
 from app.services import state as sm
 from app.services import task as tm
@@ -287,6 +293,197 @@ def update_cut_sound(
         ),
     )
     return utils.get_response(200, data)
+
+
+
+# ---------------------------------------------------------------------------
+# 发到 YouTube 之前要准备的那三样：标题、简介、封面。
+#
+# 和 ``/subtitles/style``、``/effects`` 一样，这几条也必须声明在
+# ``/scenes/{index}`` 之前——不过它们在 ``/publish`` 下，和那条路由不冲突。
+#
+# 这几条不检查"任务是不是在跑"。``scene_editor`` 的编辑操作必须拒绝，因为
+# 渲染器正在读那些素材文件；而文案和封面都不是渲染器的输入，写文案恰恰是
+# 等渲染的那几分钟里最自然的事。
+# ---------------------------------------------------------------------------
+
+
+@router.get(
+    "/tasks/{task_id}/publish",
+    summary="The YouTube title, description, tags and thumbnail of this video",
+)
+def read_publish_metadata(
+    request: Request, task_id: str = Path(..., description="Task ID")
+):
+    """已经准备好的发布信息，连这条片子的画幅一起。
+
+    画幅无条件带上：封面的形状由它决定，所以界面要在用户按下"生成封面"之前
+    就说清楚会得到一张竖图还是横图。
+    """
+    request_id = base.get_task_id(request)
+    _require_task(task_id, request_id)
+    data = _handle(
+        task_id, request_id, lambda: publish_metadata.describe(task_id, _endpoint())
+    )
+    return utils.get_response(200, data)
+
+
+@router.put(
+    "/tasks/{task_id}/publish",
+    summary="Save the YouTube title, description, tags and thumbnail brief",
+)
+def update_publish_metadata(
+    request: Request,
+    body: PublishMetadataRequest,
+    task_id: str = Path(..., description="Task ID"),
+):
+    """存下用户改过的文案。超长报 400，不悄悄截断。"""
+    request_id = base.get_task_id(request)
+    _require_task(task_id, request_id)
+    data = _handle(
+        task_id,
+        request_id,
+        lambda: publish_metadata.set_metadata(
+            task_id,
+            title=body.title,
+            description=body.description,
+            tags=body.tags,
+            thumbnail_prompt=body.thumbnail_prompt,
+            endpoint=_endpoint(),
+        ),
+    )
+    return utils.get_response(200, data)
+
+
+@router.post(
+    "/tasks/{task_id}/publish/text",
+    summary="Write the YouTube title, description and tags for this video",
+)
+def generate_publish_text(
+    request: Request,
+    body: PublishTextRequest,
+    task_id: str = Path(..., description="Task ID"),
+):
+    """按这条片子的画幅写一版文案，顺带写出封面要画什么。
+
+    竖版进 Shorts，横版进普通视频页，两者该写的东西不一样——所以画幅是
+    模型的输入，不是事后的一个细节。
+    """
+    request_id = base.get_task_id(request)
+    _require_task(task_id, request_id)
+    data = _handle(
+        task_id,
+        request_id,
+        lambda: publish_metadata.generate_text(
+            task_id, language=body.language or "auto", endpoint=_endpoint()
+        ),
+    )
+    return utils.get_response(200, data)
+
+
+@router.post(
+    "/tasks/{task_id}/publish/thumbnail",
+    summary="Draw the YouTube thumbnail at this video's aspect ratio",
+)
+def generate_publish_thumbnail(
+    request: Request,
+    body: PublishThumbnailRequest,
+    task_id: str = Path(..., description="Task ID"),
+):
+    """画一张封面，尺寸由这条片子的画幅决定。
+
+    调用方不能指定尺寸：9:16 的片子配一张横封面，传到 YouTube 会被两边
+    裁掉，而主体通常正在那里。
+    """
+    request_id = base.get_task_id(request)
+    _require_task(task_id, request_id)
+    data = _handle(
+        task_id,
+        request_id,
+        lambda: publish_metadata.generate_thumbnail(
+            task_id, prompt=body.prompt, endpoint=_endpoint()
+        ),
+    )
+    return utils.get_response(200, data)
+
+
+@router.post(
+    "/tasks/{task_id}/publish/thumbnail/scene",
+    summary="Use one of the video's own pictures as the thumbnail",
+)
+def use_scene_as_thumbnail(
+    request: Request,
+    body: PublishSceneThumbnailRequest,
+    task_id: str = Path(..., description="Task ID"),
+):
+    """拿第 ``index`` 段画面当封面，裁到这条片子的画幅。
+
+    封面本该是片子里的一个画面，所以这条路由是常走的那一条：那些图已经在
+    磁盘上了，不用再跑一次文生图，也不会出现一张和成片对不上的封面。
+    """
+    request_id = base.get_task_id(request)
+    _require_task(task_id, request_id)
+    data = _handle(
+        task_id,
+        request_id,
+        lambda: publish_metadata.use_scene(
+            task_id, body.index, at=body.at, endpoint=_endpoint()
+        ),
+    )
+    return utils.get_response(200, data)
+
+
+@router.put(
+    "/tasks/{task_id}/publish/thumbnail/text",
+    summary="Put words on the thumbnail",
+)
+def set_thumbnail_text(
+    request: Request,
+    body: PublishThumbnailTextRequest,
+    task_id: str = Path(..., description="Task ID"),
+):
+    """改压在封面上的那行字，并立刻重新合成成品。
+
+    只重画文字，不碰那张图：改一个词不该重跑一次文生图，也不该重新从片段里
+    取一次帧。反过来，换一张图也会保留这几个字。
+    """
+    request_id = base.get_task_id(request)
+    _require_task(task_id, request_id)
+    data = _handle(
+        task_id,
+        request_id,
+        lambda: publish_metadata.set_text(
+            task_id,
+            body.model_dump(exclude_none=True),
+            endpoint=_endpoint(),
+        ),
+    )
+    return utils.get_response(200, data)
+
+
+@router.get(
+    "/tasks/{task_id}/publish/thumbnail",
+    summary="Download the thumbnail file",
+)
+def download_publish_thumbnail(
+    request: Request, task_id: str = Path(..., description="Task ID")
+):
+    """把封面作为附件交出去，带一个认得出来的文件名。
+
+    ``/stream`` 也能取到这个文件，但它是给 ``<img>`` 用的：浏览器会直接显示
+    出来，另存时文件名是 ``youtube-thumbnail.png``,和是哪条片子无关。上传
+    封面时要在文件选择框里认出它,所以这里带上任务 id。
+    """
+    request_id = base.get_task_id(request)
+    _require_task(task_id, request_id)
+    resolved = _handle(
+        task_id, request_id, lambda: publish_metadata.thumbnail_file(task_id)
+    )
+    return FileResponse(
+        resolved,
+        media_type="image/png",
+        filename=f"thumbnail-{task_id}.png",
+    )
 
 
 @router.get("/library", summary="Every task on disk, newest first")

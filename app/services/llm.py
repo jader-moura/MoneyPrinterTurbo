@@ -1815,6 +1815,307 @@ def generate_social_metadata(
 
     logger.warning("falling back to heuristic social metadata")
     return _fallback_social_metadata(video_subject, video_script, platform)
+# =============================================================================
+# YouTube publishing metadata
+#
+# 发到 YouTube 时要填的那三样：标题、简介、封面。前两样是文字，第三样是一张
+# 图，但三样都取决于同一件事——这条片子是竖的还是横的。
+#
+# Why the aspect ratio is an input and not a detail
+# -------------------------------------------------
+# 9:16 的片子进的是 Shorts：标题要短到在手机上一眼看完，简介要带 #Shorts，
+# 而封面是一张**竖**图，上下各一截会被播放器自己的按钮盖掉。16:9 的片子进的
+# 是普通视频页：封面是一张**横**图，一侧可以留白给大字。
+#
+# 把这两种当成同一件事，结果是一张横图配一条竖片——传上去 YouTube 会把它
+# 两边裁掉，主体正好被裁没。所以画幅在这里是必填的输入，不是一个细节。
+#
+# The aspect ratio decides what to write and what shape the thumbnail is, so
+# it is an input here rather than an afterthought: a landscape thumbnail on a
+# vertical Short is cropped on both sides, which is exactly where the subject
+# usually is.
+# =============================================================================
+
+#: 每种画幅对应的 YouTube 形态。
+YOUTUBE_FORMATS = {
+    "9:16": {
+        "kind": "short",
+        "label": "YouTube Shorts (a vertical video watched on a phone)",
+        "title_max": 100,
+        "description_max": 5000,
+        "tag_count": 10,
+        "thumbnail_label": "a tall 9:16 portrait image",
+        "framing": (
+            "The thumbnail frame is TALL and narrow. Keep the subject in the "
+            "middle third and large enough to read on a phone. Leave the top "
+            "eighth and the bottom quarter free of anything important: the "
+            "Shorts player covers them with the title, the channel name and "
+            "its own buttons."
+        ),
+        "advice": (
+            "Shorts are found by scrolling, not by searching, so the title has "
+            "to land in its first few words. Put #Shorts in the description."
+        ),
+    },
+    "16:9": {
+        "kind": "standard",
+        "label": "a standard widescreen YouTube video",
+        "title_max": 100,
+        "description_max": 5000,
+        "tag_count": 12,
+        "thumbnail_label": "a wide 16:9 landscape image",
+        "framing": (
+            "The thumbnail frame is WIDE. Put the subject on one side and "
+            "leave the other side comparatively plain, so that a few large "
+            "words could be laid over it. Keep everything important away from "
+            "the bottom right corner, where the duration badge sits."
+        ),
+        "advice": (
+            "A standard video is found by searching, so the title should "
+            "contain the words someone would actually type, and the first two "
+            "lines of the description are all that shows before 'Show more'."
+        ),
+    },
+    "1:1": {
+        "kind": "square",
+        "label": "a square YouTube video",
+        "title_max": 100,
+        "description_max": 5000,
+        "tag_count": 12,
+        "thumbnail_label": "a square 1:1 image",
+        "framing": (
+            "The thumbnail frame is SQUARE. Centre the subject and keep the "
+            "margins clear, because a square frame is cropped differently in "
+            "the feed and on the watch page."
+        ),
+        "advice": (
+            "Write a title that reads well both as a search result and in a "
+            "feed."
+        ),
+    },
+}
+DEFAULT_YOUTUBE_ASPECT = "9:16"
+MAX_YOUTUBE_THUMBNAIL_PROMPT_LENGTH = 600
+
+
+def youtube_format(aspect=None) -> dict:
+    """这条片子对应的 YouTube 形态。认不出画幅时按竖版算。
+
+    竖版是这个项目的默认画幅，所以猜错的代价最小；而且它的构图约束比横版
+    更紧（上下要给播放器让位），按它生成的封面放进横版只是保守了一点，反
+    过来则会被裁掉主体。
+    """
+    key = str(aspect or "").strip() or DEFAULT_YOUTUBE_ASPECT
+    return YOUTUBE_FORMATS.get(key, YOUTUBE_FORMATS[DEFAULT_YOUTUBE_ASPECT])
+
+
+def _normalize_youtube_tags(raw, count: int) -> List[str]:
+    """YouTube 的标签是普通词组，不是 hashtag——所以这里不加 ``#``。
+
+    不复用 ``_normalize_hashtags``：它会把 "street food" 挤成 "#streetfood"，
+    而 YouTube 的标签框本来就接受带空格的词组，挤掉空格只会让它们更难被
+    搜到。
+    """
+    if isinstance(raw, str):
+        candidates = re.split(r"[,，、;；\n]+", raw)
+    elif isinstance(raw, (list, tuple)):
+        candidates = [str(entry) for entry in raw]
+    else:
+        candidates = []
+
+    seen = set()
+    tags: List[str] = []
+    for item in candidates:
+        tag = re.sub(r"\s+", " ", str(item).replace("#", "")).strip()
+        if not tag:
+            continue
+        key = tag.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        tags.append(tag)
+        if count and len(tags) >= count:
+            break
+    return tags
+
+
+def build_youtube_metadata_prompt(
+    video_subject: str,
+    video_script: str = "",
+    aspect: str = DEFAULT_YOUTUBE_ASPECT,
+    language: str = DEFAULT_SOCIAL_LANGUAGE,
+) -> str:
+    """要模型一次写出标题、简介、标签和封面的画面描述。
+
+    封面描述也交给它，而不是把主题原样丢给文生图：封面要画的是"这条片子在
+    讲什么"的一个画面，而主题常常是一句抽象的话。顺带，画幅的构图约束写进
+    提示词，模型才有机会把主体放在不会被播放器盖住的位置。
+    """
+    video_subject = _limit_social_text(
+        video_subject, MAX_SOCIAL_SUBJECT_LENGTH, "video_subject"
+    )
+    video_script = _limit_social_text(
+        video_script, MAX_SOCIAL_SCRIPT_LENGTH, "video_script"
+    )
+    spec = youtube_format(aspect)
+    language_instruction = _social_language_instruction(language)
+
+    return f"""
+# Role: YouTube Packaging Specialist
+
+## Goal
+Write the title, the description, the tags and a thumbnail brief for {spec["label"]}.
+
+## What you know about the video
+The finished video is {aspect}. {spec["advice"]}
+
+## Constraints
+1. Respond ONLY with a single valid minified JSON object. No markdown, no code fences, no commentary.
+2. The JSON must contain exactly these keys: "title", "description", "tags", "thumbnail_prompt".
+3. "title": at most {spec["title_max"]} characters. No promise the script does not keep.
+4. "description": at most {spec["description_max"]} characters. Open with two lines that stand on their own, then the detail, then a call to action. Invent no links, no timestamps and no sponsors.
+5. "tags": a JSON array of up to {spec["tag_count"]} plain search phrases. No "#"; spaces are allowed.
+6. "thumbnail_prompt": one English paragraph of at most {MAX_YOUTUBE_THUMBNAIL_PROMPT_LENGTH} characters describing a single image for a text-to-image model: the subject, the setting, the lighting and the mood. {spec["framing"]} Ask for no words, letters or logos anywhere in the image.
+7. {language_instruction} Keep "thumbnail_prompt" in English, because the image model is the one reading it.
+
+## Output Example
+{{"title":"...","description":"...","tags":["example tag"],"thumbnail_prompt":"..."}}
+
+## Context
+### Video Subject
+{video_subject}
+
+### Video Script
+{video_script}
+""".strip()
+
+
+def _parse_youtube_metadata(response: str, aspect: str) -> dict:
+    spec = youtube_format(aspect)
+    try:
+        data = json.loads(_strip_code_fence(response))
+    except Exception:
+        # 有的模型会在 JSON 外面裹一段说明文字或 markdown fence。
+        data = _extract_embedded_json(response, "{")
+
+    if not isinstance(data, dict):
+        raise ValueError("youtube metadata response is not a JSON object")
+
+    title = _clamp_text(data.get("title", ""), spec["title_max"])
+    description = _clamp_text(data.get("description", ""), spec["description_max"])
+    tags = _normalize_youtube_tags(data.get("tags", []), spec["tag_count"])
+    thumbnail_prompt = _clamp_text(
+        data.get("thumbnail_prompt", ""), MAX_YOUTUBE_THUMBNAIL_PROMPT_LENGTH
+    )
+
+    if not title:
+        raise ValueError("youtube metadata response is missing the title")
+
+    return {
+        "title": title,
+        "description": description,
+        "tags": tags,
+        "thumbnail_prompt": thumbnail_prompt,
+    }
+
+
+def _fallback_youtube_metadata(
+    video_subject: str, video_script: str, aspect: str
+) -> dict:
+    """模型不可用时也要给出一份能改的草稿，而不是一个空面板。
+
+    标题取主题（或脚本第一句），简介取脚本本身，封面描述按画幅拼一句。都
+    不算好，但都是真话，而且用户可以在界面里改。返回空结构的话，用户只能
+    对着一个什么都没有的面板，分不清是模型坏了还是这个功能坏了。
+    """
+    spec = youtube_format(aspect)
+    subject = (video_subject or "").strip()
+    script = (video_script or "").strip()
+
+    title = subject
+    if not title and script:
+        # 中日文句末通常没有空格；英文仍要求空白，避免拆开 2.0 这类数字。
+        title = re.split(r"(?<=[.!?])\s+|(?<=[。！？])\s*", script, maxsplit=1)[0]
+
+    description = script or subject
+    if spec["kind"] == "short" and description:
+        description = f"{description}\n\n#Shorts"
+
+    topic = subject or title or "the subject of this video"
+    return {
+        # 这一份不是模型写的。界面必须能说出这件事：标题被拆成几个词、标签
+        # 是主题的分词，用户看到的是一份明显很差的文案，而"模型压根没跑"和
+        # "模型就这水平"是完全不同的两件事——前者改配置就好了。
+        "source": "fallback",
+        "title": _clamp_text(title, spec["title_max"]),
+        "description": _clamp_text(description, spec["description_max"]),
+        "tags": _normalize_youtube_tags(
+            [word for word in re.split(r"[\s,，、]+", topic) if len(word) > 2],
+            spec["tag_count"],
+        ),
+        "thumbnail_prompt": _clamp_text(
+            f"A clear, striking photograph of {topic}, dramatic lighting, "
+            f"no text or letters anywhere in the image. {spec['framing']}",
+            MAX_YOUTUBE_THUMBNAIL_PROMPT_LENGTH,
+        ),
+    }
+
+
+def generate_youtube_metadata(
+    video_subject: str,
+    video_script: str = "",
+    aspect: str = DEFAULT_YOUTUBE_ASPECT,
+    language: str = DEFAULT_SOCIAL_LANGUAGE,
+) -> dict:
+    """生成 YouTube 的标题、简介、标签和封面提示词。
+
+    返回结构固定为 ``{"title": str, "description": str, "tags": List[str],
+    "thumbnail_prompt": str}``。模型不可用或返回格式异常时降级为启发式结果，
+    保证调用方总能拿到一份可展示、可编辑的数据。
+    """
+    language = _normalize_social_language(language)
+    video_subject = _limit_social_text(
+        video_subject, MAX_SOCIAL_SUBJECT_LENGTH, "video_subject"
+    )
+    video_script = _limit_social_text(
+        video_script, MAX_SOCIAL_SCRIPT_LENGTH, "video_script"
+    )
+    prompt = build_youtube_metadata_prompt(
+        video_subject=video_subject,
+        video_script=video_script,
+        aspect=aspect,
+        language=language,
+    )
+    logger.info(f"generating youtube metadata: aspect={aspect}, language={language}")
+
+    reason = ""
+    for attempt in range(_max_retries):
+        try:
+            response = _generate_response(prompt)
+            if isinstance(response, str) and response.startswith("Error: "):
+                logger.error(f"failed to generate youtube metadata: {response}")
+                # 这条就是要显示给用户的那一句：它点名了是哪个 provider 的
+                # 哪一项没配好。
+                reason = response[len("Error: "):]
+                break
+            metadata = _parse_youtube_metadata(response, aspect)
+            metadata["source"] = "model"
+            logger.success(f"completed: \n{metadata}")
+            return metadata
+        except Exception as e:
+            reason = str(e)
+            logger.warning(f"failed to parse youtube metadata: {reason}")
+        if attempt < _max_retries - 1:
+            logger.warning(
+                f"failed to generate youtube metadata, trying again... {attempt + 1}"
+            )
+
+    logger.warning("falling back to heuristic youtube metadata")
+    fallback = _fallback_youtube_metadata(video_subject, video_script, aspect)
+    # 为什么降级，一并带上。"ollama: model_name is not set" 是用户改一行配置
+    # 就能解决的事，而一份没署名的烂文案只会让人以为这个功能不行。
+    fallback["error"] = reason
+    return fallback
 
 
 if __name__ == "__main__":

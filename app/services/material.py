@@ -19,7 +19,7 @@ from loguru import logger
 
 from app.utils.request_logging import trace_http_call
 from moviepy.video.io.VideoFileClip import VideoFileClip
-from PIL import Image, UnidentifiedImageError
+from PIL import Image, ImageOps, UnidentifiedImageError
 
 from app.config import config
 from app.models.schema import ImageMotion, MaterialInfo, VideoAspect, VideoConcatMode
@@ -1924,6 +1924,221 @@ def generate_images_codex(
         "rendition": {"id": None, "width": width, "height": height},
     }
     return [item]
+
+
+# =============================================================================
+# YouTube thumbnail
+#
+# 封面和场景素材走的是同一个文生图端点，但它不是素材：它不进时间线，不需要
+# 烘成 mp4，而且它的尺寸由"要发到哪里"决定，不由配置决定。
+# =============================================================================
+
+#: 成品封面的像素尺寸。1280x720 是 YouTube 自己给 16:9 封面的推荐值；竖版和
+#: 方版按成片尺寸走，这样封面和片子是同一个画幅，传上去不会被裁。
+YOUTUBE_THUMBNAIL_PIXELS = {
+    VideoAspect.landscape: (1280, 720),
+    VideoAspect.portrait: (1080, 1920),
+    VideoAspect.square: (1080, 1080),
+}
+#: 向模型请求的尺寸。OpenAI 官方接口只接受模型规定的那几个尺寸，所以这里
+#: 请求最接近的那一个，再裁到上面的成品尺寸。
+YOUTUBE_THUMBNAIL_REQUEST_SIZES = {
+    VideoAspect.landscape: "1536x1024",
+    VideoAspect.portrait: "1024x1536",
+    VideoAspect.square: "1024x1024",
+}
+
+
+class ThumbnailImageError(RuntimeError):
+    """封面没生成出来。失败一律点名，不静默换源，也不留下半张图。"""
+
+
+def generate_thumbnail_image(
+    prompt: str,
+    video_aspect: VideoAspect,
+    target_path: str,
+) -> tuple[int, int]:
+    """按画幅生成一张封面，裁到成品尺寸后写到 ``target_path``。
+
+    为什么不复用 ``generate_images_openai``
+    --------------------------------------
+    那个函数的尺寸可以被 ``openai_image_size`` 全局覆盖，因为它服务的是场景
+    素材：本地网关支持任意分辨率时，用户会把它设成成片尺寸。但封面的形状是
+    由"这条片子是 9:16 还是 16:9"决定的——拿一个为竖版素材配的 1024x1536 去
+    出一张 16:9 的封面，传到 YouTube 会被两边裁掉，而主体通常正在那里。
+
+    所以这里按画幅取尺寸，不读那项配置；端点、模型、鉴权和解码保护仍然和
+    素材共用同一条路径。
+
+    The size comes from the aspect ratio, not from ``openai_image_size``: that
+    setting exists for scene materials and may be portrait while the video is
+    landscape, which YouTube would crop from both sides.
+    """
+    aspect = VideoAspect(video_aspect)
+    text = str(prompt or "").strip()
+    if not text:
+        raise ThumbnailImageError("no thumbnail description to draw from")
+
+    endpoint, model = _openai_image_endpoint()
+    payload = {
+        "model": model,
+        "prompt": text,
+        "n": 1,
+        "size": YOUTUBE_THUMBNAIL_REQUEST_SIZES[aspect],
+    }
+    logger.info(
+        f"generating a {aspect.value} youtube thumbnail: model={model}, "
+        f"size={payload['size']}"
+    )
+    generation_progress.submitting("openai_image")
+    # 两种失败都要接住。``_request_openai_image`` 重试到头是**返回**
+    # ``(None, detail)``，而"请求可能已经送达但没拿回结果"（连接被拒、读超时、
+    # 重定向）是**抛** ``OpenAIImagePaidResultError``——它为素材那条循环而设,
+    # 目的是立刻停住后面的付费请求。封面只出一张图,没有后续请求要停,所以
+    # 这里把它翻译成一句点名的失败。
+    #
+    # 不接住的代价是具体的：出图服务没开着时它会穿过 FastAPI 变成一个没有
+    # 响应体的 500,编辑器拿不到任何可显示的文案,按钮按下去像什么都没发生。
+    try:
+        image_bytes, failure_detail = _request_openai_image(endpoint, payload)
+    except OpenAIImagePaidResultError as exc:
+        # 本地装机最常见的失败是"出图服务根本没开着"。那条原始文案讲的是
+        # 重复计费的风险，对着一个本机端口说这些毫无意义，而真正该说的
+        # ——哪个地址没人应答——反而埋在一段 urllib3 的栈里。
+        cause = exc.__cause__
+        if isinstance(
+            cause,
+            (requests.exceptions.ConnectionError, requests.exceptions.ConnectTimeout),
+        ):
+            raise ThumbnailImageError(
+                f"the image service at {endpoint} is not answering; start it and "
+                "try again"
+            ) from exc
+        raise ThumbnailImageError(str(exc)) from exc
+    if image_bytes is None:
+        raise ThumbnailImageError(failure_detail or "the image endpoint failed")
+
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", Image.DecompressionBombWarning)
+            image = Image.open(io.BytesIO(image_bytes))
+            if image.width * image.height > OPENAI_IMAGE_MAX_PIXELS:
+                raise ValueError("the generated image is too large")
+            image.load()
+    except Exception as exc:
+        # 兼容层可能返回 200 但 body 不是图片（伪装成 JSON 的 HTML 错误页、
+        # 网关的降级提示页）。这里点名"返回的不是一张图"，而不是让一个
+        # PIL 异常透给界面。
+        raise ThumbnailImageError(
+            f"the image endpoint did not return a usable image: "
+            f"{type(exc).__name__}: {exc}"
+        ) from exc
+
+    with image:
+        return _write_thumbnail(image, aspect, target_path)
+
+
+def _write_thumbnail(
+    image: Image.Image, aspect: VideoAspect, target_path: str
+) -> tuple[int, int]:
+    """把一张图裁成封面的画幅并落盘，返回成品尺寸。
+
+    画出来的封面和从片中取的那一帧走同一条路径：两者都必须是精确的画幅，
+    否则 YouTube 会自己裁一次，而它裁掉的往往正是主体。
+    """
+    width, height = YOUTUBE_THUMBNAIL_PIXELS[VideoAspect(aspect)]
+    frame = image.convert("RGB")
+    # ``fit`` 按目标比例居中裁切再缩放：来源的尺寸不一定正好是目标比例
+    # （模型给回的尺寸可能和请求的不同，片中那一帧则带着成片的画幅）。
+    frame = ImageOps.fit(frame, (width, height), method=Image.LANCZOS)
+    directory = os.path.dirname(target_path)
+    if directory:
+        os.makedirs(directory, exist_ok=True)
+    # 先写临时文件再替换：封面是固定文件名，直接写的话一次失败就把上一张
+    # 可用的封面毁掉了。
+    staging = f"{target_path}.{uuid.uuid4().hex[:8]}.part"
+    try:
+        frame.save(staging, format="PNG")
+        os.replace(staging, target_path)
+    except OSError as exc:
+        if os.path.exists(staging):
+            try:
+                os.remove(staging)
+            except OSError:
+                pass
+        raise ThumbnailImageError(f"cannot save the thumbnail: {exc}") from exc
+    return width, height
+
+
+def thumbnail_from_material(
+    source_path: str,
+    video_aspect: VideoAspect,
+    target_path: str,
+    *,
+    at: float = 0.0,
+) -> tuple[int, int]:
+    """拿片子里已经有的一张画面当封面。
+
+    Why this is usually the right answer
+    ------------------------------------
+    封面本来就该是"这条片子里的一个画面"。这些图已经在磁盘上了：不用再跑一次
+    文生图，不用等本机那几分钟，也不会出现一张和成片对不上的封面——而重新
+    生成一张最容易出的毛病恰恰是这个。
+
+    素材多半是 mp4：图片在出图那一刻就被烘成了带运镜的片段
+    (``render_image_zoom_video``)，所以这里要从片段里取一帧，而不是去找原图。
+    默认取第 0 秒：zoom 是从 1.0 倍开始往里推的，所以第一帧是这张图最完整的
+    样子。``at`` 可以指定别的时间。
+    """
+    aspect = VideoAspect(video_aspect)
+    if not source_path or not os.path.isfile(source_path):
+        raise ThumbnailImageError("that scene's picture is missing from disk")
+
+    # 延迟导入：video 会拉起 moviepy 和 numpy。封面这条路很少走，不该让
+    # 每一次 import material 都付这个代价。
+    from app.services import video as video_service
+
+    kind = "image" if _is_image_material(source_path) else "video"
+    clip = None
+    try:
+        if kind == "image":
+            clip, _resolved = video_service._open_image_clip_with_fallback(source_path)
+            raw = clip.get_frame(0)
+        else:
+            clip = video_service._open_video_clip_quietly(source_path)
+            duration = float(getattr(clip, "duration", 0.0) or 0.0)
+            # 取帧的时间点要落在片段里面。超出末尾时 moviepy 会读到空帧，
+            # 那会变成一张全黑的封面——而全黑的封面看起来就像这个功能坏了。
+            moment = max(0.0, float(at))
+            if duration > 0:
+                moment = min(moment, max(0.0, duration - 0.05))
+            raw = clip.get_frame(moment)
+    except Exception as exc:
+        raise ThumbnailImageError(
+            f"cannot read a picture out of {os.path.basename(source_path)}: {exc}"
+        ) from exc
+    finally:
+        if clip is not None:
+            video_service.close_clip(clip)
+
+    try:
+        frame = Image.fromarray(raw)
+    except Exception as exc:
+        raise ThumbnailImageError(
+            f"that scene's picture could not be read as an image: {exc}"
+        ) from exc
+    with frame:
+        return _write_thumbnail(frame, aspect, target_path)
+
+
+def _is_image_material(path: str) -> bool:
+    return os.path.splitext(path)[1].lower() in {
+        ".png",
+        ".jpg",
+        ".jpeg",
+        ".webp",
+        ".bmp",
+    }
 
 
 def _render_openai_image_video(

@@ -61,6 +61,9 @@ There you can:
 * **Regenerate, lock or delete** the selected scene, same as in the panel.
 * **Scrub** by clicking the ruler, and **Play** to preview the cut with the
   narration over it.
+* **Write the YouTube title, description and thumbnail** in the **YouTube**
+  panel, next to Script, Effects, Subtitles and Sound. It writes them for the
+  shape this video actually is and draws the thumbnail at that shape.
 
 The header keeps a running total against the narration length and warns when
 they drift apart.
@@ -112,6 +115,12 @@ curl -X POST localhost:8080/api/v1/tasks/$TASK/render
 | `GET`/`PUT /api/v1/tasks/{id}/subtitles/style` | caption font, size, colour, outline, box, position |
 | `GET`/`PUT /api/v1/tasks/{id}/effects` | the transition for the whole video; `apply_to_scenes` clears per-scene choices |
 | `GET`/`PUT /api/v1/tasks/{id}/cut-sound` | the sound at every cut, or `""` to remove it |
+| `GET`/`PUT /api/v1/tasks/{id}/publish` | the YouTube title, description, tags and thumbnail brief |
+| `POST /api/v1/tasks/{id}/publish/text` | write them from the subject and script, for this video's aspect |
+| `POST /api/v1/tasks/{id}/publish/thumbnail/scene` | use scene `index`'s own picture, cropped to this video's aspect |
+| `POST /api/v1/tasks/{id}/publish/thumbnail` | draw the thumbnail at this video's aspect; optional `prompt` |
+| `PUT /api/v1/tasks/{id}/publish/thumbnail/text` | the words burnt onto the thumbnail, and how they look |
+| `GET /api/v1/tasks/{id}/publish/thumbnail` | download the thumbnail file |
 | `GET /api/v1/library` | every task on disk, newest first, paged |
 | `GET /api/v1/cut-sound/{name}` | play one transition sound in the editor |
 | `GET /api/v1/fonts/{name}` | serve one subtitle font to the editor's preview |
@@ -190,6 +199,46 @@ message says what. Nothing falls back to another provider silently.
   volume between 0 and 1. It writes this task's own parameters, so other
   videos are unaffected. A video scored by an external provider (Sonilo,
   ElevenLabs) reports `external` and is left alone.
+* **The thumbnail is normally one of the video's own pictures.** The panel
+  shows every scene's picture as a row of tiles; clicking one crops it to the
+  thumbnail shape and is done in about a second. It needs no image service, it
+  cannot fail the way a fresh generation can, and it cannot produce a picture
+  that does not match the video — which is the usual complaint about a
+  generated thumbnail. Drawing a new one is still there, folded away under
+  *Or draw a new picture instead*, for a picture the video does not contain.
+  The panel says which scene the current thumbnail came from, and the tile it
+  came from is outlined. Scene materials are usually mp4 (the picture is baked
+  into a motion clip when it is drawn), so the frame at t=0 is taken — a zoom
+  starts at 1.0, so the first frame is the fullest view of that picture.
+* **Words can be burnt onto the thumbnail.** The text defaults to the title
+  and the font to this video's own caption font, so it matches the video
+  without choosing anything. Position, size, colour, outline and an optional
+  dark band are adjustable; size and outline are percentages (of the picture's
+  height and of the text) so one setting looks the same on 9:16 and 16:9. The
+  words are rendered into the PNG rather than laid over the preview with CSS —
+  the file you upload is the thing that has to carry them.
+* **The picture and the words are two files.** `youtube-thumbnail-base.png` is
+  the picture; `youtube-thumbnail.png` is it with the words on. Re-typing the
+  words never re-does the picture (no second image generation, no second frame
+  grab), and picking a different picture keeps the words. A thumbnail made
+  before this existed is adopted as its own base the first time words are
+  added, so nothing has to be re-picked.
+* **The YouTube text and thumbnail know the shape of the video.** The
+  **YouTube** button writes a title, a description and tags, and draws a
+  thumbnail, from this task's own saved `video_aspect` — not from whatever
+  `config.toml` says now. A 9:16 video is packaged as a Short and its
+  thumbnail is drawn 1080×1920; a 16:9 video is packaged as a normal video and
+  its thumbnail is drawn 1280×720, the size YouTube recommends. The panel says
+  which before you press anything, because the shape is the one thing you
+  cannot fix afterwards: a landscape thumbnail on a vertical Short is cropped
+  from both sides, which is exactly where the subject usually is. The
+  thumbnail deliberately ignores `openai_image_size` — that setting exists for
+  scene materials and is often portrait.
+* **Nothing in that panel reaches the video.** The text and the thumbnail are
+  stored with the task and are never read by the render, so they can be
+  written while the video is rendering. Over-long text is refused with the
+  count rather than silently truncated, and the thumbnail is drawn from the
+  description in the panel, which you can rewrite before pressing the button.
 * **A scene can lose its file** if something outside the app deletes it. The
   panel says so for that row, and Render refuses before queueing rather than
   failing halfway through.

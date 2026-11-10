@@ -18,6 +18,7 @@
   <button id="effects-toggle" class="btn" disabled>Effects</button>
   <button id="subs-toggle" class="btn" disabled>Subtitles</button>
   <button id="music-toggle" class="btn" disabled>Sound</button>
+  <button id="publish-toggle" class="btn" disabled>YouTube</button>
   <button id="rerecord" class="btn" disabled>Re-record narration</button>
   <button id="render" class="btn primary" disabled>Render video</button>
 </header>
@@ -183,6 +184,122 @@
     <button id="music-save" class="btn primary small">Save sound</button>
     <button id="music-close" class="btn small">Close</button>
     <span id="music-note" class="hint"></span>
+  </div>
+</section>
+
+<!-- 发到 YouTube 要填的那三样：标题、简介、封面。浮在最外层，和旁白正文、
+     配乐一样——这三样都属于整条片子，不属于某一段画面。
+
+     面板一打开先说这条片子是竖的还是横的。封面的形状完全由画幅决定：9:16 的
+     片子配一张横封面，传上去 YouTube 会把它两边裁掉，而主体通常正在那里。
+     所以这句话必须出现在"画封面"那个按钮之前，而不是出完图才让用户发现。 -->
+<section id="publish-panel" class="script-panel" hidden>
+  <h2>YouTube</h2>
+  <p class="hint" id="publish-shape"></p>
+  <p class="hint">Nothing here goes into the video. It is the text and the
+    picture you paste into YouTube when you upload, and it is saved with this
+    video so you can come back to it.</p>
+  <div class="row">
+    <button id="publish-write" class="btn small">Write the title and description</button>
+    <span id="publish-note" class="hint"></span>
+  </div>
+
+  <div class="field">
+    <label for="publish-title">Title <span id="publish-title-count" class="count"></span></label>
+    <input id="publish-title" type="text" spellcheck="true" autocomplete="off">
+  </div>
+  <div class="field">
+    <label for="publish-description">Description <span id="publish-description-count" class="count"></span></label>
+    <textarea id="publish-description" rows="8" spellcheck="true"></textarea>
+  </div>
+  <div class="field">
+    <label for="publish-tags">Tags, separated by commas</label>
+    <input id="publish-tags" type="text" spellcheck="false" autocomplete="off">
+  </div>
+
+  <h2 style="margin-top:14px">Thumbnail</h2>
+  <!-- 片子里的画面。放在"重新画一张"前面，因为它才是常走的那一条：这些图
+       已经在磁盘上了，点一下就成，不用等出图，也不会得到一张和成片对不上
+       的封面。 -->
+  <p class="hint" id="publish-pick-hint">Click one of this video's own pictures
+    to use it. It is cropped to the shape above.</p>
+  <div id="publish-scenes" class="shots"></div>
+  <p class="hint" id="publish-thumb-where"></p>
+
+  <!-- 压在封面上的那行字。排在挑图之后：先有图，再往上写字。
+
+       文字是烧进 PNG 里的，不是用 CSS 叠在预览上——下载下来的那个文件才是
+       要交给 YouTube 的东西，预览里有字而文件里没有是最糟的一种结果。 -->
+  <h3 class="sub">Words on the picture</h3>
+  <p class="hint">Burnt into the picture itself, so the file you download has
+    them. Changing the words never re-does the picture.</p>
+  <div class="field">
+    <label for="publish-text">Text <span id="publish-text-count" class="count"></span></label>
+    <input id="publish-text" type="text" spellcheck="true" autocomplete="off">
+  </div>
+  <div class="grid-2">
+    <div class="field">
+      <label for="publish-text-font">Font</label>
+      <select id="publish-text-font"></select>
+    </div>
+    <div class="field">
+      <label for="publish-text-position">Where</label>
+      <select id="publish-text-position"></select>
+    </div>
+  </div>
+  <div class="grid-2">
+    <div class="field">
+      <label for="publish-text-size">Size (% of the height)</label>
+      <input id="publish-text-size" type="number" min="3" max="30" step="0.5">
+    </div>
+    <div class="field">
+      <label for="publish-text-stroke-width">Outline (% of the text)</label>
+      <input id="publish-text-stroke-width" type="number" min="0" max="40" step="1">
+    </div>
+  </div>
+  <div class="grid-2">
+    <div class="field">
+      <label for="publish-text-color">Text colour</label>
+      <input id="publish-text-color" type="color">
+    </div>
+    <div class="field">
+      <label for="publish-text-stroke-color">Outline colour</label>
+      <input id="publish-text-stroke-color" type="color">
+    </div>
+  </div>
+  <label class="check"><input id="publish-text-band" type="checkbox">
+    Dark band behind the words</label>
+  <div class="row">
+    <button id="publish-text-apply" class="btn small">Put the words on</button>
+    <span id="publish-text-note" class="hint"></span>
+  </div>
+
+  <!-- 重新画一张。留着，但排在后面：想要一张片子里没有的画面时才用它。 -->
+  <details id="publish-draw-box" class="drawer">
+    <summary>Or draw a new picture instead</summary>
+    <p class="hint" id="publish-thumb-hint"></p>
+    <div class="field">
+      <label for="publish-prompt">What the picture shows <span id="publish-prompt-count" class="count"></span></label>
+      <textarea id="publish-prompt" rows="4" spellcheck="true"></textarea>
+    </div>
+    <div class="row">
+      <button id="publish-draw" class="btn small">Make the thumbnail</button>
+    </div>
+  </details>
+  <div class="row">
+    <a id="publish-download" class="btn small" hidden>Download it</a>
+    <span id="publish-thumb-note" class="hint"></span>
+  </div>
+  <!-- 画出来的封面。框按画幅留出，图用 contain 填进去，这样一张竖封面
+       不会把面板撑到看不见底。 -->
+  <div id="publish-thumb" class="thumb" hidden>
+    <img id="publish-thumb-img" alt="The thumbnail made for this video">
+  </div>
+
+  <div class="row">
+    <button id="publish-save" class="btn primary small">Save</button>
+    <button id="publish-close" class="btn small">Close</button>
+    <span id="publish-saved" class="hint"></span>
   </div>
 </section>
 

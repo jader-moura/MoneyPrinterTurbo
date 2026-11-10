@@ -854,6 +854,99 @@ body {
   clip-path: polygon(0 0, 100% 0, 50% 100%);
 }
 
+/* ---------- YouTube 的文案和封面 ---------- */
+
+/* "还能写多少字"。标题超过 100 就发不出去，所以超了标红——保存时才报错
+   等于让用户白写一遍。 */
+.count { font-variant-numeric: tabular-nums; opacity: .75; }
+.count.over { color: var(--danger); opacity: 1; font-weight: 600; }
+
+/* 封面。框按封面自己的画幅留出（aspect-ratio 由脚本写上去），图用 contain
+   填进去：一张 1080x1920 的竖封面原尺寸摆进来会把面板撑到看不见底部那排
+   按钮，而封面的构图恰恰是要整张一起看的。 */
+.thumb {
+  margin-top: 8px;
+  max-height: 46vh;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.thumb img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+/* 封面面板里的小标题。比 h2 轻：它分的是同一件事里的两步（挑图、写字），
+   不是两件事。 */
+.script-panel h3.sub {
+  margin: 12px 0 2px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text);
+}
+
+/* 可挑的画面。横着排成一条，自己横向滚动——25 段画面竖着堆下来会把面板
+   撑得比屏幕还高，而这一排的用途只是"挑一张",不需要看清每一张的细节。 */
+.shots {
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  padding: 4px 0 6px;
+}
+.shots .pick {
+  flex: 0 0 auto;
+  position: relative;
+  width: 54px;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  background: var(--panel);
+  cursor: pointer;
+  overflow: hidden;
+  line-height: 0;
+}
+.shots .pick:hover { border-color: var(--accent); }
+/* 正在用的那一张。边框加粗而不是打勾：打勾要盖住画面，而这排格子本来就小。 */
+.shots .pick.current { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.shots .pick video, .shots .pick img {
+  display: block;
+  width: 100%;
+  height: 72px;
+  object-fit: cover;
+}
+.shots .pick .n {
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  padding: 0 3px;
+  background: rgba(0, 0, 0, .66);
+  color: #fff;
+  font-size: 10px;
+  line-height: 14px;
+}
+
+/* "或者重新画一张"。收起来，因为它是备选：展开着会让那一排画面看起来只是
+   两个选项里的一个，而其实它才是该先试的。 */
+.drawer { margin: 2px 0 6px; }
+.drawer > summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: var(--muted);
+  padding: 2px 0;
+}
+.drawer > summary:hover { color: var(--text); }
+
+/* 下载是一个 <a>，但在这排按钮里要和旁边的按钮一样高、一样居中。 */
+#publish-download {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  text-decoration: none;
+}
+
 /* 嵌在 WebUI 里时宽度由那一列决定，窄下来就把检视面板挪到画面下方，
    而不是让 320px 的固定宽度把预览挤成一条。 */
 @media (max-width: 900px) {

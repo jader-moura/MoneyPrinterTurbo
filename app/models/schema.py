@@ -818,6 +818,69 @@ class NarrationScriptRequest(BaseModel):
     script: str
 
 
+
+class PublishMetadataRequest(BaseModel):
+    """发到 YouTube 时要填的文案。只提交想改的字段。
+
+    超长一律报 400 而不是截断：标题被砍掉半句而没人说，用户会把它当成自己
+    写的那一句发出去。
+    """
+
+    title: Optional[str] = None
+    description: Optional[str] = None
+    tags: Union[List[str], str, None] = None
+    thumbnail_prompt: Optional[str] = None
+
+
+class PublishTextRequest(BaseModel):
+    """让模型按这条片子的画幅写一份标题、简介、标签和封面说明。
+
+    ``language`` 的 ``auto`` 是"跟着主题和脚本的语言"。
+    """
+
+    language: Optional[str] = Field(default="auto", max_length=64)
+
+
+class PublishThumbnailTextRequest(BaseModel):
+    """压在封面上的那行字。
+
+    尺寸和画幅不在这里：字号是画面高度的百分比，描边是字号的百分比，所以同
+    一份设置在 9:16 和 16:9 上看起来一样大。只提交想改的字段。
+    """
+
+    text: Optional[str] = Field(default=None, max_length=120)
+    font: Optional[str] = None
+    position: Optional[str] = None
+    size: Optional[float] = Field(default=None, ge=3, le=30)
+    color: Optional[str] = None
+    stroke_color: Optional[str] = None
+    stroke_width: Optional[float] = Field(default=None, ge=0, le=40)
+    band: Optional[bool] = None
+
+
+class PublishSceneThumbnailRequest(BaseModel):
+    """拿片子里已经有的一张画面当封面。
+
+    ``index`` 是时间线上那一段的下标。``at`` 是从那个片段的第几秒取帧：素材
+    多半是带运镜的 mp4，默认取第 0 秒，因为 zoom 是从 1.0 倍往里推的，第一帧
+    是这张图最完整的样子。尺寸同样不在这里——它由这条片子的画幅决定。
+    """
+
+    index: int = Field(..., ge=0)
+    at: Optional[float] = Field(default=0.0, ge=0)
+
+
+class PublishThumbnailRequest(BaseModel):
+    """画一张封面。
+
+    ``prompt`` 不给就用已经存下来的那一段封面说明。图片的尺寸不在这里：它由
+    这条片子的画幅决定，9:16 出竖图，16:9 出横图——让调用方指定它只会制造出
+    一张会被 YouTube 裁掉的封面。
+    """
+
+    prompt: Optional[str] = Field(default=None, max_length=600)
+
+
 class SceneData(BaseModel):
     model_config = ConfigDict(extra="allow")
 
