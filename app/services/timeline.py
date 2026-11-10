@@ -250,6 +250,55 @@ def normalise_timing(
     }
 
 
+def motion_of(material: str) -> str:
+    """这段烘出来的图片片段用的是哪种运镜，看不出来返回空串。
+
+    ``render_image_zoom_video`` 的文件名是 ``<内容摘要>.<运镜>-<时长摘要>.mp4``，
+    所以运镜就写在名字里。要这个函数是因为重渲时必须把它带上：按默认值重渲
+    会把用户选的"静止"悄悄换成推近——在"把某一段拉长"那条路上，这件事以前
+    就是这样发生的。
+    """
+    parts = os.path.basename(str(material or "")).split(".")
+    if len(parts) < 3:
+        return ""
+    motion = parts[1].split("-", 1)[0]
+    return motion if motion in {"zoom", "static"} else ""
+
+
+def ensure_image_motion(task_id: str, material: str, motion: str) -> str:
+    """按新的运镜重烘这一段图片素材，长度保持不变。
+
+    运镜不是渲染期的效果：它在出图那一刻就被烘进 mp4 里了（见
+    ``video.render_image_zoom_video``）。所以"这一段改成静止"只能从原图重渲
+    一遍,而不是在渲染时加个参数。
+
+    ``render_image_zoom_video`` 按"图片 + 时长 + 运镜"内容寻址，所以在
+    zoom 和 static 之间来回切换时，第二次起直接命中磁盘上已有的文件，不会
+    重新编码。
+
+    找不到原图就抛错，而不是悄悄返回原片：用户在界面上挑了"静止"，拿回一段
+    照旧在推近的画面，比一句"这一段改不了"更糟。
+    """
+    from app.services import video as video_service
+
+    source_image = source_image_for(task_id, material)
+    if not source_image:
+        raise TimelineError(
+            "this scene's picture cannot be re-rendered: its source image is "
+            "no longer in the task folder (stock footage has none)"
+        )
+    # 长度照旧：改运镜不该顺手改这一段在成片里停多久。
+    duration = round(max(MIN_CLIP_DURATION, probe_duration(material)), 2)
+    rendered = video_service.render_image_zoom_video(
+        source_image, duration, image_motion=motion
+    )
+    logger.info(
+        f"re-rendered an image clip as {motion} for the timeline, "
+        f"task_id: {task_id}, file: {os.path.basename(rendered)}"
+    )
+    return rendered
+
+
 def ensure_image_length(task_id: str, material: str, needed_source: float) -> str:
     """要把一张图停得比烘出来的片段更久时，按新时长重渲一段。
 
@@ -272,9 +321,15 @@ def ensure_image_length(task_id: str, material: str, needed_source: float) -> st
     # 取两位小数而不是取整：把 12 段画面铺满 64 秒旁白时每段是 5.33 秒，
     # 取整成 5 秒会凭空少掉 4 秒。两位小数同时也让内容寻址的缓存键稳定。
     target = round(max(MIN_CLIP_DURATION, needed_source), 2)
-    # render_image_zoom_video 以 (图片, 时长) 内容寻址，重复请求同一时长
-    # 直接命中已有文件，不会重复编码。
-    rendered = video_service.render_image_zoom_video(source_image, target)
+    # render_image_zoom_video 以 (图片, 时长, 运镜) 内容寻址，重复请求同一组
+    # 参数直接命中已有文件，不会重复编码。
+    #
+    # 运镜要从现有片段的名字里读回来再带上：不带就是默认的 zoom，于是"把这
+    # 一段停久一点"会顺手把一段静止画面换成推近的，而用户什么都没改。
+    motion = motion_of(material) or "zoom"
+    rendered = video_service.render_image_zoom_video(
+        source_image, target, image_motion=motion
+    )
     logger.info(
         f"re-rendered an image clip to {target:.2f}s for the timeline, "
         f"task_id: {task_id}, file: {os.path.basename(rendered)}"
@@ -353,13 +408,17 @@ def build_edit_list(
                 f"scene {position} timing was clamped to the material length, "
                 f"task_id: {task_id}, material: {os.path.basename(material)}"
             )
-        edit_list.append(
-            {
-                "path": material,
-                "start": timing["trim_start"],
-                "end": timing["trim_end"],
-            }
-        )
+        entry = {
+            "path": material,
+            "start": timing["trim_start"],
+            "end": timing["trim_end"],
+        }
+        # 这一段自己挑的转场。没挑过就不写这个键，渲染器照旧用整条片子的
+        # 那一个设置。
+        transition = str(scene.get("transition") or "").strip()
+        if transition:
+            entry["transition"] = transition
+        edit_list.append(entry)
 
     if not edit_list:
         raise TimelineError("the timeline has no scenes to render")

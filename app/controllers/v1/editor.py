@@ -31,6 +31,7 @@ from app.models.schema import (
     NarrationScriptRequest,
     SceneListResponse,
     SceneAddRequest,
+    SceneEffectsRequest,
     SceneRegenJobResponse,
     SceneRegenQueueResponse,
     SceneRegenerateRequest,
@@ -363,6 +364,38 @@ def update_scene(
             narration=body.narration,
             keyword=body.keyword,
             locked=body.locked,
+        ),
+    )
+    return utils.get_response(200, _scene_payload(task_id, index))
+
+
+@router.put(
+    "/tasks/{task_id}/scenes/{index}/effects",
+    response_model=SceneResponse,
+    summary="Set one scene's transition and picture motion",
+)
+def update_scene_effects(
+    request: Request,
+    body: SceneEffectsRequest,
+    task_id: str = Path(..., description="Task ID"),
+    index: int = Path(..., ge=0, description="Scene index"),
+):
+    """改这一段的转场和运镜。两者都用空字符串表示"跟整条片子一样"。
+
+    改运镜要从原图重烘一段（运镜是出图时烘进 mp4 的，不是渲染期的效果），
+    所以这个请求可能要几秒钟；zoom/static 来回切换时第二次起直接命中磁盘上
+    已有的文件。
+    """
+    request_id = base.get_task_id(request)
+    _require_task(task_id, request_id)
+    _handle(
+        task_id,
+        request_id,
+        lambda: scene_editor.set_effects(
+            task_id,
+            index,
+            transition=body.transition,
+            image_motion=body.image_motion,
         ),
     )
     return utils.get_response(200, _scene_payload(task_id, index))

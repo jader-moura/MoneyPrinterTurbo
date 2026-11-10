@@ -728,6 +728,17 @@ class SceneReorderRequest(BaseModel):
     order: List[int]
 
 
+class SceneEffectsRequest(BaseModel):
+    """这一段画面怎么出场：转场和运镜。只提交想改的字段。
+
+    两者都用空字符串表示"跟整条片子一样"，这和显式选 ``none``（这一刀不要
+    转场）不是一回事。
+    """
+
+    transition: Optional[str] = None
+    image_motion: Optional[str] = None
+
+
 class NarrationScriptRequest(BaseModel):
     """整条旁白的文字，一次改完。
 

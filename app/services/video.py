@@ -58,6 +58,7 @@ class SubClippedVideoClip:
         height=None,
         duration=None,
         source_file_path=None,
+        transition=None,
     ):
         self.file_path = file_path
         self.start_time = start_time
@@ -65,6 +66,9 @@ class SubClippedVideoClip:
         self.width = width
         self.height = height
         self.source_file_path = source_file_path or file_path
+        # 这一段自己挑的转场。None 表示"跟整条片子一样"——自动切片那条路上
+        # 每一段都是 None，所以一键出片的结果一个字节都不会变。
+        self.transition = transition
         if duration is None:
             self.duration = end_time - start_time
         else:
@@ -1016,6 +1020,7 @@ def _subclips_from_edit_list(edit_list: List[dict]) -> List[SubClippedVideoClip]
                 width=clip_w,
                 height=clip_h,
                 source_file_path=path,
+                transition=str(entry.get("transition") or "").strip() or None,
             )
         )
     return items
@@ -1211,19 +1216,32 @@ def combine_videos(
             # Short footage and faster playback can leave less than one second.
             # Keep the chosen transition inside the rendered clip's timeline.
             transition_duration = min(1.0, clip.duration)
-            if transition_value == VideoTransitionMode.fade_in.value:
+            # 这一段自己挑过转场就用它的，没挑过才用整条片子的那一个。
+            # "none" 是显式的"这一刀不要转场"，和"没挑过"不是一回事，所以它
+            # 要能把整条片子的设置压下去。
+            #
+            # 必须是个新的局部变量：写回 transition_value 会把它变成本函数的
+            # 局部名字,于是"没挑过"的那些段在读它时直接 UnboundLocalError；
+            # 而且这个函数是并发跑的,改外层变量等于让各段互相串味。
+            clip_transition = getattr(subclipped_item, "transition", None)
+            effective_transition = transition_value
+            if clip_transition:
+                effective_transition = (
+                    None if clip_transition == "none" else clip_transition
+                )
+            if effective_transition == VideoTransitionMode.fade_in.value:
                 clip = video_effects.fadein_transition(clip, transition_duration)
-            elif transition_value == VideoTransitionMode.fade_out.value:
+            elif effective_transition == VideoTransitionMode.fade_out.value:
                 clip = video_effects.fadeout_transition(clip, transition_duration)
-            elif transition_value == VideoTransitionMode.slide_in.value:
+            elif effective_transition == VideoTransitionMode.slide_in.value:
                 clip = video_effects.slidein_transition(clip, transition_duration, shuffle_side)
-            elif transition_value == VideoTransitionMode.slide_out.value:
+            elif effective_transition == VideoTransitionMode.slide_out.value:
                 clip = video_effects.slideout_transition(clip, transition_duration, shuffle_side)
-            elif transition_value == VideoTransitionMode.zoom_in.value:
+            elif effective_transition == VideoTransitionMode.zoom_in.value:
                 clip = video_effects.zoomin_transition(clip, 1)
-            elif transition_value == VideoTransitionMode.zoom_out.value:
+            elif effective_transition == VideoTransitionMode.zoom_out.value:
                 clip = video_effects.zoomout_transition(clip, 1)
-            elif transition_value == VideoTransitionMode.shuffle.value:
+            elif effective_transition == VideoTransitionMode.shuffle.value:
                 transition_funcs = [
                     lambda c: video_effects.fadein_transition(c, transition_duration),
                     lambda c: video_effects.fadeout_transition(c, transition_duration),

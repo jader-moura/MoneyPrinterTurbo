@@ -37,7 +37,12 @@ from typing import Any, Iterator, Sequence
 from loguru import logger
 
 from app.models import image_style as image_style_model
-from app.models.schema import VideoAspect, VideoConcatMode, VideoParams
+from app.models.schema import (
+    VideoAspect,
+    VideoConcatMode,
+    VideoParams,
+    VideoTransitionMode,
+)
 from app.services import material, scene_manifest, task_artifacts, timeline
 from app.services import state as sm
 from app.services import task as tm
@@ -878,6 +883,10 @@ def describe(task_id: str, endpoint: str = "", *, with_timing: bool = False) -> 
         if scene["index"] < len(spoken):
             record["narration"] = spoken[scene["index"]]
         record["narration_edited"] = bool(scene.get("narration_edited"))
+        # 这一段自己挑的转场和运镜。空字符串一律是"跟整条片子一样"，界面
+        # 据此把下拉框停在第一项上。
+        record["transition"] = transition_id(scene.get("transition"))
+        record["image_motion"] = str(scene.get("image_motion") or "")
         window = windows[scene["index"]] if scene["index"] < len(windows) else None
         # 成片里的起止时间。界面靠它把"第 7 段画面"和"第 30 秒的旁白"对上。
         record["starts_at"] = window["start"] if window else None
@@ -934,6 +943,10 @@ def describe(task_id: str, endpoint: str = "", *, with_timing: bool = False) -> 
     payload["image_style"] = (
         "" if task_style == image_style_model.IMAGE_STYLE_CUSTOM else task_style
     )
+    # 可挑的转场与运镜。界面不写死这两张表：渲染器认的名字只有服务端知道，
+    # 写死一份迟早和它对不上。
+    payload["transitions"] = list(SCENE_TRANSITIONS)
+    payload["image_motions"] = list(SCENE_MOTIONS)
     payload["planned_total"] = round(windows[-1]["end"], 3) if windows else 0.0
     # 旁白总长无条件带上：审片列表要靠它说清楚"画面铺不满旁白,所以会轮播"。
     # 这只是读一次清单，不探测素材，所以不必等 with_timing。
@@ -992,6 +1005,108 @@ def prepare_audio_rerun(task_id: str) -> VideoParams:
     # 让 params 自身保持一致，避免任何入口再去问一次 LLM 要脚本。
     params.video_script = script
     return params
+
+
+# 一段画面可以自己挑的转场。键是接口和界面用的 id，值是渲染器认的那个字符
+# 串（``VideoTransitionMode`` 的 value）。"none" 是显式的"这一刀不要转场"，
+# 和"没挑过"不是一回事：前者压过整条片子的设置，后者跟着它走。
+SCENE_TRANSITIONS: dict[str, str] = {
+    "none": "none",
+    "fade_in": VideoTransitionMode.fade_in.value,
+    "fade_out": VideoTransitionMode.fade_out.value,
+    "slide_in": VideoTransitionMode.slide_in.value,
+    "slide_out": VideoTransitionMode.slide_out.value,
+    "zoom_in": VideoTransitionMode.zoom_in.value,
+    "zoom_out": VideoTransitionMode.zoom_out.value,
+    "shuffle": VideoTransitionMode.shuffle.value,
+}
+
+SCENE_MOTIONS: tuple[str, ...] = ("zoom", "static")
+
+
+def transition_id(stored: Any) -> str:
+    """把存着的渲染器值翻回界面用的 id，认不出来就当"没挑过"。"""
+    value = str(stored or "").strip()
+    for key, mapped in SCENE_TRANSITIONS.items():
+        if mapped == value:
+            return key
+    return ""
+
+
+def set_effects(
+    task_id: str,
+    index: Any,
+    *,
+    transition: str | None = None,
+    image_motion: str | None = None,
+) -> dict:
+    """设置这一段画面的转场和运镜。
+
+    两者在片子里的位置完全不同，但在界面上是同一件事（"这一段怎么出场"），
+    所以放在一个入口里：
+
+    * 转场是渲染期的效果，存下来就行，渲染时按剪辑表逐段应用；
+    * 运镜在出图那一刻就烘进 mp4 了,所以改它要从原图重烘一段——几秒钟的
+      本机编码,而且 zoom/static 来回切换时第二次起直接命中磁盘上的旧文件。
+
+    两者都用空字符串表示"跟整条片子一样"。
+    """
+    _require_idle(task_id)
+    with _editing(task_id):
+        scenes = _scenes_or_fail(task_id)
+        position = _scene_at(scenes, index)
+        scene = scenes[position]
+
+        if transition is not None:
+            chosen = str(transition).strip()
+            if chosen and chosen not in SCENE_TRANSITIONS:
+                raise SceneError(
+                    f"unknown transition {chosen!r}; pick one of: "
+                    f"{', '.join(sorted(SCENE_TRANSITIONS))} (or empty to "
+                    "follow the video)"
+                )
+            if chosen:
+                scene["transition"] = SCENE_TRANSITIONS[chosen]
+            else:
+                scene.pop("transition", None)
+
+        if image_motion is not None:
+            motion = str(image_motion).strip()
+            if motion and motion not in SCENE_MOTIONS:
+                raise SceneError(
+                    f"unknown picture motion {motion!r}; pick one of: "
+                    f"{', '.join(SCENE_MOTIONS)} (or empty to follow the video)"
+                )
+            _apply_scene_motion(task_id, scene, motion)
+
+        scene_manifest.save_scenes(task_id, scenes)
+        return scenes[position]
+
+
+def _apply_scene_motion(task_id: str, scene: dict, motion: str) -> None:
+    """按新的运镜重烘这一段的素材，并记下用户挑的是哪一种。
+
+    空字符串是"跟整条片子一样"，这时按任务参数里的运镜重烘一次——否则"改回
+    默认"会让画面停在上一次挑的那个样子,而界面显示的是"跟片子一样"。
+    """
+    params = load_params(task_id)
+    wanted = motion or str(_enum_value(getattr(params, "image_motion", "")) or "zoom")
+    material = scene_manifest.resolve_material(task_id, scene["material"])
+    if timeline.motion_of(material) == wanted:
+        # 已经是这个运镜了，不必重烘。记号还是要更新：用户可能是从"静止"
+        # 切回"跟片子一样"，而片子本来就是静止的。
+        pass
+    else:
+        try:
+            rendered = timeline.ensure_image_motion(task_id, material, wanted)
+        except timeline.TimelineError as exc:
+            raise SceneError(str(exc)) from exc
+        scene["material"] = scene_manifest.relative_media_path(task_id, rendered)
+        scene["kind"] = scene_manifest.material_kind(rendered)
+    if motion:
+        scene["image_motion"] = motion
+    else:
+        scene.pop("image_motion", None)
 
 
 def update_timing(
@@ -1165,7 +1280,8 @@ def prepare_render(task_id: str) -> VideoParams:
     #
     # 剪辑表落在任务清单里而不是只存内存：渲染任务重启后仍要渲染用户排好的
     # 那条时间线。素材按任务目录相对名存，整个任务目录搬走也还能解析。
-    if scene_manifest.has_timing_edits(scenes):
+    # 挑过转场的任务也要走剪辑表：每段的转场只能从剪辑表交到渲染器手上。
+    if scene_manifest.has_render_overrides(scenes):
         speed = getattr(params, "video_clip_speed", 1.0) or 1.0
         edit_list = timeline.build_edit_list(task_id, scenes, clip_speed=speed)
         task_artifacts.patch_script_data(
@@ -1178,6 +1294,12 @@ def prepare_render(task_id: str) -> VideoParams:
                     "material": os.path.basename(item["path"]),
                     "start": round(float(item["start"]), 3),
                     "end": round(float(item["end"]), 3),
+                    # 没挑过转场的段不写这个键，渲染器照旧用整条片子的设置。
+                    **(
+                        {"transition": item["transition"]}
+                        if item.get("transition")
+                        else {}
+                    ),
                 }
                 for item in edit_list
             ],

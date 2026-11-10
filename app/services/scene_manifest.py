@@ -196,6 +196,16 @@ def _normalise_scene(raw: Any, index: int) -> dict:
     style = str(record.get("image_style") or "").strip()
     if style:
         scene["image_style"] = style
+    # 这一段自己挑过的转场。空（不存在）表示"跟整条片子一样"，这和显式选了
+    # "none"（这一刀不要转场）不是一回事，所以用"有才带"而不是补默认值。
+    transition = str(record.get("transition") or "").strip()
+    if transition:
+        scene["transition"] = transition
+    # 这一段自己挑的运镜。素材本身已经是按它烘出来的，这里存的是"用户挑过
+    # 什么"，界面要靠它把下拉框停在正确的位置上。
+    motion = str(record.get("image_motion") or "").strip()
+    if motion:
+        scene["image_motion"] = motion
     # 用户亲手改过这一段的台词。按"有才带"处理，理由同上。
     #
     # 为什么要记：台词平时是按时间算出来的（这段画面播放时真正会念到的那
@@ -379,7 +389,13 @@ def edit_list_for_render(task_id: str) -> list[dict]:
                 f"edit list entry {position} has an empty range "
                 f"({start:.2f}s to {end:.2f}s)"
             )
-        resolved.append({"path": path, "start": start, "end": end})
+        item = {"path": path, "start": start, "end": end}
+        # 这一段自己挑的转场，没挑过就不带这个键。渲染器据此决定是用它还是
+        # 用整条片子的那一个设置。
+        transition = str(entry.get("transition") or "").strip()
+        if transition:
+            item["transition"] = transition
+        resolved.append(item)
     return resolved
 
 
@@ -460,6 +476,21 @@ def has_timing_edits(scenes: Any) -> bool:
         if timing["duration"] is not None or timing["trim_start"] > 0:
             return True
     return False
+
+
+def has_render_overrides(scenes: Any) -> bool:
+    """这条任务要不要按剪辑表渲染。
+
+    拖过时间线要；某一段自己挑过转场也要——每段的转场只能通过剪辑表交给
+    渲染器(``process_one_clip`` 读的就是剪辑表那一项)。自动切片那条路上
+    没有"这一段"的概念,一段源素材会被切成好几段画面。
+
+    一样都没有时返回 False，任务继续走原来的自动切片逻辑，默认出片结果一个
+    字节都不会变。
+    """
+    if has_timing_edits(scenes):
+        return True
+    return any(str(scene.get("transition") or "").strip() for scene in scenes or [])
 
 
 def patch_scene_timing(

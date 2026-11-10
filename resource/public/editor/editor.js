@@ -990,6 +990,37 @@ function drawInspector() {
     })));
   ui.inspBody.appendChild(save);
 
+  // 这一段怎么出场。放在时长前面：先决定它长什么样，再决定它停多久。
+  const transitions = (state.data && state.data.transitions) || [];
+  const motions = (state.data && state.data.image_motions) || [];
+  if (transitions.length || motions.length) {
+    const cut = transitions.length
+      ? inheritPicker("Transition in", transitions, TRANSITION_LABELS,
+          scene.transition || "", videoTransitionLabel())
+      : null;
+    const motion = motions.length
+      ? inheritPicker("Picture motion", motions, MOTION_LABELS,
+          scene.image_motion || "", videoMotionLabel())
+      : null;
+    if (cut) ui.inspBody.append(cut.wrap);
+    if (motion) ui.inspBody.append(motion.wrap);
+
+    const effectsNote = document.createElement("p");
+    effectsNote.className = "hint";
+    effectsNote.textContent = "The transition is added when the video is "
+      + "rendered. The motion is baked into this scene's clip, so changing it "
+      + "re-renders the clip from its picture — a few seconds, and instant "
+      + "once you have used that setting before.";
+    ui.inspBody.appendChild(effectsNote);
+
+    ui.inspBody.appendChild(button("Apply effects", "small", () =>
+      run("Applying the effects", () =>
+        call("PUT", scenePath(scene.index) + "/effects", {
+          transition: cut ? cut.input.value : null,
+          image_motion: motion ? motion.input.value : null,
+        }))));
+  }
+
   const source = scene.source_duration;
   const inPoint = field("In-point (s)", "input", String(scene.trim_start ?? 0), "number");
   const hold = field("Duration on screen (s)", "input",
@@ -1150,6 +1181,61 @@ function stylePicker(selected) {
   input.value = state.imageStyles.includes(selected) ? selected : "";
   wrap.append(caption, input);
   return { wrap, input };
+}
+
+/* ---------- 这一段怎么出场：转场和运镜 ----------
+
+   两者在片子里的位置完全不同——运镜在出图那一刻就烘进 mp4 了,转场是渲染时
+   加的——但在用户眼里是同一件事,所以并排放在一起。 */
+const TRANSITION_LABELS = {
+  none: "No transition", fade_in: "Fade in", fade_out: "Fade out",
+  slide_in: "Slide in", slide_out: "Slide out", zoom_in: "Zoom in",
+  zoom_out: "Zoom out", shuffle: "Random each time",
+};
+
+const MOTION_LABELS = { zoom: "Slow zoom", static: "Hold still" };
+
+/** 选择框：第一项永远是"跟整条片子一样"。 */
+function inheritPicker(label, ids, labels, selected, inheritText) {
+  const wrap = document.createElement("div");
+  wrap.className = "field";
+  const caption = document.createElement("label");
+  caption.textContent = label;
+  const input = document.createElement("select");
+  for (const id of ["", ...ids]) {
+    const option = document.createElement("option");
+    option.value = id;
+    option.textContent = id ? (labels[id] || id) : inheritText;
+    input.appendChild(option);
+  }
+  input.value = ids.includes(selected) ? selected : "";
+  wrap.append(caption, input);
+  return { wrap, input };
+}
+
+/** 整条片子现在用的那个转场，用来写"跟片子一样（淡入）"。 */
+function videoTransitionLabel() {
+  const settings = (state.data && state.data.render_settings) || {};
+  const raw = String(settings.transition || "").trim();
+  if (!raw || raw === "None") return "Same as the video (none)";
+  const id = Object.keys(TRANSITION_LABELS).find(
+    (key) => TRANSITION_LABELS[key] && labelOfRenderTransition(key) === raw);
+  return `Same as the video (${id ? TRANSITION_LABELS[id] : raw})`;
+}
+
+/* 渲染器认的名字是 "FadeIn" 这种驼峰，界面用的是 "fade_in"。这里只做
+   一次朴素的转换，省得为这点事再加一张表。 */
+function labelOfRenderTransition(id) {
+  return id === "shuffle" ? "Shuffle"
+    : id.split("_").map((part) => part[0].toUpperCase() + part.slice(1)).join("");
+}
+
+function videoMotionLabel() {
+  const settings = (state.data && state.data.render_settings) || {};
+  const raw = String(settings.image_motion || "").trim();
+  return raw && MOTION_LABELS[raw]
+    ? `Same as the video (${MOTION_LABELS[raw].toLowerCase()})`
+    : "Same as the video";
 }
 
 const STYLE_LABELS = {
