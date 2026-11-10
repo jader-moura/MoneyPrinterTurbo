@@ -134,6 +134,66 @@ body {
   paint-order: stroke fill;
 }
 
+/* ---------- 渲染中 ---------- */
+
+.modal {
+  position: fixed;
+  inset: 0;
+  z-index: 70;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(8, 10, 14, 0.72);
+  backdrop-filter: blur(2px);
+  padding: 16px;
+}
+
+.modal-box {
+  width: min(460px, 100%);
+  padding: 18px 18px 14px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.6);
+}
+.modal-box h2 { margin: 0 0 6px; font-size: 15px; }
+.modal-box .hint { margin: 0 0 12px; }
+
+/* 进度条。不确定进度时（刚提交、还没拿到第一个数字）用一条来回跑的条,
+   省得用户盯着一个纹丝不动的 0% 以为卡死了。 */
+.bar-track {
+  height: 8px;
+  border-radius: 999px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  overflow: hidden;
+}
+.bar-fill {
+  height: 100%;
+  width: 0;
+  background: var(--accent);
+  border-radius: 999px;
+  transition: width .4s ease;
+}
+.bar-fill.waiting {
+  width: 35%;
+  animation: bar-sweep 1.4s ease-in-out infinite;
+}
+@keyframes bar-sweep {
+  0% { margin-left: -35%; }
+  100% { margin-left: 100%; }
+}
+
+.modal-foot {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 10px;
+}
+.modal-foot .hint { margin: 0; }
+.modal-foot .pct { font-size: 13px; font-weight: 600; }
+.modal-box.failed .bar-fill { background: var(--danger); }
+
 /* ---------- 做过的片子 ----------
 
    盖住整个舞台而不是浮一个小窗：挑片子是进编辑器之前的那一步，这时候底下

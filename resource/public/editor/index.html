@@ -171,6 +171,25 @@
   </div>
 </section>
 
+<!-- 渲染中。盖住整个界面：渲染期间任何编辑都不作数（接口也会拒），所以与其
+     让用户点了才发现不让改，不如直接把路挡上，并且把进度摆在正中间。 -->
+<div id="render-modal" class="modal" hidden>
+  <div class="modal-box">
+    <h2 id="render-title">Rendering your video</h2>
+    <p id="render-note" class="hint">Putting the pictures, the narration and
+      the music together. This takes a few minutes.</p>
+    <div class="bar-track"><div id="render-bar" class="bar-fill"></div></div>
+    <div class="modal-foot">
+      <span id="render-pct" class="pct">0%</span>
+      <span id="render-elapsed" class="hint"></span>
+      <span class="spacer"></span>
+      <button id="render-hide" class="btn small">Hide</button>
+      <button id="render-play" class="btn primary small" hidden>Play the video</button>
+      <button id="render-done" class="btn small" hidden>Close</button>
+    </div>
+  </div>
+</div>
+
 <main class="stage">
   <section class="viewer">
     <div class="screen">

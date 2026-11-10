@@ -48,6 +48,11 @@ const ui = {
   libraryGrid: el("library-grid"), libraryCount: el("library-count"),
   libraryClose: el("library-close"), libraryMore: el("library-more"),
   libraryMoreRow: el("library-more-row"),
+  renderModal: el("render-modal"), renderBox: document.querySelector(".modal-box"),
+  renderTitle: el("render-title"), renderNote: el("render-note"),
+  renderBar: el("render-bar"), renderPct: el("render-pct"),
+  renderElapsed: el("render-elapsed"), renderHide: el("render-hide"),
+  renderPlay: el("render-play"), renderDone: el("render-done"),
 };
 
 const state = {
@@ -74,6 +79,9 @@ const state = {
   cueIndex: -1,
   // "做过的片子"翻到第几页了。
   libraryPage: 1,
+  // 这次渲染是什么时候点下去的，以及出来的片子在哪儿。
+  renderStarted: 0,
+  renderedVideo: "",
   // 队列浮层收起没有。只是这台浏览器上的一点顺手，读不出来就当没收起。
   queueCollapsed: (() => {
     try { return !!localStorage.getItem("mpt_queue_collapsed"); } catch { return false; }
@@ -287,13 +295,18 @@ async function watchTask() {
       if (!busy) {
         if (state.wasBusy) {
           state.wasBusy = false;
-          say("The render finished. Reloading the scenes.");
+          say("");
           await refresh();
+          // 刷新之后再收尾：这块挡板上的"去看"按钮要指向刚出来的那条片子。
+          finishRender(task);
         }
         break;
       }
       state.wasBusy = true;
+      adoptRunningRender(task);
       const pct = Number(task.progress || 0);
+      // 挡板开着就把数字喂给它；用户按了"隐藏"的话，还有上面那条提示在。
+      updateRender(pct, (task.generation_activity || {}).phase);
       say(`This task is rendering (${pct}%). Scene edits are locked until it finishes.`,
         "warn");
       setControlsEnabled(false);
@@ -1689,6 +1702,17 @@ ui.fit.addEventListener("click", () => run("Fitting the scenes to the narration"
   return "";
 }));
 
+/* 打开编辑器时这条任务已经在渲染（别人点的，或者刚才刷新过页面）：挡板
+   同样要放出来，否则用户会对着一个什么都点不动的界面发呆。 */
+function adoptRunningRender(task) {
+  if (!task || Number(task.state) !== 4) return;
+  if (!ui.renderModal.hidden) return;
+  showRender("This video is already rendering.");
+  state.renderStarted = Number(task.generation_started_at || 0) * 1000
+    || Date.now();
+  updateRender(task.progress, (task.generation_activity || {}).phase);
+}
+
 ui.rerecord.addEventListener("click", () => run("Re-recording narration", async () => {
   await call("POST", `/tasks/${encodeURIComponent(state.taskId)}/audio`);
   state.wasBusy = true;
@@ -1889,6 +1913,81 @@ async function loadMusic() {
   syncMusicBed();
   drawMusicTrack();
 }
+
+/* ---------- 渲染中 ----------
+
+   渲染要跑好几分钟，而且期间任何编辑都不作数（接口也会拒）。所以点下去立刻
+   把这块挡板放出来：一是让用户知道"点到了"，二是把路挡上，省得点了半天才
+   发现不让改。进度就摆在正中间。 */
+function showRender(stage) {
+  ui.renderModal.hidden = false;
+  ui.renderBox.classList.remove("failed");
+  ui.renderPlay.hidden = true;
+  ui.renderDone.hidden = true;
+  ui.renderHide.hidden = false;
+  ui.renderTitle.textContent = "Rendering your video";
+  ui.renderNote.textContent = stage || "Putting the pictures, the narration "
+    + "and the music together. This takes a few minutes.";
+  // 还没有数字时用来回跑的条，别让用户盯着一个不动的 0%。
+  ui.renderBar.classList.add("waiting");
+  ui.renderPct.textContent = "";
+  ui.renderElapsed.textContent = "";
+  state.renderStarted = Date.now();
+}
+
+function updateRender(percent, phase) {
+  if (ui.renderModal.hidden) return;
+  const value = Math.max(0, Math.min(100, Number(percent) || 0));
+  if (value > 0) {
+    ui.renderBar.classList.remove("waiting");
+    ui.renderBar.style.width = value + "%";
+    ui.renderPct.textContent = value + "%";
+  }
+  if (phase) ui.renderNote.textContent = `Stage: ${phase}.`;
+  if (state.renderStarted) {
+    const seconds = (Date.now() - state.renderStarted) / 1000;
+    ui.renderElapsed.textContent = `${fmt(seconds)} so far`;
+  }
+}
+
+/** 渲染结束：成了就给一个"去看"的按钮，败了就把原因留在这块挡板上。 */
+function finishRender(task) {
+  if (ui.renderModal.hidden) return;
+  const failed = task && Number(task.state) === -1;
+  ui.renderBar.classList.remove("waiting");
+  ui.renderHide.hidden = true;
+  ui.renderDone.hidden = false;
+  // 失败那条路上不能留着"去看成片"：没有成片可看。
+  ui.renderPlay.hidden = true;
+  ui.renderBox.classList.toggle("failed", !!failed);
+  if (failed) {
+    ui.renderBar.style.width = "100%";
+    ui.renderTitle.textContent = "The render failed";
+    ui.renderNote.textContent = String(
+      (task && (task.error || task.failed_stage)) || "No reason was reported."
+    );
+    ui.renderPct.textContent = "";
+    return;
+  }
+  ui.renderBar.style.width = "100%";
+  ui.renderPct.textContent = "100%";
+  ui.renderTitle.textContent = "Your video is ready";
+  ui.renderNote.textContent = "The scenes have been reloaded. Render again any "
+    + "time you change something.";
+  const videos = (task && task.videos) || [];
+  if (videos.length) {
+    ui.renderPlay.hidden = false;
+    state.renderedVideo = String(videos[videos.length - 1]);
+  }
+}
+
+ui.renderHide.addEventListener("click", () => { ui.renderModal.hidden = true; });
+ui.renderDone.addEventListener("click", () => { ui.renderModal.hidden = true; });
+ui.renderPlay.addEventListener("click", () => {
+  if (!state.renderedVideo) return;
+  // 成片由 /tasks 那个静态挂载直接提供，所以这就是一个能打开的地址。
+  window.open(state.renderedVideo, "_blank", "noopener");
+});
 
 /* ---------- 做过的片子 ----------
 
@@ -2329,7 +2428,16 @@ ui.musicSave.addEventListener("click", () => run("Saving the sound", async () =>
 }));
 
 ui.render.addEventListener("click", () => run("Submitting the render", async () => {
-  await call("POST", `/tasks/${encodeURIComponent(state.taskId)}/render`);
+  // 先把挡板放出来，再发请求：提交本身也要一两秒，而这一两秒里用户只想知道
+  // "我到底点到没有"。
+  showRender("Submitting the render…");
+  try {
+    await call("POST", `/tasks/${encodeURIComponent(state.taskId)}/render`);
+  } catch (error) {
+    // 提交就被拒了（还有图排着队、配音过期之类）。挡板不能留在那里转圈。
+    ui.renderModal.hidden = true;
+    throw error;
+  }
   // 提交完立刻开始盯状态，这样渲染期间界面是"锁住并显示进度"，
   // 而不是看起来什么都没发生、改一下才被拒绝。
   state.wasBusy = true;
