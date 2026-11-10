@@ -113,16 +113,22 @@
     <div class="gutter-cell ruler-cell"></div>
     <div class="gutter-cell">Video</div>
     <div class="gutter-cell short">Voice</div>
+    <div class="gutter-cell short">Music</div>
   </div>
   <div id="scroll" class="scroll">
     <div id="ruler" class="ruler"></div>
     <div id="video-track" class="track"></div>
     <div id="audio-track" class="track short"></div>
+    <!-- 背景音乐。配乐属于整条片子，所以这条轨道从头铺到尾——它是一条
+         "这里一直有音乐"的说明，不是可以逐段编辑的东西。 -->
+    <div id="music-track" class="track short"></div>
     <div id="playhead" class="playhead" hidden></div>
   </div>
 </section>
 
 <audio id="narration"></audio>
+<!-- 预览时跟着旁白一起放的那一条配乐。循环，因为曲子通常比片子短。 -->
+<audio id="music-bed" loop></audio>
 <script src="editor.js"></script>
 </body>
 </html>

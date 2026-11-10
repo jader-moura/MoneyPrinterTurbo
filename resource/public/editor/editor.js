@@ -29,6 +29,7 @@ const ui = {
   musicTrack: el("music-track"), musicVolume: el("music-volume"),
   musicPreview: el("music-preview"), musicSave: el("music-save"),
   musicClose: el("music-close"), musicNote: el("music-note"),
+  musicTrackRow: el("music-track"), musicBed: el("music-bed"),
 };
 
 const state = {
@@ -49,6 +50,8 @@ const state = {
   queueWatching: false,
   // 已经重读过时间线的那些活，免得同一张图反复触发重读。
   queueSeen: [],
+  // 这条片子的配乐。时间线上要画出来，预览时要跟着响。
+  music: null,
   // 队列浮层收起没有。只是这台浏览器上的一点顺手，读不出来就当没收起。
   queueCollapsed: (() => {
     try { return !!localStorage.getItem("mpt_queue_collapsed"); } catch { return false; }
@@ -198,6 +201,9 @@ async function load(taskId) {
       ? "The narration no longer matches the edited script. Re-record before rendering."
       : "", data.audio_stale ? "warn" : "");
     draw();
+    // 配乐单独读一次：它存在任务参数里，不在场景清单里。读不到也不挡着
+    // 审片，所以不等它，画完再补上那一条轨道。
+    loadMusic();
     // 打开时就查一次：别人(或刚才的自己)可能正在渲染这条任务。
     watchTask();
     // 队列在服务端，所以上一次开着这个页面时排的活可能还在跑。刷新页面、
@@ -579,6 +585,7 @@ function draw() {
   drawRuler();
   drawClips();
   drawVoice();
+  drawMusicTrack();
   drawInspector();
   drawTotals();
   drawSettings();
@@ -1544,6 +1551,17 @@ function play() {
     try { ui.narration.currentTime = state.playhead; } catch { /* 元数据未就绪 */ }
     ui.narration.play().catch(() => {});
   }
+  if (ui.musicBed.src) {
+    // 曲子通常比片子短，所以是循环的；播放头落在哪里，就从曲子里对应的
+    // 那一点接着放，这样来回拖动时听到的和成片里的那一刻一致。
+    try {
+      const length = ui.musicBed.duration;
+      ui.musicBed.currentTime = Number.isFinite(length) && length > 0
+        ? state.playhead % length
+        : 0;
+    } catch { /* 元数据未就绪 */ }
+    ui.musicBed.play().catch(() => {});
+  }
   ui.preview.play().catch(() => {});
   requestAnimationFrame(tick);
 }
@@ -1553,6 +1571,7 @@ function stop() {
   ui.play.textContent = "Play";
   ui.preview.pause();
   ui.narration.pause();
+  ui.musicBed.pause();
 }
 
 /* ---------- wiring ---------- */
@@ -1673,6 +1692,80 @@ ui.scriptSave.addEventListener("click", () => run("Saving the script", async () 
   return "Script saved. Re-record the narration when you want it spoken.";
 }));
 
+/* 时间线上的配乐轨。一条从头铺到尾的横条：配乐属于整条片子，没有"哪一段"
+   的概念，所以它不分块，只说明"这里一直有音乐,是哪一首,多响"。 */
+function drawMusicTrack() {
+  ui.musicTrackRow.innerHTML = "";
+  const total = projectTotal();
+  if (!total) return;
+
+  const music = state.music;
+  const bar = document.createElement("div");
+  bar.style.left = "0px";
+  bar.style.width = Math.max(14, total * state.pxPerSecond - 2) + "px";
+
+  if (!music || (!music.track && !music.external)) {
+    bar.className = "music-bar empty";
+    bar.textContent = "no music";
+    bar.title = "Click to choose background music for this video.";
+  } else if (music.external) {
+    bar.className = "music-bar";
+    bar.textContent = `music · from ${music.kind}`;
+    bar.title = `This video gets its music from ${music.kind}.`;
+  } else {
+    bar.className = "music-bar";
+    const name = music.track === RANDOM_MUSIC
+      ? "a different one each render"
+      : music.track.replace(/\.[^.]+$/, "");
+    const volume = Math.round((music.volume || 0) * 100);
+    bar.textContent = `music · ${name} · ${volume}%`;
+    bar.title = music.track === RANDOM_MUSIC
+      ? "A track is picked at random when the video is rendered, so there is "
+        + "nothing to play here yet."
+      : `${music.track} at ${volume}% — click to change it.`;
+  }
+  bar.addEventListener("click", openMusic);
+  ui.musicTrackRow.appendChild(bar);
+}
+
+/* 预览时跟着旁白一起放的那一条配乐。
+
+   音量照搬渲染时的那个值，所以在编辑器里听到的比例和成片一致——这正是用户
+   要在这里判断的事："这首曲子会不会盖住人声"。
+
+   "每次渲染随机挑"没有具体文件，放不了：这时安静,时间线上那一条也写明了
+   原因,而不是随便挑一首给用户一个会变的印象。 */
+function syncMusicBed() {
+  const music = state.music;
+  const name = music && !music.external ? String(music.track || "") : "";
+  const playable = name && name !== RANDOM_MUSIC;
+  const wanted = playable ? `${API}/music/${encodeURIComponent(name)}` : "";
+  if (!wanted) {
+    try { ui.musicBed.pause(); } catch { /* 还没加载 */ }
+    ui.musicBed.removeAttribute("src");
+    return;
+  }
+  // 同一首就别重设 src：重设会把它拉回开头，而用户可能正在播放中途。
+  if (!ui.musicBed.src.endsWith(encodeURIComponent(name))) {
+    ui.musicBed.src = wanted;
+  }
+  const level = Number(music.volume);
+  ui.musicBed.volume = Number.isFinite(level) ? Math.min(1, Math.max(0, level)) : 0.2;
+}
+
+/** 读回这条片子的配乐，画到时间线上，并准备好预览用的那一条。 */
+async function loadMusic() {
+  if (!state.taskId) return;
+  try {
+    state.music = (await call("GET", musicPath())) || null;
+  } catch {
+    // 读不到配乐不该挡住审片，轨道上就显示"没有音乐"。
+    state.music = null;
+  }
+  syncMusicBed();
+  drawMusicTrack();
+}
+
 /* ---------- 背景音乐 ----------
 
    配乐属于整条片子，所以它和场景面板无关。曲库在服务端（内置歌曲加用户自己
@@ -1724,7 +1817,9 @@ async function openMusic() {
   ui.musicPanel.hidden = false;
   ui.musicNote.textContent = "Loading…";
   try {
-    drawMusic((await call("GET", musicPath())) || {});
+    state.music = (await call("GET", musicPath())) || null;
+    drawMusic(state.music || {});
+    drawMusicTrack();
   } catch (error) {
     ui.musicNote.textContent = String(error.message || error);
   }
@@ -1747,7 +1842,10 @@ ui.musicSave.addEventListener("click", () => run("Saving the music", async () =>
     track: ui.musicTrack.value,
     volume: Number(ui.musicVolume.value),
   });
+  state.music = music || null;
   drawMusic(music || {});
+  syncMusicBed();
+  drawMusicTrack();
   closeMusic();
   return "";
 }));

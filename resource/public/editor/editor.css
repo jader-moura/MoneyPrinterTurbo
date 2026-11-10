@@ -594,6 +594,33 @@ body {
 }
 .voice-bar.line:hover { background: #3f5f90; border-color: var(--accent); }
 
+/* 配乐条。和旁白块一个形状，换个颜色：它是另一回事，而且从头铺到尾。
+   点一下打开音乐面板——用户看见它第一件想做的事就是换一首。 */
+.music-bar {
+  position: absolute;
+  top: 3px;
+  bottom: 3px;
+  background: #2f4a3c;
+  border: 1px solid #3d6350;
+  border-radius: 5px;
+  font-size: 11px;
+  color: #cfe8d8;
+  padding: 3px 8px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+.music-bar:hover { background: #3a5c4a; border-color: var(--accent); }
+
+/* 没选配乐时的那一条。虚线、灰字：说明"这里可以有音乐"，而不是"这里有"。 */
+.music-bar.empty {
+  background: transparent;
+  border-style: dashed;
+  border-color: var(--line);
+  color: var(--muted);
+}
+
 .drop-marker { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--accent); z-index: 6; }
 
 .playhead {
