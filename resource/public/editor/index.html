@@ -15,6 +15,7 @@
   <span id="totals" class="totals"></span>
   <span class="spacer"></span>
   <button id="script-toggle" class="btn" disabled>Script</button>
+  <button id="effects-toggle" class="btn" disabled>Effects</button>
   <button id="subs-toggle" class="btn" disabled>Subtitles</button>
   <button id="music-toggle" class="btn" disabled>Sound</button>
   <button id="rerecord" class="btn" disabled>Re-record narration</button>
@@ -46,6 +47,35 @@
     <button id="script-save" class="btn primary small">Save script</button>
     <button id="script-close" class="btn small">Close</button>
     <span id="script-note" class="hint"></span>
+  </div>
+</section>
+
+<!-- 整条片子的转场。单段的那个下拉框只管一段，而"全部换成淡入"是另一件
+     事，得有个一次做完的地方。 -->
+<section id="effects-panel" class="script-panel aside" hidden>
+  <h2>Effects for the whole video</h2>
+  <p class="hint">The transition used wherever a scene has not chosen its own.
+    Each scene can still override it in its own panel.</p>
+  <div class="field">
+    <label for="effects-transition">Transition between scenes</label>
+    <select id="effects-transition"></select>
+  </div>
+  <label class="check"><input id="effects-apply" type="checkbox">
+    Use it everywhere, clearing scenes that chose their own</label>
+  <p class="hint" id="effects-own"></p>
+
+  <div class="field">
+    <label for="effects-motion">Picture motion for new pictures</label>
+    <select id="effects-motion"></select>
+  </div>
+  <p class="hint">Motion is baked in when a picture is drawn, so this applies
+    to pictures made from now on. To change one that already exists, use that
+    scene's own motion — it re-renders the clip.</p>
+
+  <div class="row">
+    <button id="effects-save" class="btn primary small">Save effects</button>
+    <button id="effects-close" class="btn small">Close</button>
+    <span id="effects-note" class="hint"></span>
   </div>
 </section>
 

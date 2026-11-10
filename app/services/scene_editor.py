@@ -1444,6 +1444,83 @@ def set_subtitle_style(task_id: str, **wanted: Any) -> dict:
     return subtitle_style(task_id)
 
 
+def video_effects(task_id: str) -> dict:
+    """整条片子的转场和运镜，以及有几段自己挑过、不跟着它走。"""
+    params = load_params(task_id)
+    scenes = scene_manifest.load(task_id)["scenes"]
+    return {
+        "transition": transition_id(
+            _enum_value(getattr(params, "video_transition_mode", "")) or "none"
+        ),
+        "image_motion": str(_enum_value(getattr(params, "image_motion", "")) or ""),
+        "transitions": list(SCENE_TRANSITIONS),
+        "image_motions": list(SCENE_MOTIONS),
+        # 界面要据此说清楚"改了这个，那几段还是不跟着变"。
+        "scenes_with_own_transition": sum(
+            1 for scene in scenes if str(scene.get("transition") or "").strip()
+        ),
+        "scenes": len(scenes),
+    }
+
+
+def set_video_effects(
+    task_id: str,
+    *,
+    transition: str | None = None,
+    image_motion: str | None = None,
+    apply_to_scenes: bool = False,
+) -> dict:
+    """一次改掉整条片子的转场（和运镜）。
+
+    ``apply_to_scenes`` 打开时，顺手清掉每一段自己挑过的转场——否则"全部改成
+    淡入"之后，之前单独挑过的那几段仍然我行我素,而用户以为自己已经改完了。
+
+    运镜这一项只影响**之后**出的图：运镜是出图那一刻烘进 mp4 的，已经在盘上
+    的素材不会因为改了这个设置而变。要改已经出好的那一段,用那一段自己的运镜
+    （会从原图重烘一份）。这件事界面上也写明了。
+    """
+    _require_idle(task_id)
+    fields: dict[str, Any] = {}
+    with _editing(task_id):
+        if transition is not None:
+            chosen = str(transition).strip()
+            if chosen and chosen not in SCENE_TRANSITIONS:
+                raise SceneError(
+                    f"unknown transition {chosen!r}; pick one of: "
+                    f"{', '.join(sorted(SCENE_TRANSITIONS))}"
+                )
+            # 渲染器那边 "没有转场" 是 None，不是字符串 "none"。
+            fields["video_transition_mode"] = (
+                None if not chosen or chosen == "none" else SCENE_TRANSITIONS[chosen]
+            )
+
+        if image_motion is not None:
+            motion = str(image_motion).strip()
+            if motion and motion not in SCENE_MOTIONS:
+                raise SceneError(
+                    f"unknown picture motion {motion!r}; pick one of: "
+                    f"{', '.join(SCENE_MOTIONS)}"
+                )
+            if motion:
+                fields["image_motion"] = motion
+
+        if fields:
+            _patch_params(task_id, **fields)
+
+        if apply_to_scenes and transition is not None:
+            scenes = scene_manifest.load(task_id)["scenes"]
+            cleared = 0
+            for scene in scenes:
+                if scene.pop("transition", None) is not None:
+                    cleared += 1
+            if cleared:
+                scene_manifest.save_scenes(task_id, scenes)
+                logger.info(
+                    f"cleared {cleared} per-scene transitions of task {task_id}"
+                )
+    return video_effects(task_id)
+
+
 def cut_sound_settings(task_id: str) -> dict:
     """整条片子在每一刀上响的那一声，以及可选的音效。"""
     params = load_params(task_id)

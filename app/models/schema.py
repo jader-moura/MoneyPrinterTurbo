@@ -757,6 +757,18 @@ class SubtitleStyleRequest(BaseModel):
     custom_position: Optional[float] = None
 
 
+class VideoEffectsRequest(BaseModel):
+    """整条片子的转场和运镜。
+
+    ``apply_to_scenes`` 打开时顺手清掉每一段自己挑过的转场，否则"全部改掉"
+    之后那几段仍然我行我素。
+    """
+
+    transition: Optional[str] = None
+    image_motion: Optional[str] = None
+    apply_to_scenes: bool = False
+
+
 class CutSoundRequest(BaseModel):
     """整条片子在每一刀上响的那一声。``sound`` 空字符串表示一刀都不响。"""
 

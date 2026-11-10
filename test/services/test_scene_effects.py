@@ -836,3 +836,75 @@ class TestTheLibrary:
         response = client.get("/api/v1/library?page=1&page_size=5")
         assert response.status_code == 200
         assert response.json()["data"]["total"] == 1
+
+
+class TestTheWholeVideosTransition:
+    """一次改掉整条片子的转场，以及那几段自己挑过的怎么办。"""
+
+    def test_reading_it_back_counts_the_scenes_that_went_their_own_way(self, task_root):
+        task_id, _ = _reviewed_task(task_root)
+        assert scene_editor.video_effects(task_id)["scenes_with_own_transition"] == 0
+        scene_editor.set_effects(task_id, 0, transition="fade_in")
+        data = scene_editor.video_effects(task_id)
+        assert data["scenes_with_own_transition"] == 1
+        assert data["scenes"] == 2
+
+    def test_setting_it_changes_the_whole_video(self, task_root):
+        task_id, _ = _reviewed_task(task_root)
+        scene_editor.set_video_effects(task_id, transition="fade_in")
+        params = scene_editor.load_params(task_id)
+        assert _enum_value_of(params.video_transition_mode) == (
+            VideoTransitionMode.fade_in.value
+        )
+
+    def test_none_means_no_transition_not_the_string_none(self, task_root):
+        """渲染器那边"没有转场"是 None，字符串 "none" 会被当成一个未知模式。"""
+        task_id, _ = _reviewed_task(task_root)
+        scene_editor.set_video_effects(task_id, transition="none")
+        raw = scene_manifest.load_raw(task_id)["params"]
+        assert raw["video_transition_mode"] is None
+
+    def test_scenes_keep_their_own_choice_by_default(self, task_root):
+        task_id, _ = _reviewed_task(task_root)
+        scene_editor.set_effects(task_id, 0, transition="zoom_in")
+        scene_editor.set_video_effects(task_id, transition="fade_in")
+        assert scene_manifest.load(task_id)["scenes"][0]["transition"] == (
+            VideoTransitionMode.zoom_in.value
+        )
+
+    def test_applying_to_every_scene_clears_the_individual_choices(self, task_root):
+        """不清掉的话，"全部改成淡入"之后那几段纹丝不动，看起来像没存上。"""
+        task_id, _ = _reviewed_task(task_root)
+        scene_editor.set_effects(task_id, 0, transition="zoom_in")
+        scene_editor.set_effects(task_id, 1, transition="slide_in")
+        data = scene_editor.set_video_effects(
+            task_id, transition="fade_in", apply_to_scenes=True
+        )
+        assert data["scenes_with_own_transition"] == 0
+        for scene in scene_manifest.load(task_id)["scenes"]:
+            assert "transition" not in scene
+
+    def test_an_unknown_transition_is_refused(self, task_root):
+        task_id, _ = _reviewed_task(task_root)
+        with pytest.raises(scene_editor.SceneError) as error:
+            scene_editor.set_video_effects(task_id, transition="dissolve")
+        assert "unknown transition" in str(error.value)
+
+    def test_over_http(self, task_root):
+        from fastapi.testclient import TestClient
+
+        from app import asgi
+
+        client = TestClient(asgi.app)
+        task_id, _ = _reviewed_task(task_root)
+        scene_editor.set_effects(task_id, 0, transition="zoom_in")
+        response = client.put(
+            f"/api/v1/tasks/{task_id}/effects",
+            json={"transition": "fade_out", "apply_to_scenes": True},
+        )
+        assert response.status_code == 200
+        assert response.json()["data"]["scenes_with_own_transition"] == 0
+
+
+def _enum_value_of(value):
+    return getattr(value, "value", value)

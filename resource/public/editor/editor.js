@@ -53,6 +53,11 @@ const ui = {
   renderBar: el("render-bar"), renderPct: el("render-pct"),
   renderElapsed: el("render-elapsed"), renderHide: el("render-hide"),
   renderPlay: el("render-play"), renderDone: el("render-done"),
+  effectsToggle: el("effects-toggle"), effectsPanel: el("effects-panel"),
+  effectsTransition: el("effects-transition"), effectsMotion: el("effects-motion"),
+  effectsApply: el("effects-apply"), effectsOwn: el("effects-own"),
+  effectsSave: el("effects-save"), effectsClose: el("effects-close"),
+  effectsNote: el("effects-note"),
 };
 
 const state = {
@@ -641,6 +646,7 @@ function draw() {
   ui.scriptToggle.disabled = !state.data;
   ui.musicToggle.disabled = !state.data;
   ui.subsToggle.disabled = !state.data;
+  ui.effectsToggle.disabled = !state.data;
   ui.placeholder.hidden = ready;
   ui.playhead.hidden = !ready;
   ui.frame.classList.toggle("ready", ready);
@@ -2114,6 +2120,64 @@ ui.libraryToggle.addEventListener("click", () => {
 ui.libraryClose.addEventListener("click", closeLibrary);
 ui.libraryMore.addEventListener("click", () =>
   loadLibrary((state.libraryPage || 1) + 1));
+
+/* ---------- 整条片子的转场 ----------
+
+   单段那个下拉框只管一段。"全部换成淡入"是另一件事，而且必须说清楚那几个
+   自己挑过的段落会怎样——否则用户改完整条，看到几段纹丝不动，只会以为没存
+   上。 */
+function fillEffectsPanel(data) {
+  const fill = (select, ids, labels, chosen) => {
+    select.innerHTML = "";
+    for (const id of ids || []) {
+      const option = document.createElement("option");
+      option.value = id;
+      option.textContent = labels[id] || id;
+      select.appendChild(option);
+    }
+    if (chosen) select.value = chosen;
+  };
+  fill(ui.effectsTransition, data.transitions, TRANSITION_LABELS,
+    data.transition || "none");
+  fill(ui.effectsMotion, data.image_motions, MOTION_LABELS,
+    data.image_motion || "zoom");
+
+  const own = Number(data.scenes_with_own_transition || 0);
+  ui.effectsOwn.textContent = own
+    ? `${own} scene${own === 1 ? "" : "s"} chose ${own === 1 ? "its" : "their"} `
+      + "own transition and will keep it unless you tick the box."
+    : "No scene has chosen its own, so this applies to all of them.";
+  ui.effectsApply.checked = false;
+  ui.effectsNote.textContent = "";
+}
+
+async function openEffects() {
+  ui.effectsPanel.hidden = false;
+  ui.effectsNote.textContent = "Loading…";
+  try {
+    fillEffectsPanel((await call("GET",
+      `/tasks/${encodeURIComponent(state.taskId)}/effects`)) || {});
+  } catch (error) {
+    ui.effectsNote.textContent = String(error.message || error);
+  }
+}
+
+function closeEffects() { ui.effectsPanel.hidden = true; }
+
+ui.effectsToggle.addEventListener("click", () => {
+  if (ui.effectsPanel.hidden) openEffects(); else closeEffects();
+});
+ui.effectsClose.addEventListener("click", closeEffects);
+
+ui.effectsSave.addEventListener("click", () => run("Saving the effects", async () => {
+  await call("PUT", `/tasks/${encodeURIComponent(state.taskId)}/effects`, {
+    transition: ui.effectsTransition.value,
+    image_motion: ui.effectsMotion.value,
+    apply_to_scenes: ui.effectsApply.checked,
+  });
+  closeEffects();
+  return "";
+}));
 
 /* ---------- 字幕的样子 ----------
 

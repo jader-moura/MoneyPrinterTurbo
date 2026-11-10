@@ -34,6 +34,7 @@ from app.models.schema import (
     BackgroundMusicRequest,
     BackgroundMusicResponse,
     CutSoundRequest,
+    VideoEffectsRequest,
     SubtitleEditRequest,
     SubtitleStyleRequest,
     NarrationScriptRequest,
@@ -210,6 +211,46 @@ def update_subtitle_style(
         request_id,
         lambda: scene_editor.set_subtitle_style(
             task_id, **body.model_dump(exclude_none=True)
+        ),
+    )
+    return utils.get_response(200, data)
+
+
+@router.get(
+    "/tasks/{task_id}/effects",
+    summary="The transition and motion used by the whole video",
+)
+def read_video_effects(request: Request, task_id: str = Path(..., description="Task ID")):
+    request_id = base.get_task_id(request)
+    _require_task(task_id, request_id)
+    data = _handle(task_id, request_id, lambda: scene_editor.video_effects(task_id))
+    return utils.get_response(200, data)
+
+
+@router.put(
+    "/tasks/{task_id}/effects",
+    summary="Change the transition for the whole video at once",
+)
+def update_video_effects(
+    request: Request,
+    body: VideoEffectsRequest,
+    task_id: str = Path(..., description="Task ID"),
+):
+    """一次改掉整条片子的转场。
+
+    ``apply_to_scenes`` 打开时顺手清掉每一段自己挑过的那个，否则改完之后
+    那几段仍然我行我素。
+    """
+    request_id = base.get_task_id(request)
+    _require_task(task_id, request_id)
+    data = _handle(
+        task_id,
+        request_id,
+        lambda: scene_editor.set_video_effects(
+            task_id,
+            transition=body.transition,
+            image_motion=body.image_motion,
+            apply_to_scenes=body.apply_to_scenes,
         ),
     )
     return utils.get_response(200, data)

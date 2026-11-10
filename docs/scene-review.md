@@ -110,6 +110,7 @@ curl -X POST localhost:8080/api/v1/tasks/$TASK/render
 | `PUT /api/v1/tasks/{id}/scenes/{i}/effects` | `transition`, `image_motion`, `cut_sound` for one scene |
 | `PUT /api/v1/tasks/{id}/subtitles/{i}` | fix one caption's words, leaving the voice alone |
 | `GET`/`PUT /api/v1/tasks/{id}/subtitles/style` | caption font, size, colour, outline, box, position |
+| `GET`/`PUT /api/v1/tasks/{id}/effects` | the transition for the whole video; `apply_to_scenes` clears per-scene choices |
 | `GET`/`PUT /api/v1/tasks/{id}/cut-sound` | the sound at every cut, or `""` to remove it |
 | `GET /api/v1/library` | every task on disk, newest first, paged |
 | `GET /api/v1/cut-sound/{name}` | play one transition sound in the editor |
@@ -176,6 +177,11 @@ message says what. Nothing falls back to another provider silently.
   real font at the real size. Colours are `#RRGGBB`; an unknown font or
   position is refused when it is chosen, not when the render reaches the last
   step.
+* **The transition can be changed for the whole video at once.** `PUT
+  .../effects` sets the one used wherever a scene has not chosen its own.
+  Scenes that did choose keep their choice unless `apply_to_scenes` is set,
+  which clears them — without that, changing the video-wide transition leaves
+  those scenes untouched and looks like the change did not save.
 * **The cut sound can be taken off entirely.** `PUT .../cut-sound` with an
   empty `sound` removes it from the whole video; a scene's own `cut_sound`
   only ever silences its own cut. The volume stays video-wide.
