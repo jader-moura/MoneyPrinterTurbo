@@ -377,6 +377,11 @@
       <button id="play" class="btn" disabled>Play</button>
       <span id="clock" class="clock">0:00 / 0:00</span>
       <button id="fit" class="btn small" hidden>Fit to narration</button>
+      <!-- 片长上限。CapCut 上那条线：设了它不会自动改任何东西，它只是
+           给画面、配音和配乐一个共同的对齐基准,对着它去挤或者拉。 -->
+      <label class="limit" title="A length to align against, like the limit in CapCut. Nothing is changed automatically — the marker just gives the pictures, the voice and the music one line to aim at.">Limit
+        <input id="limit" class="limit-input" type="text" inputmode="decimal" placeholder="none" autocomplete="off">
+      </label>
       <span id="settings" class="settings"></span>
       <label class="zoom">Zoom
         <input id="zoom" type="range" min="20" max="240" value="80">
@@ -406,6 +411,10 @@
     <!-- 背景音乐。配乐属于整条片子，所以这条轨道从头铺到尾——它是一条
          "这里一直有音乐"的说明，不是可以逐段编辑的东西。 -->
     <div id="music-lane" class="track short"></div>
+    <!-- 上限那条线，以及它右边超出去的那一截。播放头要压在它们上面，
+         所以放在播放头前面。 -->
+    <div id="limit-over" class="limit-over" hidden></div>
+    <div id="limit-line" class="limit-line" hidden></div>
     <div id="playhead" class="playhead" hidden></div>
   </div>
 </section>

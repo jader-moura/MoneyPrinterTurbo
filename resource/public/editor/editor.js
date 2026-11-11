@@ -14,6 +14,8 @@ const MIN_DURATION = 0.2;
 const el = (id) => document.getElementById(id);
 const ui = {
   task: el("task"), load: el("load"), totals: el("totals"),
+  limit: el("limit"), limitLine: el("limit-line"),
+  limitOver: el("limit-over"),
   rerecord: el("rerecord"), render: el("render"), banner: el("banner"),
   preview: el("preview"), placeholder: el("placeholder"), play: el("play"),
   clock: el("clock"), zoom: el("zoom"), inspTitle: el("insp-title"),
@@ -123,6 +125,9 @@ const state = {
   watching: false,
   wasBusy: false,
   selected: -1,
+  // 片长上限。``null`` 是没设。只是这台浏览器上的一个对齐基准,
+  // 不参与渲染,所以存在 localStorage 而不是清单里。
+  limit: null,
   pxPerSecond: 80,
   playhead: 0,
   playing: false,
@@ -188,7 +193,9 @@ function narrationLength() {
 }
 
 function projectTotal() {
-  return Math.max(timelineTotal(), narrationLength());
+  // 上限也算进总长：上限设得比内容长时，那条线必须还在可见范围里，
+  // 否则用户设了一个看不见的基准。
+  return Math.max(timelineTotal(), narrationLength(), state.limit || 0);
 }
 
 /** 每一段的起点（成片时间轴上的秒数）。 */
@@ -251,6 +258,7 @@ async function call(method, path, body) {
 async function load(taskId) {
   if (!taskId) return;
   state.taskId = taskId.trim();
+  loadLimit();
   say("Loading…");
   try {
     const data = await call("GET", `/tasks/${encodeURIComponent(state.taskId)}/timeline`);
@@ -824,6 +832,7 @@ function draw() {
   drawMusicTrack();
   drawInspector();
   drawTotals();
+  drawLimit();
   drawSettings();
   drawQueue();
   drawApprove();
@@ -1153,8 +1162,24 @@ function drawTotals() {
       label += gap > 0 ? ` (+${gap.toFixed(1)}s silent tail)` : ` (${gap.toFixed(1)}s, voice cut off)`;
     }
   }
+  // 上限是用户自己设的那条线，所以状态栏里也要给出"离它还差多少"——
+  // 那个数就是他要挤掉或者补上的量。
+  let overLimit = false;
+  if (state.limit) {
+    const over = total - state.limit;
+    label += ` · limit ${fmt(state.limit)}`;
+    if (Math.abs(over) > 0.05) {
+      overLimit = over > 0;
+      label += over > 0
+        ? ` (${over.toFixed(1)}s over)`
+        : ` (${(-over).toFixed(1)}s to fill)`;
+    }
+  }
+
   ui.totals.textContent = label;
-  ui.totals.className = "totals" + (drift ? " drift" : "");
+  ui.totals.className = "totals"
+    + (drift ? " drift" : "")
+    + (overLimit ? " over-limit" : "");
 
   // 对不齐的时候才给这个按钮：素材张数由关键词个数决定，画面比旁白短是
   // 常态，而这是"同样的画面每段停更久"那个答案。
@@ -1164,6 +1189,93 @@ function drawTotals() {
     + `${(narration / state.scenes.length).toFixed(1)}s each). `
     + "Generated images are re-rendered at the new length.";
 }
+
+/* ---------- 片长上限 ----------
+
+   CapCut 上那条线。用户要的不是"帮我剪到 60 秒"，而是"给我一条线，我自己
+   对着它挤"。所以这里设了之后什么都不会自动改：画面、配音、配乐对着同一
+   条线去调，比盯着状态栏里三个数字互相对要容易得多。
+
+   存在 localStorage 而不是清单里：它不参与渲染，改它不该让任务变脏，也不
+   该要求后端多一个字段。读不出来就当没设。 */
+
+/** "60"、"1:30"、"90s" 都认，读不出来就是没设上限。
+
+    用户脑子里的片长可能是秒也可能是分秒，两种都认比强迫他换算要好。 */
+function parseLimit(text) {
+  const raw = String(text == null ? "" : text).trim().replace(/s$/i, "");
+  if (!raw) return null;
+  const parts = raw.split(":");
+  let seconds = NaN;
+  if (parts.length === 2) {
+    const minutes = parseFloat(parts[0]);
+    const rest = parseFloat(parts[1]);
+    if (isFinite(minutes) && isFinite(rest)) seconds = minutes * 60 + rest;
+  } else if (parts.length === 1) {
+    seconds = parseFloat(raw);
+  }
+  if (!isFinite(seconds) || seconds <= 0) return null;
+  return Math.round(seconds * 10) / 10;
+}
+
+/** 输入框里显示成什么样：一分钟以内就写秒数，过了就写 m:ss。 */
+function limitText(seconds) {
+  if (!seconds) return "";
+  return seconds >= 60 ? fmt(seconds) : String(seconds).replace(/\.0$/, "");
+}
+
+function limitKey() {
+  return state.taskId ? `mpt_limit_${state.taskId}` : "";
+}
+
+/** 换任务时读回这条任务自己的上限。 */
+function loadLimit() {
+  state.limit = null;
+  const key = limitKey();
+  if (key) {
+    try { state.limit = parseLimit(localStorage.getItem(key)); } catch { }
+  }
+  ui.limit.value = limitText(state.limit);
+}
+
+function saveLimit() {
+  const key = limitKey();
+  if (!key) return;
+  // 隐私模式下存不进去。这只是个顺手的基准，不该因为存不上就报错。
+  try {
+    if (state.limit) localStorage.setItem(key, String(state.limit));
+    else localStorage.removeItem(key);
+  } catch { }
+}
+
+/** 上限那条线，以及它右边超出去的那一截。 */
+function drawLimit() {
+  const limit = state.limit;
+  if (!limit) {
+    ui.limitLine.hidden = true;
+    ui.limitOver.hidden = true;
+    return;
+  }
+  ui.limitLine.hidden = false;
+  ui.limitLine.style.left = (limit * state.pxPerSecond) + "px";
+  ui.limitLine.dataset.label = fmt(limit);
+  ui.limitLine.title = `Limit ${fmt(limit)}`;
+
+  // 超出去的那一截铺成斜纹，用户一眼看到的是"还要挤掉这么多"。
+  const over = Math.max(0, projectTotal() - limit);
+  ui.limitOver.hidden = over <= 0.05;
+  ui.limitOver.style.left = (limit * state.pxPerSecond) + "px";
+  ui.limitOver.style.width = (over * state.pxPerSecond) + "px";
+  ui.limitOver.title = `${over.toFixed(1)}s past the ${fmt(limit)} limit`;
+}
+
+ui.limit.addEventListener("change", () => {
+  state.limit = parseLimit(ui.limit.value);
+  // 回写一遍：用户打的是 "90"，线上写的是 1:30，两边要说同一件事。
+  ui.limit.value = limitText(state.limit);
+  saveLimit();
+  draw();
+});
 
 /* ---------- 提示词随改随存 ----------
 

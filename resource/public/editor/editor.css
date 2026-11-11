@@ -870,6 +870,73 @@ body {
   clip-path: polygon(0 0, 100% 0, 50% 100%);
 }
 
+/* ---------- 片长上限 ---------- */
+
+/* CapCut 上那条线。设了它不会自动改任何东西：它只是给画面、配音和配乐一个
+   共同的对齐基准，对着它去挤或者拉——这比盯着状态栏里三个数字互相对要容易
+   得多,而"容易"正是这个功能的全部意义。 */
+.limit {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.limit-input {
+  width: 64px;
+  padding: 3px 6px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--panel);
+  color: var(--text);
+  font: inherit;
+  font-variant-numeric: tabular-nums;
+  text-align: center;
+}
+.limit-input:focus { outline: 1px solid var(--accent); border-color: var(--accent); }
+
+.limit-line {
+  position: absolute;
+  top: 0;
+  bottom: 12px;
+  width: 1px;
+  background: var(--accent);
+  pointer-events: none;
+  z-index: 7;
+}
+/* 线顶上那块小牌子写着上限是多少。光一条竖线看不出它是第几秒,而"第几秒"
+   正是用户要对的那个数。 */
+.limit-line::before {
+  content: attr(data-label);
+  position: absolute;
+  top: 0;
+  left: 3px;
+  padding: 0 4px;
+  border-radius: 3px;
+  background: var(--accent);
+  color: #0b0b0c;
+  font-size: 10px;
+  font-weight: 600;
+  line-height: 14px;
+  white-space: nowrap;
+}
+
+/* 超出上限的那一截。画成斜纹而不是红底：它是"还要挤掉这么多"的量,
+   不是一个错误——用户完全可以就这么渲出去。 */
+.limit-over {
+  position: absolute;
+  top: 0;
+  bottom: 12px;
+  pointer-events: none;
+  z-index: 2;
+  background: repeating-linear-gradient(
+    45deg, rgba(224, 92, 92, .13), rgba(224, 92, 92, .13) 7px,
+    transparent 7px, transparent 14px
+  );
+}
+
+.totals.over-limit { color: var(--danger); }
+
 /* ---------- YouTube 的文案和封面 ---------- */
 
 /* "还能写多少字"。标题超过 100 就发不出去，所以超了标红——保存时才报错
