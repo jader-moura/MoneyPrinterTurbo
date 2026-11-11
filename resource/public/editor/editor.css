@@ -901,13 +901,28 @@ body {
   bottom: 12px;
   width: 1px;
   background: var(--accent);
-  pointer-events: none;
+  cursor: ew-resize;
   z-index: 7;
+  touch-action: none;
 }
+/* 1px 宽的线是抓不住的。往两边各加 5px 的透明抓取区，手感才和 CapCut 一样
+   ——这条线存在的意义就是"拿着它去对齐",抓不住就等于没有。 */
+.limit-line::after {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  left: -5px;
+  width: 11px;
+}
+.limit-line:hover,
+.limit-line.dragging { box-shadow: 0 0 0 1px var(--accent); }
 /* 线顶上那块小牌子写着上限是多少。光一条竖线看不出它是第几秒,而"第几秒"
    正是用户要对的那个数。 */
+/* 顶上那块牌子也是把手：它比线宽，是最顺手的抓取点。 */
 .limit-line::before {
   content: attr(data-label);
+  cursor: ew-resize;
   position: absolute;
   top: 0;
   left: 3px;

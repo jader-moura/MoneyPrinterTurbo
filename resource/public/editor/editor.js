@@ -832,7 +832,7 @@ function draw() {
   drawMusicTrack();
   drawInspector();
   drawTotals();
-  drawLimit();
+  paintLimit();
   drawSettings();
   drawQueue();
   drawApprove();
@@ -1248,8 +1248,11 @@ function saveLimit() {
   } catch { }
 }
 
-/** 上限那条线，以及它右边超出去的那一截。 */
-function drawLimit() {
+/** 上限那条线，以及它右边超出去的那一截。
+
+    拖动时每帧都要走这里，所以它只动这几个节点，不重画整条时间线——
+    重画会把每段画面连缩略图一起重建，拖起来就卡住了。 */
+function paintLimit() {
   const limit = state.limit;
   if (!limit) {
     ui.limitLine.hidden = true;
@@ -1259,7 +1262,7 @@ function drawLimit() {
   ui.limitLine.hidden = false;
   ui.limitLine.style.left = (limit * state.pxPerSecond) + "px";
   ui.limitLine.dataset.label = fmt(limit);
-  ui.limitLine.title = `Limit ${fmt(limit)}`;
+  ui.limitLine.title = `Limit ${fmt(limit)} — drag to move, Alt to ignore the cuts`;
 
   // 超出去的那一截铺成斜纹，用户一眼看到的是"还要挤掉这么多"。
   const over = Math.max(0, projectTotal() - limit);
@@ -1267,7 +1270,84 @@ function drawLimit() {
   ui.limitOver.style.left = (limit * state.pxPerSecond) + "px";
   ui.limitOver.style.width = (over * state.pxPerSecond) + "px";
   ui.limitOver.title = `${over.toFixed(1)}s past the ${fmt(limit)} limit`;
+
+  // 拖的时候输入框要跟着走，否则线到了位置、框里的数字还停在原处。
+  if (document.activeElement !== ui.limit) ui.limit.value = limitText(limit);
+
+  // 拖过内容末尾时把轨道撑长，否则线会跑到可视区外面去。
+  const needed = (limit * state.pxPerSecond) + 60;
+  for (const node of [ui.ruler, ui.videoTrack, ui.audioTrack]) {
+    if (needed > parseFloat(node.style.width || "0")) node.style.width = needed + "px";
+  }
 }
+
+/** 这条线可以吸附到哪些位置。
+
+    "对齐"要的是**正好**落在某个切点上，不是差 0.2 秒。所以拖的时候给每个
+    画面的出入点、旁白结尾一个吸附：松手的位置就是真正的切点,而不是用户
+    手抖之后的那个数。按住 Alt 可以不吸附。 */
+function limitSnapPoints() {
+  const points = [];
+  const offsets = sceneOffsets();
+  offsets.forEach((start, index) => {
+    points.push(start);
+    points.push(start + screenDuration(state.scenes[index]));
+  });
+  const narration = narrationLength();
+  if (narration) points.push(narration);
+  return points;
+}
+
+/** 拖动上限那条线。
+
+    输入框是用来打一个准数的，这条线是用来"对着看"的——而对齐这件事手比
+    眼睛准：把线拖到那一刀上，比读出那一刀是 12.4 秒再去框里打一遍快得多。 */
+function startLimitDrag(event) {
+  if (!state.limit) return;
+  event.preventDefault();
+  event.stopPropagation();
+
+  const startX = event.clientX;
+  const startLimit = state.limit;
+  let next = startLimit;
+  ui.limitLine.classList.add("dragging");
+
+  const onMove = (move) => {
+    const delta = (move.clientX - startX) / state.pxPerSecond;
+    next = Math.max(0.1, startLimit + delta);
+
+    // 吸附在屏幕上量，不在秒上量：缩放变了，手感不该跟着变。
+    if (!move.altKey) {
+      const reach = 6 / state.pxPerSecond;
+      let best = null;
+      for (const point of limitSnapPoints()) {
+        const gap = Math.abs(point - next);
+        if (gap <= reach && (best === null || gap < Math.abs(best - next))) {
+          best = point;
+        }
+      }
+      if (best !== null) next = best;
+    }
+    next = Math.round(next * 10) / 10;
+    state.limit = next;
+    paintLimit();
+    drawTotals();
+  };
+
+  const onUp = () => {
+    window.removeEventListener("pointermove", onMove);
+    window.removeEventListener("pointerup", onUp);
+    ui.limitLine.classList.remove("dragging");
+    saveLimit();
+    // 松手之后整条重画一次：上限拖过了内容末尾时，标尺要跟着长出来。
+    draw();
+  };
+
+  window.addEventListener("pointermove", onMove);
+  window.addEventListener("pointerup", onUp);
+}
+
+ui.limitLine.addEventListener("pointerdown", startLimitDrag);
 
 ui.limit.addEventListener("change", () => {
   state.limit = parseLimit(ui.limit.value);
