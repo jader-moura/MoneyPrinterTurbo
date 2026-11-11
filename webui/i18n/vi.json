@@ -563,6 +563,9 @@
     "Pick Scene To Replace": "Cảnh nào?",
     "Align Visuals To Narration": "Khớp mỗi hình ảnh với câu lời bình",
     "Align Visuals To Narration Help": "Hỏi mô hình xem mỗi câu nói về điều gì rồi tạo hình cho chính câu đó, thay vì lấy vài chủ đề cho cả kịch bản. Khắc phục việc hình ảnh thuộc về phần khác của video. Tạo một hình mỗi câu nên nguồn tư liệu trả phí sẽ tốn hơn.",
+    "Keywords Override Alignment Drawn": "Những từ khoá này giờ chính là prompt ảnh. Chừng nào ô này còn nội dung, “Khớp mỗi hình với dòng lời dẫn của nó” sẽ không có tác dụng: mọi hình đều được vẽ từ danh sách này, lặp lại theo thứ tự, nên không hình nào bám theo điều đang được nói lúc đó. Khi tạo kịch bản, ô này được điền tự động, hãy kiểm tra trước khi vẽ. Xoá trống ô để mỗi dòng lời dẫn có một prompt riêng.",
+    "Keywords Override Alignment Searched": "Những từ khoá này giờ chính là truy vấn tìm kiếm. Chừng nào ô này còn nội dung, “Khớp mỗi hình với dòng lời dẫn của nó” sẽ không có tác dụng: mọi clip đều được tìm từ danh sách này, lặp lại theo thứ tự. Khi tạo kịch bản, ô này được điền tự động, hãy kiểm tra trước. Xoá trống ô để tìm theo từng dòng lời dẫn.",
+    "Clear Video Keywords": "Xoá từ khoá và khớp theo lời dẫn",
     "Review Prompts Before Drawing": "Check the prompts before drawing",
     "Review Prompts Before Drawing Help": "For generated images: stops once the narration and the prompts are ready, so you can read each prompt against the line it plays over and change it before anything is drawn. Drawing is the slowest, most expensive step. Untick to draw everything in one go."
   }

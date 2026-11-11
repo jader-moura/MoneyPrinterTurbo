@@ -563,6 +563,9 @@
     "Pick Scene To Replace": "Adegan yang mana?",
     "Align Visuals To Narration": "Cocokkan tiap gambar dengan baris narasinya",
     "Align Visuals To Narration Help": "Menanyakan ke model tentang isi tiap baris yang diucapkan lalu membuat gambar untuk baris itu, bukan beberapa topik untuk seluruh naskah. Memperbaiki gambar yang sebenarnya milik bagian lain video. Menghasilkan satu gambar per baris, sehingga sumber materi berbayar jadi lebih mahal.",
+    "Keywords Override Alignment Drawn": "Kata kunci ini sekarang menjadi prompt gambar. Selama kotak ini terisi, “Cocokkan setiap gambar dengan baris narasinya” tidak melakukan apa pun: setiap gambar digambar dari daftar ini, diulang berurutan, sehingga tidak ada yang mengikuti apa yang sedang diucapkan saat itu. Membuat naskah akan mengisi kotak ini secara otomatis, jadi periksa sebelum menggambar. Kosongkan untuk mendapatkan satu prompt per baris narasi.",
+    "Keywords Override Alignment Searched": "Kata kunci ini sekarang menjadi kueri pencarian. Selama kotak ini terisi, “Cocokkan setiap gambar dengan baris narasinya” tidak melakukan apa pun: setiap klip dicari dari daftar ini, diulang berurutan. Membuat naskah akan mengisi kotak ini secara otomatis, jadi periksa dahulu. Kosongkan untuk mencari per baris narasi.",
+    "Clear Video Keywords": "Kosongkan kata kunci dan selaraskan dengan narasi",
     "Review Prompts Before Drawing": "Check the prompts before drawing",
     "Review Prompts Before Drawing Help": "For generated images: stops once the narration and the prompts are ready, so you can read each prompt against the line it plays over and change it before anything is drawn. Drawing is the slowest, most expensive step. Untick to draw everything in one go."
   }

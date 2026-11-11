@@ -563,6 +563,9 @@
     "Pick Scene To Replace": "Hansı səhnə?",
     "Align Visuals To Narration": "Hər şəkli öz mətn sətri ilə uyğunlaşdır",
     "Align Visuals To Narration Help": "Bütün ssenari üçün bir neçə mövzu götürmək əvəzinə, hər deyilən sətrin nədən bəhs etdiyini modeldən soruşur və həmin sətir üçün şəkil yaradır. Videonun başqa hissəsinə aid şəkilləri düzəldir. Sətir başına bir şəkil yaratdığı üçün ödənişli mənbələr daha baha başa gəlir.",
+    "Keywords Override Alignment Drawn": "Bu açar sözlər artıq şəkil promptlarının özüdür. Bu xanada nəsə olduğu müddətcə “Hər şəkli öz danışıq sətri ilə uyğunlaşdır” heç nə etmir: hər şəkil bu siyahıdan, ardıcıl təkrarlanaraq çəkilir və heç biri o anda deyilənlə uyğun gəlmir. Ssenari yaradılanda bu xana avtomatik dolur, ona görə çəkməzdən əvvəl yoxlayın. Hər danışıq sətri üçün bir prompt almaq üçün xananı boşaldın.",
+    "Keywords Override Alignment Searched": "Bu açar sözlər artıq axtarış sorğularının özüdür. Bu xanada nəsə olduğu müddətcə “Hər şəkli öz danışıq sətri ilə uyğunlaşdır” heç nə etmir: hər klip bu siyahıdan, ardıcıl təkrarlanaraq axtarılır. Ssenari yaradılanda bu xana avtomatik dolur, ona görə əvvəlcədən yoxlayın. Hər danışıq sətri üzrə axtarmaq üçün xananı boşaldın.",
+    "Clear Video Keywords": "Açar sözləri təmizlə və danışığa uyğunlaşdır",
     "Review Prompts Before Drawing": "Check the prompts before drawing",
     "Review Prompts Before Drawing Help": "For generated images: stops once the narration and the prompts are ready, so you can read each prompt against the line it plays over and change it before anything is drawn. Drawing is the slowest, most expensive step. Untick to draw everything in one go."
   }

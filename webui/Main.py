@@ -5930,6 +5930,42 @@ def _render_loomloom_script_generation(params):
     _render_loomloom_candidates()
 
 
+def _warn_when_keywords_override_alignment(params):
+    """关键词顶掉逐句配画时就在框底下直说，并给一键清空。
+
+    不自动清空，也不禁用输入框：用户可能就是要用这几个词，而且库存素材源
+    下这个框本来就是搜索词，正当得很。界面该做的是把代价说清楚，再把改回去
+    的路缩短到一次点击。
+
+    判断条件在 ``webui.keyword_alignment`` 里，和 ``task.generate_terms``
+    那一行必须一致。
+    """
+    from webui.keyword_alignment import (
+        keywords_override_alignment,
+        keywords_override_warning_key,
+    )
+
+    align_on = st.session_state.get(
+        "align_terms_to_narration",
+        config.app.get("align_terms_to_narration", True),
+    )
+    if not keywords_override_alignment(params.video_terms, align_on):
+        return
+    source = st.session_state.get("video_source_select") or config.app.get(
+        "video_source", const.DEFAULT_VIDEO_SOURCE
+    )
+    st.warning(tr(keywords_override_warning_key(source)))
+    if st.button(
+        tr("Clear Video Keywords"),
+        key="clear_video_terms",
+        use_container_width=True,
+    ):
+        # 清空得赶在组件创建之前：Streamlit 不允许组件实例化之后再改它自己
+        # 的 session_state 值。所以这里只留个请求，下一轮开头执行。
+        st.session_state["video_terms_clear_requested"] = True
+        st.rerun()
+
+
 def _render_script_settings(panel, params):
     """渲染文案设置并更新生成参数。"""
     with panel:
@@ -6118,11 +6154,14 @@ def _render_script_settings(panel, params):
                         else:
                             st.session_state["video_terms"] = ", ".join(terms)
 
+            if st.session_state.pop("video_terms_clear_requested", False):
+                st.session_state["video_terms"] = ""
             params.video_terms = st.text_area(
                 tr("Video Keywords"),
                 help=tr("Video Keywords Help"),
                 key="video_terms",
             )
+            _warn_when_keywords_override_alignment(params)
 
 
 def _render_video_settings(panel, params):

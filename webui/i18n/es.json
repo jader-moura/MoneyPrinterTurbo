@@ -563,6 +563,9 @@
     "Pick Scene To Replace": "¿Qué escena?",
     "Align Visuals To Narration": "Ajustar cada imagen a su línea de narración",
     "Align Visuals To Narration Help": "Pregunta al modelo de qué trata cada línea hablada y genera una imagen para esa línea, en vez de unos pocos temas para todo el guion. Corrige imágenes que pertenecen a otra parte del vídeo. Genera una imagen por línea, por lo que las fuentes de pago cuestan más.",
+    "Keywords Override Alignment Drawn": "Estas palabras clave son ahora los prompts de imagen. Mientras haya algo en esta casilla, «Que cada imagen corresponda a su línea de narración» no hace nada: cada imagen se dibuja a partir de esta lista, repetida en orden, y ninguna sigue lo que se dice en ese momento. Generar un guión rellena esta casilla automáticamente, así que revísala antes de dibujar. Vacíala para obtener un prompt por línea de narración.",
+    "Keywords Override Alignment Searched": "Estas palabras clave son ahora las consultas de búsqueda. Mientras haya algo en esta casilla, «Que cada imagen corresponda a su línea de narración» no hace nada: cada clip se busca a partir de esta lista, repetida en orden. Generar un guión rellena esta casilla automáticamente, así que revísala antes. Vacíala para buscar por cada línea de narración.",
+    "Clear Video Keywords": "Vaciar las palabras clave y alinear con la narración",
     "Review Prompts Before Drawing": "Check the prompts before drawing",
     "Review Prompts Before Drawing Help": "For generated images: stops once the narration and the prompts are ready, so you can read each prompt against the line it plays over and change it before anything is drawn. Drawing is the slowest, most expensive step. Untick to draw everything in one go."
   }
