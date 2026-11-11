@@ -529,6 +529,43 @@ def cycle_windows(windows: list[dict], target: Any = 0.0) -> list[dict]:
     return cycled
 
 
+def _windows_from_cues(cues: list[dict], target: float) -> list[dict]:
+    """一段画面一句旁白时，画面的时间段就是那句话的时间段。
+
+    为什么不按比例平分：平分出来的每段一样长，可旁白不是。29 句里
+    "in Texas" 只念了 0.7 秒，后面那句念了 5 秒，平分成每段 3.3 秒之后
+    第一张之后就开始错位，而且越往后偏得越多——用户看到的就是"图和声音
+    不同步"。每句话念了多久，字幕里现成就有，用它对出来的是精确同步。
+
+    边界放在"下一句开始"而不是"这一句结束"：两句之间的停顿要归给前一张
+    图，否则每个停顿都会在轨道上留一条缝，成片里就是一帧黑。第一张从 0
+    开始、最后一张延到音频结尾，同样是为了不留缝。
+
+    One window per spoken line, taken from the subtitle cues rather than
+    spread evenly: lines are not equally long, so an even spread drifts
+    further with every line. Boundaries sit at the *next* line's start so
+    the pause between two lines belongs to the picture already on screen,
+    leaving no gap to render as a black frame.
+    """
+    windows: list[dict] = []
+    for index, cue in enumerate(cues):
+        try:
+            start = 0.0 if index == 0 else float(cues[index]["start"])
+            end = (
+                float(cues[index + 1]["start"])
+                if index + 1 < len(cues)
+                else max(float(cue["end"]), target)
+            )
+        except (TypeError, ValueError, KeyError):
+            return []
+        if end <= start:
+            # 字幕时间不单调（损坏或重叠）时放弃整条，交回按比例铺。
+            # 一段零长或负长的画面会让渲染器直接崩，比对不齐糟得多。
+            return []
+        windows.append({"start": round(start, 3), "end": round(end, 3)})
+    return windows
+
+
 def plan_windows(
     task_id: str,
     scenes: Iterable[dict],
@@ -573,6 +610,29 @@ def plan_windows(
         cap = float(clip_duration) if clip_duration else None
     except (TypeError, ValueError):
         cap = None
+
+    # 一段画面配一句旁白时，先按那句话真正念了多久来铺。这是精确同步，
+    # 下面按比例平分只是没有逐句时间时的近似。条数不等就不能这么认——
+    # 那说明画面和句子本来就不是一对一的，按位置对齐只会对错。
+    #
+    # 用户拖过时间线之后一律按他拖出来的长度算：他看着波形对齐的结果，
+    # 不该被我们再按字幕重算一遍。
+    if not scene_manifest.has_timing_edits(scenes):
+        cues = scene_manifest.narration_segments(task_id)
+        if cues and len(cues) == len(scenes):
+            spoken = _windows_from_cues(cues, target)
+            if spoken:
+                longest = max(item["end"] - item["start"] for item in spoken)
+                if cap and longest > cap + 0.05:
+                    # 不按上限截断：截断就是把错位重新造出来。如实说一句，
+                    # 让用户知道那一句话比他填的单段上限长。
+                    logger.info(
+                        f"holding one picture for {longest:.1f}s to stay with "
+                        f"its narration line, which is longer than the "
+                        f"{cap:.1f}s maximum clip duration; the line decides "
+                        "here, otherwise the pictures drift out of sync"
+                    )
+                return spoken
 
     lengths = [
         _natural_length(
