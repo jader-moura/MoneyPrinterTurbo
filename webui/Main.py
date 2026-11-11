@@ -6538,6 +6538,27 @@ def _render_video_settings(panel, params):
                 bool(st.session_state.get("review_before_render", False)),
             )
 
+            # 出图前先看提示词。文生图默认打开：出图是整条流水线里最慢最贵
+            # 的一步（本机一张几分钟，一条 10 分钟的旁白是两百多张），而提
+            # 示词以前只有在图全画完之后才看得到——那时候改一个字就意味着
+            # 整批重画。关掉它就回到"点一下全跑完"。库存素材源不受影响。
+            #
+            # Prompts are reviewed before drawing, on by default for
+            # generated images: drawing is the slowest, most expensive step,
+            # and the prompts used to be visible only once every picture
+            # existed. Unticking it restores the one-click run.
+            st.checkbox(
+                tr("Review Prompts Before Drawing"),
+                value=bool(config.ui.get("review_prompts_before_images", True)),
+                key="review_prompts_before_images",
+                help=tr("Review Prompts Before Drawing Help"),
+            )
+            _set_runtime_config(
+                "ui",
+                "review_prompts_before_images",
+                bool(st.session_state.get("review_prompts_before_images", True)),
+            )
+
             video_codec_options = [
                 (tr("Default Video Encoder"), DEFAULT_VIDEO_CODEC_OPTION),
                 ("libx264 (CPU)", "libx264"),
@@ -9726,6 +9747,15 @@ def _render_generation_controls(
         review_before_render = bool(
             st.session_state.get("review_before_render", False)
         )
+        # 文生图默认先停在"看提示词"那一步：出图是最慢最贵的一步,而提示词
+        # 以前只有在图全画完之后才看得到。停在字幕,编辑器里摆好位置和提示
+        # 词,用户改完点"开画"才真的开始出图。见 ``task.reviews_prompts_first``。
+        review_prompts = tm.reviews_prompts_first(params)
+        stop_at = (
+            "subtitle" if review_prompts
+            else "materials" if review_before_render
+            else "video"
+        )
         try:
             st.toast(tr("Generating Video"))
             logger.info(tr("Start Generating Video"))
@@ -9734,7 +9764,7 @@ def _render_generation_controls(
                 task_id=task_id,
                 params=params,
                 capture_logs=not config.ui.get("hide_log", False),
-                stop_at="materials" if review_before_render else "video",
+                stop_at=stop_at,
                 voice_preview=reusable_voice_preview,
                 loomloom_video_request=loomloom_video_request,
                 voxcpm_reference_audio=voxcpm_reference_audio,

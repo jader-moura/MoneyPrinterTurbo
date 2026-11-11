@@ -562,6 +562,8 @@
     "Timeline Editor Unavailable": "Editor timeline memerlukan server API, tetapi {base} tidak merespons. Jalankan dengan `python main.py`, atau gunakan `scripts/start-local.sh` yang sekarang ikut menjalankannya.",
     "Pick Scene To Replace": "Adegan yang mana?",
     "Align Visuals To Narration": "Cocokkan tiap gambar dengan baris narasinya",
-    "Align Visuals To Narration Help": "Menanyakan ke model tentang isi tiap baris yang diucapkan lalu membuat gambar untuk baris itu, bukan beberapa topik untuk seluruh naskah. Memperbaiki gambar yang sebenarnya milik bagian lain video. Menghasilkan satu gambar per baris, sehingga sumber materi berbayar jadi lebih mahal."
+    "Align Visuals To Narration Help": "Menanyakan ke model tentang isi tiap baris yang diucapkan lalu membuat gambar untuk baris itu, bukan beberapa topik untuk seluruh naskah. Memperbaiki gambar yang sebenarnya milik bagian lain video. Menghasilkan satu gambar per baris, sehingga sumber materi berbayar jadi lebih mahal.",
+    "Review Prompts Before Drawing": "Check the prompts before drawing",
+    "Review Prompts Before Drawing Help": "For generated images: stops once the narration and the prompts are ready, so you can read each prompt against the line it plays over and change it before anything is drawn. Drawing is the slowest, most expensive step. Untick to draw everything in one go."
   }
 }

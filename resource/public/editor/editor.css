@@ -971,3 +971,37 @@ body {
   .task { width: 140px; }
   .bar { flex-wrap: wrap; }
 }
+
+/* ---------- 还没开画 ----------
+
+   出图是整条流水线里最慢最贵的一步（本机一张几分钟），所以提示词先摆出来
+   给人看过、改过，再开画。这条横幅是那一步的入口：它只在还有画面没画的
+   时候出现，画完就自己消失。
+
+   它排在文档流里（不像队列那块是浮着的）：这不是一条可以忽略的状态提示，
+   而是"这条片子现在卡在你这儿"——它就该占着位置。 */
+.approve {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  margin: 0 0 10px;
+  padding: 10px 14px;
+  border: 1px solid #6b5a28;
+  border-radius: 8px;
+  background: #2a2413;
+  color: #e0c878;
+}
+.approve-text { flex: 1; font-size: 12px; line-height: 1.45; }
+.approve-text strong { display: block; font-size: 13px; color: #f0dca0; }
+.approve .btn { flex: 0 0 auto; }
+
+/* 还没画的那一段。和 .missing（文件不见了）分开：那是出了问题，这是还没
+   开始，不该用报错的颜色去吓人。斜纹底表示"这里将来会有一张图"。 */
+.clip.pending-draw {
+  border-style: dashed;
+  border-color: #6b5a28;
+  background: repeating-linear-gradient(
+    45deg, #2a2413, #2a2413 6px, #221d10 6px, #221d10 12px
+  );
+  color: #e0c878;
+}

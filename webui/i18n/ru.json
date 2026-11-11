@@ -562,6 +562,8 @@
     "Timeline Editor Unavailable": "Редактору таймлайна нужен API-сервер, но {base} не отвечает. Запустите его командой `python main.py` или используйте `scripts/start-local.sh` — теперь он запускается вместе с остальным.",
     "Pick Scene To Replace": "Какая сцена?",
     "Align Visuals To Narration": "Подбирать картинку под каждую реплику",
-    "Align Visuals To Narration Help": "Модель определяет, о чём каждая произносимая строка, и генерирует картинку именно для неё, вместо нескольких тем на весь сценарий. Устраняет картинки из другой части ролика. Создаёт по картинке на строку, поэтому платные источники обойдутся дороже."
+    "Align Visuals To Narration Help": "Модель определяет, о чём каждая произносимая строка, и генерирует картинку именно для неё, вместо нескольких тем на весь сценарий. Устраняет картинки из другой части ролика. Создаёт по картинке на строку, поэтому платные источники обойдутся дороже.",
+    "Review Prompts Before Drawing": "Check the prompts before drawing",
+    "Review Prompts Before Drawing Help": "For generated images: stops once the narration and the prompts are ready, so you can read each prompt against the line it plays over and change it before anything is drawn. Drawing is the slowest, most expensive step. Untick to draw everything in one go."
   }
 }

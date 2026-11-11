@@ -44,6 +44,8 @@ const ui = {
   subsSave: el("subs-save"), subsClose: el("subs-close"), subsNote: el("subs-note"),
   cutSound: el("cut-sound"), cutVolume: el("cut-volume"),
   cutPreview: el("cut-preview"),
+  approve: el("approve"), approveCount: el("approve-count"),
+  approveNote: el("approve-note"), approveDraw: el("approve-draw"),
   libraryToggle: el("library-toggle"), library: el("library"),
   libraryGrid: el("library-grid"), libraryCount: el("library-count"),
   libraryClose: el("library-close"), libraryMore: el("library-more"),
@@ -150,9 +152,21 @@ const TRANSITION_CLASS = {
 
 /* ---------- helpers ---------- */
 
+/** 还没画的那一段：有位置、有提示词，就是还没有画面。
+
+    和"素材文件不见了"分开判断：那是出了问题，这是还没开始。 */
+function isPending(scene) {
+  return !String(scene.material || "").trim();
+}
+
 /** 这一段在成片里停留多久。没设过 duration 就是"素材剩下的全长"。 */
 function screenDuration(scene) {
   if (scene.duration != null) return Math.max(MIN_DURATION, scene.duration);
+  // 还没画的那一段没有素材可量，但它将来会停多久是知道的：出图就是按这个
+  // 时长渲的。用它，时间轴才对得上旁白——而对得上正是这一屏要给用户看的。
+  if (isPending(scene) && scene.clip_duration) {
+    return Math.max(MIN_DURATION, scene.clip_duration);
+  }
   const source = scene.source_duration;
   if (source == null) return 5; // 探测不到时给个占位宽度，免得整条轨道塌掉
   return Math.max(MIN_DURATION, (source - (scene.trim_start || 0)) / state.speed);
@@ -435,10 +449,13 @@ function materialKey(path) {
     两边都认不出来（那一段被删了）就返回 null，由调用方说"没有了"，而不是
     退回一个一定属于别人的编号。 */
 function jobScene(job) {
-  const key = materialKey(job.material);
+  // 身份就是服务端的 ``scene_manifest.scene_id``：有 id 用 id，老清单没有
+  // 这个字段时退回素材文件名。还没出图的那几段根本没有文件，只有 id 认得
+  // 出它们。
+  const key = String(job.scene_id || "");
   if (key) {
     const at = (state.scenes || []).findIndex(
-      (scene) => materialKey(scene.material) === key
+      (scene) => (scene.id || materialKey(scene.material)) === key
     );
     if (at >= 0) return at;
   }
@@ -575,6 +592,54 @@ function drawQueue() {
   }
 }
 
+/* ---------- 还没开画 ----------
+
+   出图是整条流水线里最慢最贵的一步：本机一张要几分钟，一条 10 分钟的旁白
+   是两百多张、好几个小时。以前用户第一次看到提示词是在图全画完之后——那
+   时候改一个字就意味着整批重画。
+
+   所以流水线跑到字幕就停下，把位置摆出来、提示词填进去，旁白和字幕都在，
+   用户可以一边听一边改。这条横幅是"改完了，开画"那一步。 */
+function drawApprove() {
+  const waiting = (state.scenes || []).filter(isPending);
+  // 一张不缺就别占着地方。
+  if (!waiting.length) {
+    ui.approve.hidden = true;
+    return;
+  }
+  ui.approve.hidden = false;
+
+  const queued = (state.queue.jobs || []).filter(
+    (job) => job.state === "queued" || job.state === "running"
+  ).length;
+  const left = Math.max(0, waiting.length - queued);
+
+  ui.approveCount.textContent = queued
+    ? `Drawing ${queued} picture${queued === 1 ? "" : "s"}…`
+    : `${waiting.length} picture${waiting.length === 1 ? "" : "s"} to draw`;
+  ui.approveNote.textContent = queued
+    ? "They are drawn one at a time. Keep editing the prompts further down "
+      + "the timeline — anything not yet started will use what you leave here."
+    : "Check the prompts first: click a slot to read the line it plays over "
+      + "and change what gets drawn. Nothing is drawn until you say so, and "
+      + "each picture takes a few minutes.";
+  ui.approveDraw.disabled = !!state.busy || left === 0;
+  ui.approveDraw.textContent = left === waiting.length
+    ? "Draw the pictures"
+    : `Draw the remaining ${left}`;
+}
+
+ui.approveDraw.addEventListener("click", () => run("Queueing the pictures", async () => {
+  const result = await call(
+    "POST", `/tasks/${encodeURIComponent(state.taskId)}/scenes/draw`
+  );
+  await fetchQueue();
+  watchQueue();
+  const count = (result && result.queued) || 0;
+  return `${count} picture${count === 1 ? "" : "s"} queued. They are drawn one `
+    + "at a time; you can keep editing or close this page and come back.";
+}));
+
 /** 所有改数据的操作都走这里：禁用按钮、显示真实错误、完成后重读一次。
 
     操作返回字符串时就把它当作完成后要显示的话。``refresh`` 会把提示清空,
@@ -701,15 +766,23 @@ function draw() {
   drawTotals();
   drawSettings();
   drawQueue();
+  drawApprove();
   drawSubtitle();
   const ready = state.scenes.length > 0;
   ui.play.disabled = !ready;
   // 还有图没出完就不让开渲：渲染器要读的正是队列那边还在换的那几个文件，
   // 渲出来会是新旧画面混在一起的一条片子。接口那边也会拒,这里只是不让
   // 用户白点一次。
+  // 还有位置没画就不让开渲：渲出来会是一条缺着好几段画面的片子。接口那边
+  // 也会拒并点名还差几张,这里只是不让用户白点一次。
+  const undrawn = (state.scenes || []).some(isPending);
   ui.render.disabled = !ready
+    || undrawn
     || !!state.queue.busy
     || !!(state.data && state.data.audio_stale);
+  ui.render.title = undrawn
+    ? "Some scenes have no picture yet — draw them first"
+    : "";
   ui.rerecord.disabled = !state.data || !state.data.audio_stale;
   ui.scriptToggle.disabled = !state.data;
   ui.musicToggle.disabled = !state.data;
@@ -750,10 +823,13 @@ function drawClips() {
   state.scenes.forEach((scene, index) => {
     const span = screenDuration(scene);
     const clip = document.createElement("div");
+    // "还没画" 和 "文件没了" 是两回事。前者是正常状态——用户正在这一屏
+    // 看提示词，一张图都还没开画；把它标成 missing 等于在说出了问题。
+    const waiting = isPending(scene);
     clip.className = "clip"
       + (index === state.selected ? " selected" : "")
       + (scene.locked ? " locked" : "")
-      + (scene.exists ? "" : " missing");
+      + (waiting ? " pending-draw" : scene.exists ? "" : " missing");
     clip.style.left = offsets[index] * state.pxPerSecond + "px";
     clip.style.width = Math.max(14, span * state.pxPerSecond - 2) + "px";
     clip.dataset.index = String(index);
@@ -769,7 +845,7 @@ function drawClips() {
     text.className = "clip-text";
     text.textContent = `${index + 1}. ${scene.keyword || scene.material || ""}`
       + ` · ${span.toFixed(1)}s`
-      + (scene.exists ? "" : " · missing");
+      + (waiting ? " · to draw" : scene.exists ? "" : " · missing");
     clip.appendChild(text);
 
     // 排着队要重出的那几段，在轨道上就标出来：用户是在时间线上挑画面的，

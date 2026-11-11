@@ -562,6 +562,8 @@
     "Timeline Editor Unavailable": "타임라인 편집기에는 API 서버가 필요하지만 {base} 에서 응답이 없습니다. `python main.py` 로 실행하거나, 이제 함께 실행해 주는 `scripts/start-local.sh` 를 사용하세요.",
     "Pick Scene To Replace": "어느 장면인가요?",
     "Align Visuals To Narration": "내레이션 문장마다 그림 맞추기",
-    "Align Visuals To Narration Help": "대본 전체에서 주제 몇 개를 뽑는 대신, 각 문장이 무엇에 관한 것인지 모델에 묻고 그 문장에 맞는 그림을 만듭니다. 영상의 다른 부분에 해당하는 그림이 나오는 문제를 고칩니다. 문장마다 그림을 만들므로 유료 소재 소스는 비용이 늘어납니다."
+    "Align Visuals To Narration Help": "대본 전체에서 주제 몇 개를 뽑는 대신, 각 문장이 무엇에 관한 것인지 모델에 묻고 그 문장에 맞는 그림을 만듭니다. 영상의 다른 부분에 해당하는 그림이 나오는 문제를 고칩니다. 문장마다 그림을 만들므로 유료 소재 소스는 비용이 늘어납니다.",
+    "Review Prompts Before Drawing": "Check the prompts before drawing",
+    "Review Prompts Before Drawing Help": "For generated images: stops once the narration and the prompts are ready, so you can read each prompt against the line it plays over and change it before anything is drawn. Drawing is the slowest, most expensive step. Untick to draw everything in one go."
   }
 }

@@ -562,6 +562,8 @@
     "Timeline Editor Unavailable": "Zaman qrafiki redaktoru API serverinə ehtiyac duyur, lakin {base} cavab vermir. Onu `python main.py` ilə başladın və ya artıq onu da başladan `scripts/start-local.sh` istifadə edin.",
     "Pick Scene To Replace": "Hansı səhnə?",
     "Align Visuals To Narration": "Hər şəkli öz mətn sətri ilə uyğunlaşdır",
-    "Align Visuals To Narration Help": "Bütün ssenari üçün bir neçə mövzu götürmək əvəzinə, hər deyilən sətrin nədən bəhs etdiyini modeldən soruşur və həmin sətir üçün şəkil yaradır. Videonun başqa hissəsinə aid şəkilləri düzəldir. Sətir başına bir şəkil yaratdığı üçün ödənişli mənbələr daha baha başa gəlir."
+    "Align Visuals To Narration Help": "Bütün ssenari üçün bir neçə mövzu götürmək əvəzinə, hər deyilən sətrin nədən bəhs etdiyini modeldən soruşur və həmin sətir üçün şəkil yaradır. Videonun başqa hissəsinə aid şəkilləri düzəldir. Sətir başına bir şəkil yaratdığı üçün ödənişli mənbələr daha baha başa gəlir.",
+    "Review Prompts Before Drawing": "Check the prompts before drawing",
+    "Review Prompts Before Drawing Help": "For generated images: stops once the narration and the prompts are ready, so you can read each prompt against the line it plays over and change it before anything is drawn. Drawing is the slowest, most expensive step. Untick to draw everything in one go."
   }
 }

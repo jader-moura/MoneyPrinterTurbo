@@ -155,26 +155,30 @@ def _scene_at(scenes: list[dict], index: Any) -> int:
 def _locate_scene(scenes: list[dict], position: int, anchor: str) -> int:
     """出图期间时间线可能变了，把用户当时点的那一段找回来。
 
-    按素材文件认，不按下标认：排队的那几分钟里用户可能删掉、插入或者重排
-    了场景，下标就指向另一段画面了。把新图写到一段用户没动过的画面上，比
+    按身份认，不按下标认：排队的那几分钟里用户可能删掉、插入或者重排了
+    场景，下标就指向另一段画面了。把新图写到一段用户没动过的画面上，比
     这次重生成直接失败要糟得多——他会以为那段画面自己坏了。
+
+    身份是 ``scene_manifest.scene_id``：有 ``id`` 就用 ``id``，老清单没有
+    这个字段时退回素材文件名。还没出图的占位场景没有素材文件，所以**只能**
+    靠 ``id`` 认——新流程里一屏全是这种场景，拿文件名认等于认不出来。
 
     那一段真的不在了（被删了）就点名说清楚。生成出来的文件留在磁盘上没人
     用，这不好看，但比悄悄塞给另一段画面好。
 
-    Scene indices shift when the timeline is edited while a job waits, so the
-    scene is found again by the material file it had. Writing the new picture
-    onto a scene the user never touched would be worse than failing.
+    Identity is the scene id, falling back to the material file name for
+    manifests written before ids existed. A scene waiting to be drawn has no
+    file at all, so for those the id is the only thing to go on.
     """
     if not anchor:
         return _scene_at(scenes, position)
     if (
         0 <= position < len(scenes)
-        and str(scenes[position].get("material") or "") == anchor
+        and scene_manifest.scene_id(scenes[position]) == anchor
     ):
         return position
     for candidate, scene in enumerate(scenes):
-        if str(scene.get("material") or "") == anchor:
+        if scene_manifest.scene_id(scene) == anchor:
             return candidate
     raise SceneError(
         "the scene this picture was generated for is no longer in the timeline; "
@@ -228,6 +232,9 @@ def check_regenerate(
     return {
         "index": position,
         "keyword": term,
+        # 排队的活拿它认人。身份而不是文件名：还没出图的占位场景没有文件，
+        # 而"先审提示词再出图"那条流程里排队的几乎全是这种场景。
+        "scene_id": scene_manifest.scene_id(scene),
         "material": str(scene.get("material") or ""),
     }
 
@@ -238,7 +245,7 @@ def regenerate_material(
     *,
     keyword: str | None = None,
     image_style: str | None = None,
-    expect_material: str | None = None,
+    expect_scene: str | None = None,
 ) -> dict:
     """重新取这一个场景的素材。
 
@@ -254,9 +261,9 @@ def regenerate_material(
     确实会得到不同的画面。这里不绕过缓存——绕过等于让用户在不知情的情况下
     多花一次第三方额度。
 
-    ``expect_material`` 给的是排队时这一段用的素材文件。队列里排着的活执行
-    时下标可能已经指向别的画面了（用户删了、插了、重排了），给了它就按文件
-    把那一段找回来。见 ``_locate_scene``。
+    ``expect_scene`` 给的是排队时那一段的身份（``scene_manifest.scene_id``）。
+    队列里排着的活执行时下标可能已经指向别的画面了（用户删了、插了、重排
+    了），给了它就按身份把那一段找回来。见 ``_locate_scene``。
     """
     _require_idle(task_id)
     with _editing(task_id):
@@ -279,7 +286,8 @@ def regenerate_material(
             style = str(scene.get("image_style") or "").strip()
         else:
             style = str(image_style).strip()
-        anchor = str(expect_material or scene.get("material") or "")
+        # 身份，不是文件名：占位场景还没有文件。
+        anchor = str(expect_scene or "") or scene_manifest.scene_id(scene)
 
     # 出图在锁外面。本机一张图要几分钟，拿着锁出图等于这几分钟里这个任务
     # 什么都改不了。
@@ -422,13 +430,15 @@ def add_scene(
     style = str(image_style or "").strip()
     with _editing(task_id):
         scenes = scene_manifest.load(task_id)["scenes"]
-        # 插在哪一段后面，同样按素材文件认：出图这几分钟里时间线可能变了，
-        # 光记一个下标会把新画面插到另一个位置去。
+        # 插在哪一段后面，同样按身份认：出图这几分钟里时间线可能变了，光记
+        # 一个下标会把新画面插到另一个位置去。身份和 ``_locate_scene`` 用的
+        # 必须是同一个东西（``scene_manifest.scene_id``），拿素材文件名去对
+        # 一份按 id 认人的清单，结果是永远对不上。
         after_position = None if after is None else _scene_at(scenes, after)
         anchor = (
             ""
             if after_position is None
-            else str(scenes[after_position].get("material") or "")
+            else scene_manifest.scene_id(scenes[after_position])
         )
 
     # 和重生成一样，慢的那一段不拿锁。
@@ -442,6 +452,7 @@ def add_scene(
 
     scene = {
         "index": 0,  # save_scenes 会按位置重排
+        "id": scene_manifest.new_scene_id(),
         "keyword": term,
         "narration": str(narration or ""),
         "material": new_path,
@@ -2014,6 +2025,14 @@ def prepare_render(task_id: str) -> VideoParams:
     if not scenes:
         raise SceneError(
             "this task has no reviewed scenes; run the pipeline up to materials first"
+        )
+    waiting = scene_manifest.pending_scenes(scenes)
+    if waiting:
+        # 还有位置没画就开渲，渲出来的是一条缺着好几段画面的片子。点名还差
+        # 几张，用户自己决定是去点"开画"还是先把那几段删掉。
+        raise SceneError(
+            f"{len(waiting)} scene(s) have no picture yet; draw them first "
+            "or remove those scenes"
         )
     if manifest["audio_stale"]:
         raise SceneError(

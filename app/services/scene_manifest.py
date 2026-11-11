@@ -38,8 +38,10 @@ written by us earlier is not evidence it is still safe to open.
 
 from __future__ import annotations
 
+import math
 import os
 import re
+import uuid
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
@@ -156,6 +158,7 @@ def build_scenes(
         scenes.append(
             {
                 "index": len(scenes),
+                "id": new_scene_id(),
                 "keyword": terms[index] if index < len(terms) else "",
                 "narration": lines[index] if index < len(lines) else "",
                 "material": path,
@@ -168,6 +171,105 @@ def build_scenes(
     return scenes
 
 
+def build_planned_scenes(
+    *,
+    video_script: Any,
+    video_terms: Any,
+    audio_duration: Any,
+    clip_duration: Any,
+    video_source: str = "",
+) -> list[dict]:
+    """还没出图时的场景列表：一段一个位置，写着**将要**画什么。
+
+    为什么要有它：出图是整条流水线里最慢最贵的一步（本机一张几分钟，按张
+    计费的源按张烧钱）。在这之前，用户唯一能看到提示词的时机是图都画完
+    之后——那时候改一个字就意味着整批重画。先把位置摆出来、提示词填进去，
+    用户看过、改过、点了头再开画。
+
+    张数由旁白长度和一张图停多久决定，不由模型吐了几个关键词决定，并且和
+    ``material._terms_to_cover`` 用同一个算法：用户在这里看到并批准的那一串
+    提示词，就是真开画时逐张送出去的那一串，不能是另一串。
+
+    关键词比张数少时从头轮播（同一个关键词再画一次得到的是另一张图）。
+    台词这里不填：它是按时间算出来的，``describe`` 每次都会照当时的时间线
+    重算，存一份只会在用户改了时长之后变成错的。
+
+    The slowest, most expensive step is drawing, so the prompts are shown
+    before it rather than after, when changing one word would mean redrawing
+    everything. How many pictures follows from the narration length and how
+    long one picture holds - the same rule ``material._terms_to_cover`` uses,
+    so the list approved here is the list that gets drawn.
+    """
+    terms = normalise_terms(video_terms)
+    hold = _coerce_duration(clip_duration) or 1.0
+    try:
+        required = max(0.0, float(audio_duration or 0.0))
+    except (TypeError, ValueError):
+        required = 0.0
+    needed = max(1, math.ceil(required / hold)) if required > 0 else len(terms)
+    needed = max(needed, len(terms))
+    if not terms:
+        return []
+
+    return [
+        {
+            "index": position,
+            "id": new_scene_id(),
+            "keyword": terms[position % len(terms)],
+            "narration": "",
+            "material": "",
+            "kind": "",
+            "source": str(video_source or ""),
+            "clip_duration": hold,
+            "locked": False,
+        }
+        for position in range(needed)
+    ]
+
+
+def record_planned_scenes(
+    task_id: str,
+    *,
+    video_script: Any,
+    video_terms: Any,
+    audio_duration: Any,
+    clip_duration: Any,
+    audio_file: Any,
+    subtitle_path: Any,
+    video_source: str = "",
+) -> bool:
+    """把"等着出图"的那份场景清单连同配音、字幕一起落盘。
+
+    和 ``record_prepared_artifacts`` 写在一次 patch 里是同一个理由：不能出现
+    "场景已经摆好、配音还是上一轮"的中间状态。
+    """
+    scenes = build_planned_scenes(
+        video_script=video_script,
+        video_terms=video_terms,
+        audio_duration=audio_duration,
+        clip_duration=clip_duration,
+        video_source=video_source,
+    )
+    return task_artifacts.patch_script_data(
+        task_id,
+        scenes=scenes,
+        script=str(video_script or ""),
+        search_terms=normalise_terms(video_terms),
+        audio_file=str(audio_file or "") or None,
+        audio_duration=audio_duration,
+        subtitle_path=str(subtitle_path or "") or None,
+        **{_STALE_KEY: False},
+    )
+
+
+def pending_scenes(scenes: Iterable[Any]) -> list[dict]:
+    """还没有画面的那几段。"""
+    return [
+        scene for scene in scenes or []
+        if not str((scene or {}).get("material") or "").strip()
+    ]
+
+
 def _coerce_duration(value: Any) -> float | None:
     try:
         number = float(value)
@@ -176,12 +278,51 @@ def _coerce_duration(value: Any) -> float | None:
     return number if number > 0 else None
 
 
+def scene_id(record: Mapping | Any) -> str:
+    """这一段画面的身份，跟着它走，不跟着它排第几走。
+
+    下标不是身份。排队出图要几分钟，而用户在这几分钟里干的事恰恰是接着
+    审片——拖动、删除、插入。拿下标认人，等图出来时它早就指向别的画面了。
+
+    老任务的清单里没有这个字段，所以认素材文件名：那对一条已经出好图的
+    片子来说是稳定的，而且不用改写用户的清单就能用。两样都没有（还没出图
+    的占位场景，只可能出自新流程）时交给调用方生成一个。
+
+    An index is not an identity: a queued job waits minutes, and what the
+    user does in those minutes is reorder and delete. Older manifests have
+    no id, so the material file name serves - stable for a task whose
+    pictures exist, and it needs no rewrite of what is already on disk.
+    """
+    data = record if isinstance(record, Mapping) else {}
+    existing = str(data.get("id") or "").strip()
+    if existing:
+        return existing
+    return material_key(str(data.get("material") or ""))
+
+
+def material_key(path: Any) -> str:
+    """素材的身份：只认文件名那一截。
+
+    同一个文件在几处写法不同——清单和队列记的是整条路径，时间线接口发给
+    界面的是文件名。要对得上，就都退到文件名为止。
+    """
+    text = str(path or "")
+    cut = max(text.rfind("/"), text.rfind("\\"))
+    return text[cut + 1:] if cut >= 0 else text
+
+
+def new_scene_id() -> str:
+    """给一条新场景发一个身份。"""
+    return uuid.uuid4().hex[:12]
+
+
 def _normalise_scene(raw: Any, index: int) -> dict:
     """把清单里的一条记录整理成完整场景；缺字段补默认值,不抛异常。"""
     record = raw if isinstance(raw, Mapping) else {}
     path = str(record.get("material") or "").strip()
     scene = {
         "index": index,
+        "id": scene_id(record),
         "keyword": str(record.get("keyword") or ""),
         "narration": str(record.get("narration") or ""),
         "material": path,

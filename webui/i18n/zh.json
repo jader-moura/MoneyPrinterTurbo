@@ -817,6 +817,8 @@
     "Timeline Editor Unavailable": "时间线编辑器需要 API 服务，但 {base} 没有响应。用 `python main.py` 启动它，或者直接用 `scripts/start-local.sh`（现在会一并启动）。",
     "Pick Scene To Replace": "替换哪一段？",
     "Align Visuals To Narration": "按旁白逐句匹配画面",
-    "Align Visuals To Narration Help": "逐句询问模型「这句话该配什么画面」并为该句生成图片，而不是给整篇脚本取几个主题词。可以解决「画面对应的是视频另一部分」的问题。按句子数出图，付费素材源花费会更高。"
+    "Align Visuals To Narration Help": "逐句询问模型「这句话该配什么画面」并为该句生成图片，而不是给整篇脚本取几个主题词。可以解决「画面对应的是视频另一部分」的问题。按句子数出图，付费素材源花费会更高。",
+    "Review Prompts Before Drawing": "Check the prompts before drawing",
+    "Review Prompts Before Drawing Help": "For generated images: stops once the narration and the prompts are ready, so you can read each prompt against the line it plays over and change it before anything is drawn. Drawing is the slowest, most expensive step. Untick to draw everything in one go."
   }
 }

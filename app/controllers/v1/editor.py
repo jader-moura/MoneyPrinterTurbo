@@ -690,6 +690,24 @@ def reorder_scenes(
 
 
 #: 和 "reorder" 同一个道理，必须声明在 ``/scenes/{index}`` 那几条之前。
+@router.post(
+    "/tasks/{task_id}/scenes/draw",
+    summary="Approve the prompts and draw every picture still missing",
+)
+def draw_pending_scenes(
+    request: Request, task_id: str = Path(..., description="Task ID")
+):
+    """用户在提示词那一屏点的"开画"。
+
+    路由放在 ``/scenes/{index}`` 之前：``draw`` 会被那条带下标的路由吃掉。
+    """
+    request_id = base.get_task_id(request)
+    _require_task(task_id, request_id)
+    return utils.get_response(
+        200, _handle(task_id, request_id, lambda: scene_regen_queue.enqueue_pending(task_id))
+    )
+
+
 @router.get(
     "/tasks/{task_id}/scenes/queue",
     response_model=SceneRegenQueueResponse,

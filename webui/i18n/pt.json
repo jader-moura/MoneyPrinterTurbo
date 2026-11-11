@@ -562,6 +562,8 @@
     "Timeline Editor Unavailable": "O editor de linha do tempo precisa do servidor de API, que não está respondendo em {base}. Inicie-o com `python main.py`, ou use `scripts/start-local.sh`, que agora já o inicia.",
     "Pick Scene To Replace": "Qual cena?",
     "Align Visuals To Narration": "Alinhar cada imagem à sua fala",
-    "Align Visuals To Narration Help": "Pergunta ao modelo sobre o que cada fala trata e gera uma imagem para aquela fala, em vez de alguns temas para o roteiro inteiro. Corrige imagens que pertencem a outra parte do vídeo. Gera uma imagem por fala, então fontes pagas custam mais."
+    "Align Visuals To Narration Help": "Pergunta ao modelo sobre o que cada fala trata e gera uma imagem para aquela fala, em vez de alguns temas para o roteiro inteiro. Corrige imagens que pertencem a outra parte do vídeo. Gera uma imagem por fala, então fontes pagas custam mais.",
+    "Review Prompts Before Drawing": "Check the prompts before drawing",
+    "Review Prompts Before Drawing Help": "For generated images: stops once the narration and the prompts are ready, so you can read each prompt against the line it plays over and change it before anything is drawn. Drawing is the slowest, most expensive step. Untick to draw everything in one go."
   }
 }

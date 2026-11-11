@@ -72,6 +72,7 @@ class _Job:
         "index",
         "keyword",
         "image_style",
+        "anchor",
         "material",
         "state",
         "error",
@@ -86,16 +87,22 @@ class _Job:
         index: int,
         keyword: str,
         image_style: Optional[str],
-        material: str,
+        anchor: str,
+        material: str = "",
     ) -> None:
         self.id = uuid.uuid4().hex[:12]
         self.task_id = task_id
         self.index = index
         self.keyword = keyword
         self.image_style = image_style
-        # 排队时这一段用的素材文件。队列排着的时候用户可能删掉、插入或者
-        # 重排场景，下标就不再指向同一段画面了，所以执行前按这个文件把它
-        # 找回来。见 ``scene_editor.regenerate_material`` 的 ``expect_material``。
+        # 排队时这一段的身份（``scene_manifest.scene_id``）。队列排着的时候
+        # 用户可能删掉、插入或者重排场景，下标就不再指向同一段画面了，所以
+        # 执行前按身份把它找回来。见 ``regenerate_material`` 的 ``expect_scene``。
+        #
+        # 身份而不是素材文件名：还没出图的占位场景根本没有文件，而"先审
+        # 提示词再出图"那条流程里排队的几乎全是这种场景。
+        self.anchor = anchor
+        # 排队时那一段用的素材文件，可能是空的（还没出图）。只用来显示。
         self.material = material
         self.state = QUEUED
         self.error = ""
@@ -119,11 +126,11 @@ class _Job:
             # ``None`` 和 "" 在重生成里不是一回事（沿用这一段上次挑的风格 /
             # 回到任务的风格），所以这里原样带出去，不要折成空字符串。
             "image_style": self.image_style,
-            # 排队时这一段用的素材文件,也就是"是哪一张图在重出"的身份。
-            # 界面拿它去现在的时间线上把那一段找回来,而不是拿下标去数。
-            # The material this scene had when the job was queued: the
-            # identity of the picture being redrawn, which the UI resolves
+            # 这个活在重出哪一段的身份。界面拿它去现在的时间线上把那一段
+            # 找回来,而不是拿下标去数。
+            # The identity of the scene being redrawn, which the UI resolves
             # against the current timeline instead of counting positions.
+            "scene_id": self.anchor,
             "material": self.material,
             "state": self.state,
             "error": self.error,
@@ -183,6 +190,7 @@ def enqueue(
         index=plan["index"],
         keyword=plan["keyword"],
         image_style=image_style,
+        anchor=plan["scene_id"],
         material=plan["material"],
     )
     with _LOCK:
@@ -195,6 +203,74 @@ def enqueue(
         f"with keyword {job.keyword!r} (position {position})"
     )
     return job.payload(position)
+
+
+def enqueue_pending(task_id: str) -> dict:
+    """把还没出图的那几段一次全排进队列——用户在提示词那一屏点的"开画"。
+
+    一段一个活，不是一个大活：出图本来就是一张一张的，拆开排队用户才能
+    看到"第几张在画"、才能单独撤掉其中一张，而且中间某一张失败不会把后面
+    排着的全带走。队列只有一个工作线程，所以仍然是一张一张地画。
+
+    先全部通过 ``check_regenerate`` 的校验再真正入队：提示词空着、风格 id
+    不认识这类错误要在点下去的那一刻就说清楚，而不是排到第 80 张才冒出来。
+    一个不合格就整批不排——排一半更难收拾。
+
+    One job per scene rather than one big job: drawing is per-picture anyway,
+    and splitting it is what gives per-picture progress, per-picture cancel,
+    and a failure that does not take the rest down. Everything is validated
+    before anything is queued, so an empty prompt is reported on the click
+    rather than eighty pictures later.
+    """
+    scenes = scene_manifest.load(task_id)["scenes"]
+    waiting = scene_manifest.pending_scenes(scenes)
+    if not waiting:
+        raise SceneError("every scene in this task already has a picture")
+
+    # 已经排着的不要再排一遍：用户点两下"开画"不该把每一张画两次。
+    with _LOCK:
+        busy = {job.anchor for job in _QUEUE}
+        if _RUNNING is not None and _RUNNING.task_id == task_id:
+            busy.add(_RUNNING.anchor)
+
+    todo = [
+        scene for scene in waiting
+        if scene_manifest.scene_id(scene) not in busy
+    ]
+    if not todo:
+        raise SceneError(
+            "every picture still missing from this task is already queued"
+        )
+
+    plans = [
+        scene_editor.check_regenerate(task_id, scene["index"])
+        for scene in todo
+    ]
+
+    queued = []
+    with _LOCK:
+        for plan in plans:
+            job = _Job(
+                task_id=task_id,
+                index=plan["index"],
+                keyword=plan["keyword"],
+                image_style=None,
+                anchor=plan["scene_id"],
+                material=plan["material"],
+            )
+            _QUEUE.append(job)
+            queued.append(job)
+        _ensure_worker()
+        _READY.notify_all()
+
+    logger.success(
+        f"queued {len(queued)} picture(s) to draw for task {task_id}"
+    )
+    return {
+        "queued": len(queued),
+        "jobs": [job.payload() for job in queued],
+        **snapshot(task_id),
+    }
 
 
 def _scene_positions(task_id: str) -> dict[str, int]:
@@ -212,7 +288,7 @@ def _scene_positions(task_id: str) -> dict[str, int]:
     for scene in scenes:
         material = str(scene.get("material") or "")
         # 同一个文件被两段共用时认第一段：那两段本来就是同一张图。
-        key = material_key(material)
+        key = scene_manifest.scene_id(scene)
         if key and key not in found:
             found[key] = int(scene.get("index", 0))
     return found
@@ -260,7 +336,7 @@ def snapshot(task_id: str = "") -> dict:
 
     def payload_of(job: _Job, position: int = 0) -> dict:
         data = job.payload(position)
-        data["scene"] = where.get(material_key(job.material)) if where else None
+        data["scene"] = where.get(job.anchor) if where else None
         return data
 
     jobs = [payload_of(job) for job in history if mine(job)]
@@ -357,7 +433,7 @@ def _run(job: _Job) -> None:
             job.index,
             keyword=job.keyword,
             image_style=job.image_style,
-            expect_material=job.material,
+            expect_scene=job.anchor,
         )
     except SceneError as exc:
         # 场景层的错误本来就是给人看的（哪个源失败了、下标越界多少），
@@ -391,9 +467,7 @@ def _run(job: _Job) -> None:
         # The anchor moves to the new file: the old one is no longer in the
         # timeline, and "which picture did that job just finish" is exactly
         # what the user looks for at that moment.
-        new_material = str(scene.get("material") or "")
-        if new_material:
-            job.material = new_material
+        job.material = str(scene.get("material") or "")
         logger.success(
             f"queued regeneration finished for scene {job.index} "
             f"of task {job.task_id}"

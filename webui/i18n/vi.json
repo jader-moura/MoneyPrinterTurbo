@@ -562,6 +562,8 @@
     "Timeline Editor Unavailable": "Trình chỉnh sửa dòng thời gian cần máy chủ API, nhưng {base} không phản hồi. Hãy chạy `python main.py`, hoặc dùng `scripts/start-local.sh` — giờ đã khởi động nó giúp bạn.",
     "Pick Scene To Replace": "Cảnh nào?",
     "Align Visuals To Narration": "Khớp mỗi hình ảnh với câu lời bình",
-    "Align Visuals To Narration Help": "Hỏi mô hình xem mỗi câu nói về điều gì rồi tạo hình cho chính câu đó, thay vì lấy vài chủ đề cho cả kịch bản. Khắc phục việc hình ảnh thuộc về phần khác của video. Tạo một hình mỗi câu nên nguồn tư liệu trả phí sẽ tốn hơn."
+    "Align Visuals To Narration Help": "Hỏi mô hình xem mỗi câu nói về điều gì rồi tạo hình cho chính câu đó, thay vì lấy vài chủ đề cho cả kịch bản. Khắc phục việc hình ảnh thuộc về phần khác của video. Tạo một hình mỗi câu nên nguồn tư liệu trả phí sẽ tốn hơn.",
+    "Review Prompts Before Drawing": "Check the prompts before drawing",
+    "Review Prompts Before Drawing Help": "For generated images: stops once the narration and the prompts are ready, so you can read each prompt against the line it plays over and change it before anything is drawn. Drawing is the slowest, most expensive step. Untick to draw everything in one go."
   }
 }

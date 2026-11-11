@@ -140,7 +140,7 @@ class TestAFinishedJobStillPointsAtItsPicture:
     def test_a_finished_job_points_at_the_picture_it_redrew(
         self, task_root, generator
     ):
-        """出完之后那一段的素材换成新文件了，锚点要跟着换，否则找不回来。"""
+        """身份不随出图改变，所以出完之后照样认得出是哪一段。"""
         task_id, _ = _reviewed_task(task_root, "done", pinned_template=COMIC)
 
         job = _queued_job(task_id, 1, "dragon")
@@ -149,7 +149,10 @@ class TestAFinishedJobStillPointsAtItsPicture:
         done = _job_in(task_id, job["id"])
         assert done["state"] == "done"
         assert done["scene"] == 1
-        assert done["material"] == scene_manifest.load(task_id)["scenes"][1]["material"]
+        scene = scene_manifest.load(task_id)["scenes"][1]
+        assert done["scene_id"] == scene["id"]
+        # 素材换成了刚出的那张，身份没变。
+        assert done["material"] == scene["material"]
 
     def test_a_finished_job_follows_a_later_reorder(self, task_root, generator):
         task_id, _ = _reviewed_task(task_root, "done-moved", pinned_template=COMIC)
@@ -164,16 +167,16 @@ class TestAFinishedJobStillPointsAtItsPicture:
 
 
 class TestTheSnapshotStaysUsable:
-    def test_a_job_carries_the_material_that_identifies_its_picture(
-        self, task_root, generator
-    ):
+    def test_a_job_carries_the_identity_of_its_picture(self, task_root, generator):
         task_id, materials = _reviewed_task(task_root, "anchor", pinned_template=COMIC)
         generator.gate.clear()
 
         job = _queued_job(task_id, 0, "castle")
         generator.wait_for_entry()
 
-        assert _job_in(task_id, job["id"])["material"] == materials[0]
+        queued = _job_in(task_id, job["id"])
+        assert queued["scene_id"] == scene_manifest.load(task_id)["scenes"][0]["id"]
+        assert queued["material"] == materials[0]
 
         generator.gate.set()
         finished(job["id"])
@@ -210,20 +213,28 @@ class TestTheUiCanMatchTheTwoEndpoints:
     图上"。两边都退到文件名为止才对得上。
     """
 
+    def test_an_older_manifest_falls_back_to_the_file_name(self):
+        """老清单里没有 id，那时的身份就是素材文件名。"""
+        assert scene_manifest.scene_id(
+            {"material": "C:\\tasks\\abc\\1a2b.zoom-99.mp4"}
+        ) == "1a2b.zoom-99.mp4"
+        assert scene_manifest.scene_id({"id": "abc123", "material": "x.mp4"}) == "abc123"
+        assert scene_manifest.scene_id({}) == ""
+
     def test_the_file_name_is_what_matches(self):
-        assert scene_regen_queue.material_key(
+        assert scene_manifest.material_key(
             "C:\\tasks\\abc\\1a2b.zoom-99.mp4"
         ) == "1a2b.zoom-99.mp4"
-        assert scene_regen_queue.material_key(
+        assert scene_manifest.material_key(
             "/srv/tasks/abc/1a2b.zoom-99.mp4"
         ) == "1a2b.zoom-99.mp4"
-        assert scene_regen_queue.material_key("1a2b.zoom-99.mp4") == "1a2b.zoom-99.mp4"
-        assert scene_regen_queue.material_key(None) == ""
+        assert scene_manifest.material_key("1a2b.zoom-99.mp4") == "1a2b.zoom-99.mp4"
+        assert scene_manifest.material_key(None) == ""
 
     def test_the_queue_and_the_timeline_name_the_same_picture(
         self, task_root, generator
     ):
-        """两条接口说的是同一张图，哪怕写法不一样。"""
+        """两条接口要说得出同一段画面：界面靠这一点把活对回时间线。"""
         task_id, _ = _reviewed_task(task_root, "match", pinned_template=COMIC)
         generator.gate.clear()
         job = _queued_job(task_id, 1, "dragon")
@@ -232,10 +243,9 @@ class TestTheUiCanMatchTheTwoEndpoints:
         shown = scene_editor.describe(task_id, "")["scenes"]
         queued = _job_in(task_id, job["id"])
 
-        key = scene_regen_queue.material_key
         at = [
             index for index, scene in enumerate(shown)
-            if key(scene["material"]) == key(queued["material"])
+            if scene["id"] == queued["scene_id"]
         ]
         assert at == [queued["scene"]], (
             "界面按素材文件找到的那一段，必须就是服务端算出来的那一段"
@@ -243,3 +253,29 @@ class TestTheUiCanMatchTheTwoEndpoints:
 
         generator.gate.set()
         finished(job["id"])
+
+
+class TestEveryAnchorMeansTheSameThing:
+    """认人的地方只能有一套说法。
+
+    ``_locate_scene`` 按 ``scene_manifest.scene_id`` 认人。谁要是自己拼一个
+    锚点（比如拿素材文件名），对的就是另一套说法，结果是永远对不上——
+    ``add_scene`` 正是这么坏掉的：插一段新画面必定报"那一段已经不在时间线
+    上了"，而它明明就在。
+    """
+
+    def test_adding_a_scene_after_another_one_still_finds_it(
+        self, task_root, generator
+    ):
+        task_id, _ = _reviewed_task(task_root, "insert", pinned_template=COMIC)
+        with patch.object(scene_editor.sm.state, "get_task", return_value=None):
+            scene_editor.add_scene(task_id, keyword="middle", after=0)
+        shown = [s["keyword"] for s in scene_manifest.load(task_id)["scenes"]]
+        assert shown == ["a", "middle", "b"]
+
+    def test_a_new_scene_gets_its_own_identity(self, task_root, generator):
+        task_id, _ = _reviewed_task(task_root, "newid", pinned_template=COMIC)
+        with patch.object(scene_editor.sm.state, "get_task", return_value=None):
+            scene_editor.add_scene(task_id, keyword="fresh")
+        ids = [s["id"] for s in scene_manifest.load(task_id)["scenes"]]
+        assert all(ids) and len(set(ids)) == len(ids)

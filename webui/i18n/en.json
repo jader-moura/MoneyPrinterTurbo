@@ -817,6 +817,8 @@
     "Timeline Editor Unavailable": "The timeline editor needs the API server, which is not answering at {base}. Start it with `python main.py`, or use `scripts/start-local.sh`, which now starts it for you.",
     "Pick Scene To Replace": "Which scene?",
     "Align Visuals To Narration": "Match each picture to its narration line",
-    "Align Visuals To Narration Help": "Ask the model what each spoken line is about and generate a picture for that line, instead of a few topics for the whole script. Fixes pictures that belong to a different part of the video. Produces one picture per line, so paid material sources cost more."
+    "Align Visuals To Narration Help": "Ask the model what each spoken line is about and generate a picture for that line, instead of a few topics for the whole script. Fixes pictures that belong to a different part of the video. Produces one picture per line, so paid material sources cost more.",
+    "Review Prompts Before Drawing": "Check the prompts before drawing",
+    "Review Prompts Before Drawing Help": "For generated images: stops once the narration and the prompts are ready, so you can read each prompt against the line it plays over and change it before anything is drawn. Drawing is the slowest, most expensive step. Untick to draw everything in one go."
   }
 }

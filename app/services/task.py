@@ -363,6 +363,36 @@ def _stage_progress_reporter(task_id: str, stage_start: float, stage_end: float)
     return report
 
 
+def reviews_prompts_first(params, app_config=None) -> bool:
+    """这条任务要不要先停下来让用户看提示词，再去出图。
+
+    出图是整条流水线里最慢最贵的一步：本机一张要几分钟，按张计费的源按张
+    烧钱。以前用户第一次看到提示词是在图全画完之后——那时候改一个字意味着
+    整批重画。打开这个开关，流水线跑到字幕就停，编辑器里摆好每一段的位置
+    和它**将要**画的提示词，用户改完点头再开画。
+
+    只对文生图的源成立。库存素材（Pexels 等）搜一次又快又不要钱，多一道
+    确认只是多一次点击。
+
+    没设过就是打开的：这是现在推荐的做法。已经在 config.toml 里写了值的
+    用户不受影响——那是他自己选的。
+
+    Drawing is the slowest, most expensive step, and the prompts used to be
+    visible only once every picture existed. Generated-image sources only:
+    a stock search is fast and free, so the extra confirmation would just be
+    an extra click. Unset means on, which is the recommended flow; a value
+    already written in config.toml is the user's own choice and is kept.
+    """
+    source = str(getattr(params, "video_source", "") or "")
+    if source not in material.GENERATED_IMAGE_SOURCES:
+        return False
+    settings = config.ui if app_config is None else app_config
+    value = settings.get("review_prompts_before_images")
+    if value is None:
+        return True
+    return bool(value)
+
+
 def _resumed_audio(task_id, resumed: dict, start_from: str) -> tuple[str, float]:
     """
     从任务清单读回配音文件与时长，供 ``start_from`` 跳过配音阶段时使用。
@@ -2057,7 +2087,16 @@ def _run_pipeline(
         # step before too, and moving it inside the if below would quietly
         # change the progress display.
         generation_progress.stage("terms")
-        if stop_at in {"terms", "materials", "video"} and params.video_source != "local":
+        # 停在字幕那一步的也要出关键词——"先审提示词再出图"就停在那里,而它
+        # 要给用户看的正是这批提示词。以前这里只有"要去取素材"的那几种落点,
+        # 因为关键词的唯一用途就是取素材；现在它还有一个用途是先给人看。
+        #
+        # A run stopping at the subtitle stage needs the keywords too: that is
+        # where prompts are reviewed, and they are what the user is shown.
+        wants_terms = stop_at in {"terms", "materials", "video"} or (
+            stop_at == "subtitle" and reviews_prompts_first(params)
+        )
+        if wants_terms and params.video_source != "local":
             video_terms = generate_terms(task_id, params, video_script)
             if not video_terms:
                 return _mark_task_failed(
@@ -2194,7 +2233,16 @@ def _run_pipeline(
             subtitle_path = ""
 
     if stop_at == "subtitle":
-        if not subtitle_path:
+        # 字幕关掉的时候没有字幕文件是**正确**结果，不是失败。
+        #
+        # 这个检查原来是无条件的，因为走到这里的只有"改了台词重新配音"那条
+        # 路，而它总是开着字幕的。"先审提示词再出图"也停在这一步，于是一个
+        # 关掉字幕的用户点生成，会收到一句"字幕生成失败"——而他根本没要字幕。
+        #
+        # A missing subtitle is the correct outcome when subtitles are off.
+        # This check used to be unconditional because only the re-record path
+        # stopped here, and that path always has subtitles on.
+        if params.subtitle_enabled and not subtitle_path:
             return _mark_task_failed(
                 task_id,
                 "subtitle",
@@ -2207,7 +2255,30 @@ def _run_pipeline(
         # stop_at="subtitle". The materials stage never runs, so the new audio
         # and subtitles are recorded here or the review would keep showing the
         # old take and the render would stay blocked on audio_stale.
-        if runs("audio") and scene_manifest.load(task_id)["scenes"]:
+        if runs("script") and reviews_prompts_first(params):
+            # "先审提示词再出图"的落点。一张图都还没画，所以这里摆的是**位置**
+            # 和每一段将要画的提示词；用户改完点头，才把它们排进出图队列。
+            #
+            # 只有整条跑下来的那一趟才写（``runs("script")``）。改台词之后
+            # 重新配音走的是 start_from="audio",那一趟的场景早就有画面了,
+            # 把它们换成空位等于把用户已经出好的图全丢掉。
+            #
+            # The checkpoint where prompts are reviewed before anything is
+            # drawn. Only a full run writes these: re-recording the narration
+            # comes through start_from="audio", whose scenes already have
+            # pictures, and replacing them with empty slots would throw away
+            # everything the user has drawn.
+            scene_manifest.record_planned_scenes(
+                task_id,
+                video_script=video_script,
+                video_terms=video_terms,
+                audio_duration=audio_duration,
+                clip_duration=getattr(params, "video_clip_duration", None),
+                audio_file=audio_file,
+                subtitle_path=subtitle_path,
+                video_source=getattr(params, "video_source", "") or "",
+            )
+        elif runs("audio") and scene_manifest.load(task_id)["scenes"]:
             scene_manifest.record_audio_artifacts(
                 task_id,
                 audio_file=audio_file,

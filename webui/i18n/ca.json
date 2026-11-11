@@ -562,6 +562,8 @@
     "Timeline Editor Unavailable": "L'editor de línia de temps necessita el servidor d'API, que no respon a {base}. Inicia'l amb `python main.py`, o fes servir `scripts/start-local.sh`, que ara l'arrenca per tu.",
     "Pick Scene To Replace": "Quina escena?",
     "Align Visuals To Narration": "Ajusta cada imatge a la seva línia de narració",
-    "Align Visuals To Narration Help": "Pregunta al model de què tracta cada línia parlada i genera una imatge per a aquella línia, en lloc d'uns quants temes per a tot el guió. Corregeix imatges que pertanyen a una altra part del vídeo. Genera una imatge per línia, així que les fonts de pagament costen més."
+    "Align Visuals To Narration Help": "Pregunta al model de què tracta cada línia parlada i genera una imatge per a aquella línia, en lloc d'uns quants temes per a tot el guió. Corregeix imatges que pertanyen a una altra part del vídeo. Genera una imatge per línia, així que les fonts de pagament costen més.",
+    "Review Prompts Before Drawing": "Check the prompts before drawing",
+    "Review Prompts Before Drawing Help": "For generated images: stops once the narration and the prompts are ready, so you can read each prompt against the line it plays over and change it before anything is drawn. Drawing is the slowest, most expensive step. Untick to draw everything in one go."
   }
 }

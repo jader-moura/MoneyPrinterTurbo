@@ -25,6 +25,17 @@
 
 <div id="banner" class="banner" hidden></div>
 
+<!-- 还没开画时的那一条。出图是整条流水线里最慢最贵的一步，所以提示词先
+     摆出来给人看：这条横幅说清楚还剩几张没画、点下去会发生什么，然后才
+     开画。一张图都不缺的时候它根本不出现。 -->
+<div id="approve" class="approve" hidden>
+  <div class="approve-text">
+    <strong id="approve-count"></strong>
+    <span id="approve-note"></span>
+  </div>
+  <button id="approve-draw" class="btn primary">Draw the pictures</button>
+</div>
+
 <!-- 重生成队列。放在最外层而不是放在右边的面板里：排着的图属于整条片子，
      而右边那个面板只讲当前选中的那一段,切到别的场景就看不见了——而用户
      恰恰是在一段一段地点"重出"的过程中需要一直看着它。
