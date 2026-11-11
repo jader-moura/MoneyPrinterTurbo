@@ -278,6 +278,22 @@ body {
 #library-more-row > .btn { flex: 0 0 auto; }
 .card .tag.warn { border-color: #6b5a28; color: #e0c878; }
 
+/* "接着把画面出完"。只有画面出了一半就断掉的那种任务才有,所以它在卡片上
+   是一条显眼的行动条,而不是又一个灰色小标签。 */
+.card .resume {
+  margin-top: 6px;
+  width: 100%;
+  font-size: 11px;
+  padding: 5px 8px;
+  border-radius: 6px;
+  border: 1px solid #6b5a28;
+  background: #2a2413;
+  color: #e0c878;
+  cursor: pointer;
+}
+.card .resume:hover:not(:disabled) { background: #3a3119; }
+.card .resume:disabled { opacity: 0.6; cursor: default; }
+
 /* ---------- narration script ---------- */
 
 /* 旁白正文。浮在正中，不占布局：它是打开来改一阵子的东西，排在文档流里

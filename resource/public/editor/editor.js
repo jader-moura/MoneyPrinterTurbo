@@ -2075,12 +2075,59 @@ function libraryCard(row) {
   meta.textContent = bits.join(" · ");
   body.appendChild(meta);
 
+  const unfinished = row.unfinished || {};
+
   const tags = document.createElement("div");
   tags.className = "tags";
   if (row.rendered) tags.appendChild(tag("rendered", "done"));
   if (row.audio_stale) tags.appendChild(tag("needs re-record", "warn"));
-  if (!row.scenes) tags.appendChild(tag("no scenes", "warn"));
+  if (unfinished.resumable) {
+    tags.appendChild(
+      tag(`${unfinished.pictures} of ${unfinished.needed} pictures`, "warn")
+    );
+  } else if (!row.scenes) {
+    tags.appendChild(tag("no scenes", "warn"));
+  }
   if (tags.children.length) body.appendChild(tags);
+
+  /* 画面出了一半就断掉的那种任务。
+     文生图一张一张买，二十九张之后连接一掐——那二十九张的钱已经付了，文件
+     也在盘上，可清单里没有场景，于是这张卡片以前写着 "0 scenes"，点进去
+     一片空白，用户只能从头再来一遍、把那二十九张重新买一次。
+     这个按钮从断的那张接着买，已经出完的不再买。 */
+  if (unfinished.resumable) {
+    const left = Math.max(0, unfinished.needed - unfinished.pictures);
+    const resume = document.createElement("button");
+    resume.className = "resume";
+    resume.textContent = `Finish the pictures (${left} to go)`;
+    resume.title =
+      `${unfinished.pictures} picture(s) are already generated and will not ` +
+      `be generated or paid for again; ${left} more are needed to cover ` +
+      `${fmt(unfinished.narration)} of narration.`;
+    resume.addEventListener("click", async (event) => {
+      // 卡片本身是"点开这条任务"，别让这一下顺带把编辑器也切过去。
+      event.stopPropagation();
+      resume.disabled = true;
+      resume.textContent = "Starting…";
+      try {
+        await call("POST", `/tasks/${row.task_id}/materials`, {});
+        closeLibrary();
+        ui.task.value = row.task_id;
+        say(
+          `Finishing the pictures for this task: ${left} to go, keeping the ` +
+          `${unfinished.pictures} already generated. This screen will show ` +
+          `the scenes once they are done.`,
+          "ok"
+        );
+        load(row.task_id);
+      } catch (error) {
+        resume.disabled = false;
+        resume.textContent = `Finish the pictures (${left} to go)`;
+        say(error.message, "bad");
+      }
+    });
+    body.appendChild(resume);
+  }
 
   card.appendChild(body);
   card.addEventListener("click", () => {

@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 
 from app import asgi
 from app.models.schema import VideoParams
+from app.controllers.v1 import editor as editor_routes
 from app.services import scene_editor, scene_manifest, task_artifacts
 from app.services import state as sm
 from app.utils import utils
@@ -122,6 +123,55 @@ class TestStatusCodes:
         assert "regenerate the audio" in response.json()["message"]
 
 
+class TestFinishingAnUnfinishedRun:
+    """"接着把画面出完"：素材阶段半路断掉的任务要能从接口上接着跑。"""
+
+    def test_a_task_whose_pictures_are_done_has_nothing_to_pick_up(
+        self, client, reviewed
+    ):
+        """已经有场景、可以审片的任务不该被当成"半截任务"。"""
+        response = client.post(f"/api/v1/tasks/{reviewed}/materials")
+        assert response.status_code == 400
+        assert "nothing to pick up" in response.json()["message"]
+
+    def test_an_unknown_task_is_404(self, client, task_root):
+        response = client.post("/api/v1/tasks/nosuchtask/materials")
+        assert response.status_code == 404
+
+    def test_an_unfinished_task_is_resumed_from_the_materials_stage(
+        self, client, task_root
+    ):
+        """二十九张已经出完、清单里没有场景的那种任务。"""
+        task_id = "api-halfway"
+        directory = task_root / task_id
+        directory.mkdir(parents=True, exist_ok=True)
+        (directory / "audio.mp3").write_bytes(b"x")
+        task_artifacts.write_script_data(
+            task_id,
+            {
+                "script": "Clocks ran late.",
+                "search_terms": ["a clock"],
+                "params": {
+                    "video_subject": "clocks",
+                    "video_source": "openai_image",
+                    "video_clip_duration": 3,
+                },
+                "audio_file": str(directory / "audio.mp3"),
+                "audio_duration": 30.0,
+                "material_sources": [
+                    {"provider": "openai_image", "local_file": "1.mp4", "duration": 3}
+                ],
+            },
+        )
+        with patch.object(editor_routes.task_manager, "add_task") as submit:
+            response = client.post(f"/api/v1/tasks/{task_id}/materials")
+        assert response.status_code == 200, response.json()
+        # 从素材阶段接着跑，并停在素材阶段：出完画面先回审片界面。
+        assert submit.call_args.kwargs["start_from"] == "materials"
+        assert submit.call_args.kwargs["stop_at"] == "materials"
+        assert submit.call_args.kwargs["task_id"] == task_id
+
+
 class TestEditing:
     def test_editing_narration_marks_the_audio_stale(self, client, reviewed):
         response = client.put(
@@ -145,9 +195,7 @@ class TestEditing:
             )
         assert response.status_code == 200
         assert download.call_count == 1
-        # 比"包含"而不是"等于"：文生图的源拿到的是"关键词 + 这一段的台词
-        # + 片子主题"拼出来的提示词，见 scene_editor._written_image_prompt。
-        assert "a farmer sowing" in download.call_args.kwargs["search_terms"][0]
+        assert download.call_args.kwargs["search_terms"] == ["a farmer sowing"]
 
     def test_deleting_a_scene_returns_the_remaining_list(self, client, reviewed):
         response = client.delete(f"/api/v1/tasks/{reviewed}/scenes/0")

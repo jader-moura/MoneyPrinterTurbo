@@ -2365,15 +2365,37 @@ def _image_zoom_video_path(
     digest.update(frame.tobytes())
     if clip.mask is not None:
         digest.update(clip.mask.get_frame(0).tobytes())
+    return os.path.join(
+        os.path.dirname(image_path),
+        f"{digest.hexdigest()}{image_clip_suffix(clip_duration, motion)}",
+    )
+
+
+def image_clip_suffix(clip_duration, image_motion: ImageMotion) -> str:
+    """图片片段文件名里"内容哈希"之后的那一截：``.<运镜>-<时长哈希>.mp4``。
+
+    单独拎出来是为了让"这个片段是按现在的设置渲的吗"这个问题能在不打开
+    文件、不读图片的情况下回答。素材阶段重跑时要靠它认出上一轮已经渲好的
+    片段：时长或运镜一改，后缀就不一样，旧片段自然不会被当成答案。
+
+    Split out so that "was this clip rendered with the current settings?" can
+    be answered without opening the file or decoding the image. A resumed
+    materials stage uses it to recognise the clips an earlier run already
+    paid for: change the duration or the motion and the suffix changes with
+    it, so the old clips stop matching on their own.
+    """
+    motion = ImageMotion(image_motion)
     # 静止模式的画面和运镜算法无关，别让它的缓存跟着一起作废白渲一遍。
     identity = str(clip_duration)
     if motion == ImageMotion.zoom:
         identity = f"{identity}|{_IMAGE_ZOOM_SAMPLING_REVISION}"
     duration_identity = hashlib.sha256(identity.encode()).hexdigest()[:16]
-    return os.path.join(
-        os.path.dirname(image_path),
-        f"{digest.hexdigest()}.{motion.value}-{duration_identity}.mp4",
-    )
+    return f".{motion.value}-{duration_identity}.mp4"
+
+
+def rendered_clip_is_usable(video_file: str) -> bool:
+    """上一轮渲好的片段现在还能直接用吗（存在、完整、能解）。"""
+    return _rendered_clip_is_usable(video_file)
 
 
 def render_image_zoom_video(

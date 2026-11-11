@@ -28,6 +28,7 @@ at once and is the wrong entry point for a single scene.
 
 from __future__ import annotations
 
+import math
 import os
 import re
 import shutil
@@ -45,7 +46,7 @@ from app.models.schema import (
     VideoTransitionMode,
 )
 from app.services import llm, material, scene_manifest, task_artifacts, timeline
-from app.services import bgm, transition_sound
+from app.services import bgm, transition_sound, voice
 from app.utils import subtitle_reader, subtitle_writer
 from app.services import state as sm
 from app.services import task as tm
@@ -1078,6 +1079,102 @@ def prepare_audio_rerun(task_id: str) -> VideoParams:
     return params
 
 
+def unfinished_materials(task_id: str) -> dict:
+    """这条任务的画面是不是出了一半就断了，断在哪儿。
+
+    素材阶段半路失败是文生图任务最常见的死法：一张一张买，买到第二十九张
+    连接被掐断。那二十九张的钱已经付了、文件就在盘上，可任务清单里没有场景
+    ——界面上它是 "0 scenes"，点开一片空白。
+
+    这里回答的是"还能不能接着跑"：盘上有已经渲好的画面、有配音、还知道该
+    画什么（关键词），就能接着跑。``pictures`` 是已经出完的张数,``needed``
+    是铺满旁白一共要几张,给界面说清楚"接着跑"要补多少。
+
+    Materials dying halfway is how a text-to-image task usually fails: one
+    picture bought at a time, cut off at the 29th. Those 29 are paid for and
+    on disk, but with no scenes in the manifest the task reads "0 scenes" and
+    opens empty. This answers whether it can be picked up: rendered pictures
+    on disk, a narration, and the keywords that say what to draw.
+    """
+    empty = {"resumable": False, "pictures": 0, "needed": 0, "narration": 0.0}
+    manifest = scene_manifest.load(task_id)
+    if manifest["scenes"]:
+        # 场景已经写进清单了,这条任务是可以审片、可以渲染的正常任务。
+        return empty
+
+    raw = scene_manifest.load_raw(task_id)
+    sources = raw.get("material_sources")
+    pictures = len(sources) if isinstance(sources, list) else 0
+    if not pictures:
+        return empty
+
+    terms = raw.get("search_terms")
+    if not isinstance(terms, list) or not [t for t in terms if str(t).strip()]:
+        return empty
+
+    # 配音是接着跑的时间基准。清单里没写也行,盘上那一份就是（素材阶段失败
+    # 的任务正是"配音出完了但清单还没写"）。
+    narration = 0.0
+    audio = manifest.get("audio_file")
+    if not audio:
+        fallback = os.path.join(utils.task_dir(task_id), "audio.mp3")
+        audio = fallback if os.path.isfile(fallback) else ""
+    if not audio:
+        return empty
+    try:
+        narration = float(manifest.get("audio_duration") or 0.0)
+    except (TypeError, ValueError):
+        narration = 0.0
+    if narration <= 0:
+        try:
+            narration = float(voice.get_audio_duration(audio) or 0.0)
+        except Exception as exc:
+            logger.warning(f"cannot measure the narration of {task_id}: {exc}")
+            narration = 0.0
+    if narration <= 0:
+        return empty
+
+    params = raw.get("params") if isinstance(raw.get("params"), dict) else {}
+    try:
+        hold = max(1.0, float(params.get("video_clip_duration") or 1))
+    except (TypeError, ValueError):
+        hold = 1.0
+    needed = max(1, math.ceil(narration / hold))
+    if pictures >= needed:
+        # 画面其实已经够了,只是场景清单没写成。接着跑一次就把清单补上,
+        # 而且一张图都不用再买。
+        needed = pictures
+    return {
+        "resumable": True,
+        "pictures": pictures,
+        "needed": needed,
+        "narration": round(narration, 1),
+    }
+
+
+def prepare_materials_rerun(task_id: str) -> VideoParams:
+    """准备"把这条任务没出完的画面出完"所需的参数。
+
+    走流水线自己的 materials 阶段（``start_from="materials"``,
+    ``stop_at="materials"``),不在这里自己拼素材：那个阶段里有提供方校验、
+    按需生成、清单落盘一整串既有行为。已经买下并渲好的画面由素材阶段自己
+    认出来接着用（见 ``material._clips_already_paid_for``),所以这里不需要
+    也不应该告诉它跳过几张。
+
+    停在 materials 而不是一路渲到成片：出完画面先回到审片界面,让用户看过
+    再决定渲不渲。这和一条正常任务在 ``review_before_render`` 下的落点一样。
+    """
+    _require_idle(task_id)
+    state = unfinished_materials(task_id)
+    if not state["resumable"]:
+        raise SceneError(
+            "there is nothing to pick up for this task: it needs pictures "
+            "already generated on disk, a narration, and the keywords that "
+            "say what to draw"
+        )
+    return load_params(task_id)
+
+
 # 一段画面可以自己挑的转场。键是接口和界面用的 id，值是渲染器认的那个字符
 # 串（``VideoTransitionMode`` 的 value）。"none" 是显式的"这一刀不要转场"，
 # 和"没挑过"不是一回事：前者压过整条片子的设置，后者跟着它走。
@@ -1304,6 +1401,10 @@ def _library_entry(task_id: str, changed_at: float, endpoint: str) -> dict:
         "source": str(params.get("video_source") or ""),
         "updated_at": round(float(changed_at), 3),
         "rendered": bool(finals),
+        # 画面出了一半就断掉的任务要能一眼看出来,并且能直接接着跑。只在没有
+        # 场景的任务上算,正常任务不多付一次探测配音时长的代价。
+        "unfinished": unfinished_materials(task_id) if not scenes else
+        {"resumable": False, "pictures": 0, "needed": 0, "narration": 0.0},
         "video_url": media_url(task_id, os.path.join(directory, finals[-1]), endpoint)
         if finals else "",
         # 第一段画面当封面。读不出来就空着，界面画一个占位块。

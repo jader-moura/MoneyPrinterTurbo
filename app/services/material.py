@@ -2,6 +2,7 @@ import base64
 from concurrent.futures import ThreadPoolExecutor
 from contextvars import copy_context
 import io
+import itertools
 import math
 import os
 import random
@@ -2194,6 +2195,91 @@ def _terms_to_cover(
         yield terms[position % len(terms)]
 
 
+def _clips_already_paid_for(
+    task_id: str,
+    material_directory: str,
+    provider: str,
+    max_clip_duration: int,
+    image_motion: ImageMotion,
+) -> tuple[list[str], list[dict[str, Any]], float]:
+    """这个任务上一轮已经生成并渲好的片段，接着用而不是重新买一遍。
+
+    文生图按张计费。一个任务跑到第 29 张时连接被掐断，那 29 张已经付过钱、
+    已经渲成 mp4、已经写进任务清单——重跑一次素材阶段就把这 29 笔重新付了
+    一遍，而且得到的还是另外 29 张不一样的图。
+
+    靠文件名认人，不靠清单里的数字：片段名是"图片内容 + 时长 + 运镜"的内容
+    寻址（见 ``video.image_clip_suffix``），所以时长或运镜一改，上一轮的片段
+    就对不上后缀，会被整批放过去重新生成——这正是想要的，用那批片段拼出来的
+    成片节奏已经不是用户现在要的了。
+
+    画风（``prompt_template``）没有进文件名，所以改画风后接着跑会留着旧画风
+    的图。这里不去管它：换画风会开一条新任务（新的 task_id、新的目录），能走
+    到这个函数的只有"接着把这条任务没出完的图出完"。
+
+    Text-to-image bills per picture. A task cut off at its 29th picture has
+    already paid for those 29, rendered them to mp4 and recorded them in the
+    manifest; re-running the materials stage from scratch pays all 29 again
+    and gets 29 *different* pictures for the money.
+
+    Recognition is by filename, not by the manifest's numbers: a clip name
+    content-addresses the image, the duration and the motion, so changing the
+    hold or the motion makes the whole batch stop matching and be generated
+    again — which is what should happen, because a video cut from those clips
+    no longer has the rhythm the user asked for.
+    """
+    try:
+        recorded = task_artifacts.read_script_data(task_id).get("material_sources")
+    except Exception as exc:
+        logger.warning(
+            "cannot read the earlier material records, generating from the "
+            f"first keyword: task_id={task_id}, error={type(exc).__name__}, "
+            f"detail={exc}"
+        )
+        return [], [], 0.0
+    if not isinstance(recorded, list) or not recorded:
+        return [], [], 0.0
+
+    suffix = video.image_clip_suffix(max_clip_duration, image_motion)
+    paths: list[str] = []
+    sources: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    total = 0.0
+    for record in recorded:
+        if not isinstance(record, dict):
+            continue
+        if str(record.get("provider") or "") != provider:
+            continue
+        name = str(record.get("local_file") or "")
+        if not name or not name.endswith(suffix):
+            continue
+        clip = os.path.join(material_directory, os.path.basename(name))
+        key = os.path.normcase(os.path.abspath(clip))
+        if key in seen:
+            continue
+        if not video.rendered_clip_is_usable(clip):
+            # 文件被删了或者当时没写完。缺的那一张照常重新生成，但不能因为
+            # 一张坏片就把其余完好的片段也一起丢掉重买。
+            logger.info(f"an earlier clip is gone or unusable, skipping: {name}")
+            continue
+        seen.add(key)
+        paths.append(clip)
+        sources.append(record)
+        try:
+            held = float(record.get("duration") or 0.0)
+        except (TypeError, ValueError):
+            held = 0.0
+        total += min(float(max_clip_duration), held) if held > 0 else 0.0
+
+    if paths:
+        logger.info(
+            f"continuing where the earlier run stopped: {len(paths)} picture(s) "
+            f"already generated and rendered for this task cover "
+            f"{total:.0f}s; they are not generated or paid for again"
+        )
+    return paths, sources, total
+
+
 def _download_videos_openai_image_on_demand(
     *,
     task_id: str,
@@ -2207,6 +2293,7 @@ def _download_videos_openai_image_on_demand(
     provider: str = "openai_image",
     codex_image_context=None,
     prompt_template: str = "",
+    continue_unfinished: bool = False,
 ) -> List[str]:
     """
     按脚本片段顺序逐张生成 OpenAI 兼容文生图素材，凑够所需总时长立即停止。
@@ -2237,6 +2324,39 @@ def _download_videos_openai_image_on_demand(
         logger.warning(
             "skip openai image generation because required audio duration is "
             f"not positive: duration={audio_duration}"
+        )
+        _persist_material_sources(task_id, material_sources)
+        return video_paths
+
+    # 上一轮已经买下并渲好的片段先接上，剩下的缺口才去发付费请求。
+    #
+    # 只有"把这条任务铺满旁白"的那一趟才接。默认必须是关的：编辑器里重生成
+    # 一张图走的是同一个函数（见 ``scene_editor._produce_material``），而它要
+    # 的是"照我刚填的提示词重画一张"。那一趟的 ``audio_duration`` 只有一段
+    # 片长,任务目录里随便哪一张旧图都"够"——于是用户改了提示词,拿回来的却是
+    # 片子里已经在用的那张微波炉。
+    #
+    # Only the pass that fills a whole narration picks up earlier clips. The
+    # default must be off: regenerating one picture in the editor goes through
+    # this same function, and it asks for a fresh picture from the prompt just
+    # typed. That call's ``audio_duration`` is a single clip, so any old
+    # picture in the task folder already "covers" it — which is how a changed
+    # prompt came back as the microwave the video was already using.
+    done_paths, done_sources, done_duration = (
+        _clips_already_paid_for(
+            task_id, material_directory, provider, max_clip_duration, image_motion
+        )
+        if continue_unfinished
+        else ([], [], 0.0)
+    )
+    video_paths.extend(done_paths)
+    material_sources.extend(done_sources)
+    total_duration += done_duration
+    if total_duration >= required_duration:
+        logger.success(
+            f"the {len(video_paths)} picture(s) this task already generated "
+            f"cover the narration ({total_duration:.1f}s of "
+            f"{required_duration:.1f}s); nothing left to generate"
         )
         _persist_material_sources(task_id, material_sources)
         return video_paths
@@ -2280,8 +2400,14 @@ def _download_videos_openai_image_on_demand(
     #
     # 这会比以前多发若干次付费请求，上限是"铺满旁白所需的张数"——也就是
     # 本来就该生成的张数，不会超出。
-    for search_term in _terms_to_cover(
-        search_terms, required_duration, max_clip_duration
+    # 已经出完的那几张对应的关键词要跳过：一次产出一张图，第 N 张图就是第
+    # N 个关键词，所以从第 len(video_paths)+1 个关键词接着往下走。
+    # One picture comes out per keyword, so the Nth picture is the Nth keyword
+    # and a resumed run picks the keywords up after the ones already answered.
+    for search_term in itertools.islice(
+        _terms_to_cover(search_terms, required_duration, max_clip_duration),
+        len(video_paths),
+        None,
     ):
         try:
             items = image_generator(
@@ -2667,9 +2793,14 @@ def download_videos(
     jalapeno_video_endpoint: volcengine_seedance.SeedanceEndpoint | None = None,
     codex_image_context=None,
     image_prompt_template: str = "",
+    continue_unfinished: bool = False,
 ) -> List[str]:
     """
     搜索并下载覆盖配音时长所需的素材，返回本地文件路径。
+
+    ``continue_unfinished`` 只有出片流水线的素材阶段会打开：它表示"这是
+    把这条任务铺满旁白的那一趟，上一趟已经买下的画面接着用"。编辑器里
+    重生成单张图不能打开它，否则用户改了提示词还是拿回那张旧图。
 
     ``image_prompt_template`` 只对文生图的素材源有意义：任务记下的画风模板
     要能盖过 config.toml "现在"的值。留空就按配置来，与以前一致。
@@ -2792,6 +2923,7 @@ def download_videos(
             material_directory=material_directory,
             image_motion=image_motion,
             prompt_template=str(image_prompt_template or ""),
+            continue_unfinished=continue_unfinished,
             **image_options,
         )
 

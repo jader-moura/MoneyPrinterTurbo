@@ -93,7 +93,23 @@ def _require_task(task_id: str, request_id: str) -> dict:
     if task:
         return task
     try:
-        if scene_manifest.load(task_id)["scenes"]:
+        manifest = scene_manifest.load(task_id)
+        # 有场景就是"跑完素材、可以审片"的任务。
+        #
+        # 没有场景也可能是一条真实存在的任务：素材阶段半路死掉的那种。文生图
+        # 一张一张买，二十九张之后连接被掐断——场景清单是在素材阶段全部成功
+        # 之后才写的，所以那条任务盘上有脚本、有关键词、有配音、有二十九段
+        # 已经付过钱的画面，却一个场景都没有。以前它在这里就是 404,"接着把
+        # 画面出完"这件事连门都进不去。
+        #
+        # 判据退到"这个任务跑到过脚本阶段"，和列表页认任务的口径一致。
+        #
+        # A task with no scenes can still be a real one: materials dying
+        # halfway leaves the script, the keywords, the narration and the
+        # pictures already paid for on disk, but no scene list, because that
+        # is only written once materials fully succeed. Such a task used to
+        # 404 on every editor route, so there was no way in to finish it.
+        if manifest["scenes"] or manifest["script"]:
             # state 里没有，说明这个进程没在跑它；按空字典返回，
             # 让 ``_require_idle`` 自己再去判断忙碌状态。
             return {}
@@ -1002,6 +1018,25 @@ def render_task(request: Request, task_id: str = Path(..., description="Task ID"
         )
     params = _handle(task_id, request_id, lambda: scene_editor.prepare_render(task_id))
     return _submit(task_id, request_id, params, stop_at="video", start_from="video")
+
+
+@router.post(
+    "/tasks/{task_id}/materials",
+    response_model=TaskResponse,
+    summary="Finish the pictures a failed run left unfinished",
+)
+def resume_materials(request: Request, task_id: str = Path(..., description="Task ID")):
+    """把素材阶段半路断掉的任务接着跑完，不重新买已经出完的画面。
+
+    停在 materials：出完画面先回审片界面。配音不重配——重配一次字幕时间轴
+    全废,而这条任务的配音本来就是好的。
+    """
+    request_id = base.get_task_id(request)
+    _require_task(task_id, request_id)
+    params = _handle(
+        task_id, request_id, lambda: scene_editor.prepare_materials_rerun(task_id)
+    )
+    return _submit(task_id, request_id, params, stop_at="materials", start_from="materials")
 
 
 def _scene_payload(task_id: str, index: int) -> dict:

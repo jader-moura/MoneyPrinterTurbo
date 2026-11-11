@@ -371,8 +371,26 @@ def _resumed_audio(task_id, resumed: dict, start_from: str) -> tuple[str, float]
     把配音换掉。文件探测失败时才退回清单值，两者都拿不到就返回 0，由调用方
     给出明确错误而不是带着错误的时间基准去渲染。
     """
+    recorded = resumed.get("audio_file")
+    if not recorded:
+        # 清单里没写配音，但盘上可能就躺着。素材阶段半路失败的任务以前就是
+        # 这样：配音、字幕都出完了，清单却只在素材阶段**全部成功之后**才写，
+        # 于是那条任务连"从素材接着跑"都做不到，只能整条重来。
+        #
+        # The manifest may have no narration recorded while the file is right
+        # there on disk: a task that died inside the materials stage had its
+        # narration and subtitles finished, but the manifest was only written
+        # once materials fully succeeded, so the run could not even be
+        # resumed from materials and had to start over from the script.
+        fallback = path.join(utils.task_dir(task_id), "audio.mp3")
+        if path.isfile(fallback):
+            logger.info(
+                f"the manifest has no narration recorded; using the one on "
+                f"disk: {fallback}"
+            )
+            recorded = fallback
     try:
-        audio_file = scene_manifest.resolve_task_file(task_id, resumed.get("audio_file"))
+        audio_file = scene_manifest.resolve_task_file(task_id, recorded)
     except scene_manifest.SceneError as exc:
         logger.warning(
             f"cannot resume at {start_from!r}, task_id: {task_id}, audio: {exc}"
@@ -1003,6 +1021,12 @@ def get_video_materials(
                 image_motion=params.image_motion,
                 # 出片用的画风。和下面重生成读的是同一个值，两者不会分叉。
                 image_prompt_template=resolve_image_prompt_template(params),
+                # 这是"把这条任务铺满旁白"的那一趟,所以上一趟半路断掉时已经
+                # 买下并渲好的画面接着用。新任务的目录是空的,这个开关对它没有
+                # 任何影响;真正用到它的是从素材阶段恢复的那条路。
+                # 编辑器里重生成单张图走的是同一个下载函数但不开这个开关——
+                # 那里要的是照新提示词重画,不是把旧图找回来。
+                continue_unfinished=True,
                 # 素材阶段占用 40%~50%：每下完一个文件推进一次，慢速网络下
                 # 进度条不再长时间停在 40%。
                 progress_callback=_stage_progress_reporter(task_id, 40, 50),
@@ -2155,9 +2179,16 @@ def _run_pipeline(
         # 没有就当作没有字幕"，不把缺失当成错误。
         # Subtitles may legitimately be absent because the user turned them
         # off, so a missing file here means "no subtitles", not a failure.
+        recorded_subtitle = resumed.get("subtitle_path")
+        if not recorded_subtitle:
+            # 和配音同一个原因：素材阶段半路失败的任务字幕已经出完了，只是
+            # 还没被写进清单。
+            fallback = path.join(utils.task_dir(task_id), "subtitle.srt")
+            if path.isfile(fallback):
+                recorded_subtitle = fallback
         try:
             subtitle_path = scene_manifest.resolve_task_file(
-                task_id, resumed.get("subtitle_path")
+                task_id, recorded_subtitle
             )
         except scene_manifest.SceneError:
             subtitle_path = ""
@@ -2193,6 +2224,33 @@ def _run_pipeline(
         return {"subtitle_path": subtitle_path}
 
     sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=40)
+
+    # 配音和字幕一出来就落盘，不等素材阶段成功。
+    #
+    # 以前恢复渲染需要的东西（配音、字幕、场景顺序）是在素材阶段**全部跑完
+    # 之后**一次性写进清单的。文生图一张一张买，二十九张之后连接被掐断——
+    # 那二十九张钱已经花了、文件也在盘上，但清单里一个字都没写：界面上这条
+    # 任务是 "0 scenes"，点进去什么都没有，也没法从素材接着跑，用户只能从
+    # 脚本整条重来，再把二十九张重新买一遍。
+    #
+    # 写在这里，素材阶段再怎么半路死掉，这条任务都还能从素材接着跑：配音不
+    # 重配（重配一次字幕时间轴全废），已经出完的画面不重买。
+    #
+    # Record the narration and subtitles as soon as they exist, without
+    # waiting for the materials stage to succeed. What a resumed render needs
+    # used to be written in one go *after* materials finished; text-to-image
+    # buys one picture at a time, so a connection dropped at the 29th left
+    # those 29 paid for and on disk with nothing in the manifest — the task
+    # read "0 scenes", opened empty, and could not be resumed from materials,
+    # so the only way on was to start from the script and buy all 29 again.
+    if runs("audio") or runs("subtitle"):
+        scene_manifest.record_audio_artifacts(
+            task_id,
+            audio_file=audio_file,
+            audio_duration=audio_duration,
+            subtitle_path=subtitle_path,
+            script=video_script,
+        )
 
     # 5. Get video materials
     if not runs("materials"):
