@@ -46,6 +46,7 @@ const ui = {
   cutPreview: el("cut-preview"),
   approve: el("approve"), approveCount: el("approve-count"),
   approveNote: el("approve-note"), approveDraw: el("approve-draw"),
+  approveOne: el("approve-one"),
   libraryToggle: el("library-toggle"), library: el("library"),
   libraryGrid: el("library-grid"), libraryCount: el("library-count"),
   libraryClose: el("library-close"), libraryMore: el("library-more"),
@@ -583,6 +584,8 @@ function drawQueue() {
     }
     // 点一行就跳到那一段，省得自己在时间线上找。
     label.addEventListener("click", () => {
+      // 跳走之前先把框里没存的那一笔存掉。
+      savePromptEdit();
       // 跳到它**现在**在的那一段，不是排队时那一段。
       if (at === null || !state.scenes[at]) return;
       state.selected = at;
@@ -600,6 +603,20 @@ function drawQueue() {
 
    所以流水线跑到字幕就停下，把位置摆出来、提示词填进去，旁白和字幕都在，
    用户可以一边听一边改。这条横幅是"改完了，开画"那一步。 */
+/** 先试哪一张。
+
+    选中的那一段还没画就试它——用户正看着它的提示词，换成别的那一段会
+    让人以为按错了；没选中或者选中的已经有图了，就挑时间线上第一张还没画的。
+
+    只剩一张没画时返回 null：试那一张和全画完是同一件事，多一个按钮只是
+    多一个要读的东西。 */
+function sampleScene() {
+  const waiting = (state.scenes || []).filter(isPending);
+  if (waiting.length < 2) return null;
+  const picked = (state.scenes || [])[state.selected];
+  return picked && isPending(picked) ? picked : waiting[0];
+}
+
 function drawApprove() {
   const waiting = (state.scenes || []).filter(isPending);
   // 一张不缺就别占着地方。
@@ -613,6 +630,14 @@ function drawApprove() {
     (job) => job.state === "queued" || job.state === "running"
   ).length;
   const left = Math.max(0, waiting.length - queued);
+  // 已经有图的那几段。数它是为了把"不会重画"说出口：先试过一张的人
+  // 站在"开画"前最想知道的就是那一张会不会被再画一遍。
+  const drawn = Math.max(0, (state.scenes || []).length - waiting.length);
+
+  // 先试一张。最贵的错误不是一张图画坏了，是整批两百张都照着一个不对的
+  // 画风、一种不对的提示词写法画完——那要几个小时，而且看得出不对的时候
+  // 已经付过钱了。队列里已经有活了就收起来：整批都开了，再说"先试一张"已经晚了。
+  const sample = queued ? null : sampleScene();
 
   ui.approveCount.textContent = queued
     ? `Drawing ${queued} picture${queued === 1 ? "" : "s"}…`
@@ -622,14 +647,49 @@ function drawApprove() {
       + "the timeline — anything not yet started will use what you leave here."
     : "Check the prompts first: click a slot to read the line it plays over "
       + "and change what gets drawn. Nothing is drawn until you say so, and "
-      + "each picture takes a few minutes.";
+      + "each picture takes a few minutes"
+      + (sample
+        ? ` — so try one first and look at it before you commit `
+          + `to all ${waiting.length}.`
+        : ".")
+      + (drawn
+        ? ` The ${drawn} already drawn ${drawn === 1 ? "is" : "are"} left `
+          + "alone."
+        : "");
+
+  ui.approveOne.hidden = !sample;
+  if (sample) {
+    ui.approveOne.disabled = !!state.busy;
+    const prompt = String(sample.keyword || sample.keyword_suggestion || "").trim();
+    ui.approveOne.title = `Draws scene ${sample.index + 1} on its own`
+      + (prompt ? `: ${prompt}` : "")
+      + ". Nothing else is drawn, so you can look at the style first.";
+  }
   ui.approveDraw.disabled = !!state.busy || left === 0;
-  ui.approveDraw.textContent = left === waiting.length
-    ? "Draw the pictures"
-    : `Draw the remaining ${left}`;
+  // 有人已经画过了就写"剩下的"。写"Draw the pictures"会让人以为连已经
+  // 画好的那几张也要重来——而那正是最贵的误会。
+  ui.approveDraw.textContent = (drawn || queued)
+    ? `Draw the remaining ${left}`
+    : "Draw the pictures";
 }
 
+/** 只排一张。走的是单段重生成那条路（服务端本来就允许还没出图的那几段进
+    队），所以这里不需要新接口：缺的只是一个说得出口的入口。 */
+ui.approveOne.addEventListener("click", async () => {
+  // 框里可能还有刚改的字（防抖那半秒）。试的就该是用户现在看到的那一笔。
+  await savePromptEdit();
+  const sample = sampleScene();
+  if (!sample) return;
+  // 跳到它：图出来了总得知道该看哪一段，而且接下来要改的就是它的提示词。
+  state.selected = sample.index;
+  draw();
+  await queueRegeneration(sample.index, null, null);
+});
+
 ui.approveDraw.addEventListener("click", () => run("Queueing the pictures", async () => {
+  // 开画读的是清单里存着的提示词。框里还有没落盘的那一笔，现在存——
+  // 两百张照旧词画完是这一屏最贵的一种错。
+  await savePromptEdit();
   const result = await call(
     "POST", `/tasks/${encodeURIComponent(state.taskId)}/scenes/draw`
   );
@@ -843,9 +903,12 @@ function drawClips() {
 
     const text = document.createElement("div");
     text.className = "clip-text";
-    text.textContent = `${index + 1}. ${scene.keyword || scene.material || ""}`
-      + ` · ${span.toFixed(1)}s`
+    // 后半截（时长和状态）存在节点上：提示词边打边存时要就地换掉前半截，
+    // 而不能重画整条时间线——重画会把正在打字的框连光标一起换掉。
+    text.dataset.suffix = ` · ${span.toFixed(1)}s`
       + (waiting ? " · to draw" : scene.exists ? "" : " · missing");
+    text.textContent = `${index + 1}. ${scene.keyword || scene.material || ""}`
+      + text.dataset.suffix;
     clip.appendChild(text);
 
     // 排着队要重出的那几段，在轨道上就标出来：用户是在时间线上挑画面的，
@@ -1102,6 +1165,127 @@ function drawTotals() {
     + "Generated images are re-rendered at the new length.";
 }
 
+/* ---------- 提示词随改随存 ----------
+
+   这一屏的全部意义是"先把提示词改对，再开画"。而"开画"和"先试一张"
+   读的是**清单里存着的**那个词，不是框里的字：改完没点保存就开画，等于
+   照着旧词画两百张。最坏的是这事根本看不出来：框里明明写着新的。
+
+   所以改完就存：停手半秒存一次，焦点离开再存一次，开画之前还要再确认
+   一次没有落下的那一笔。
+
+   这里不走 ``run()``：那会禁掉整屏按钮、弹一条 "Saving…"、再重读整条
+   时间线。改一个词不该有这么大动静，所以只在没存上的时候说话。 */
+
+const PROMPT_SAVE_DELAY = 600;
+
+/** 正在编辑的那个提示词框：``{ id, input, saved, timer }``。
+
+    记的是场景**身份**而不是下标。存一次要等半秒，而这半秒里用户完全
+    可以去拖动画面；下标一旦不再指向同一段，这一笔就存到别人头上了。 */
+let promptEdit = null;
+
+/** 输入框下面那一行小字：``{ id, text, kind }``，``null`` 是不说话。
+
+    自动保存最大的毛病是看不见：存了没存都是同一副样子，用户只能赌。
+    没存上的时候尤其要命：他以为存下了，然后照旧词画了两百张。 */
+let promptStatus = null;
+let promptStatusTimer = 0;
+
+/** 就地改那一行小字，不重画整个面板——重画会把正在打字的框换掉。
+
+    只在屏上真的停在那一段时才动 DOM：存的是上一段而人已经看到别处时，
+    把 "Saved" 写到别人的框下面比什么都不写还坏。 */
+function setPromptStatus(id, message, kind) {
+  clearTimeout(promptStatusTimer);
+  promptStatus = message ? { id, text: message, kind: kind || "" } : null;
+  const scene = (state.scenes || [])[state.selected];
+  const showing = scene && (scene.id || materialKey(scene.material)) === id;
+  const node = ui.inspBody.querySelector(".prompt-status");
+  if (!node || !showing) return;
+  node.textContent = message || "";
+  node.className = "hint prompt-status" + (kind ? " " + kind : "");
+}
+
+/** 按身份找它现在落在第几段。和 ``jobScene`` 用的是同一把尺子。 */
+function sceneIndexById(id) {
+  if (!id) return -1;
+  return (state.scenes || []).findIndex(
+    (scene) => (scene.id || materialKey(scene.material)) === id
+  );
+}
+
+/** 把框里的字存下去。没改过、或者那一段已经不在了，就什么都不做。
+
+    不传参就是"把现在这个框里没存的那一笔存掉"——开画之前谁都可以调一下。 */
+async function savePromptEdit(edit) {
+  const target = edit || promptEdit;
+  if (!target) return;
+  clearTimeout(target.timer);
+  const value = String(target.input.value);
+  if (value === target.saved) return;
+  // 没有身份可认时（早于 scene_id 的老清单）退回接管时的那个下标——和
+  // 以前那个 "Save prompt" 按钮一样，不更坏。有身份就一律按身份找，认不
+  // 出来就说明那一段已经没了，这一笔没有归宿，宁可不存。
+  const at = target.id ? sceneIndexById(target.id) : target.index;
+  if (!Number.isInteger(at) || at < 0 || !(state.scenes || [])[at]) return;
+  // 先记下来再发：发的过程里用户还在打字，回头不能把更新的字当成旧的。
+  target.saved = value;
+  setPromptStatus(target.id, "Saving…");
+  try {
+    await call("PUT", scenePath(at), { keyword: value });
+  } catch (error) {
+    // 没存上就要说，而且下一次还要再试。默默失败比根本没有自动保存
+    // 更坏：用户以为存下了，然后照旧词画了两百张。
+    target.saved = null;
+    setPromptStatus(target.id, `Not saved: ${error.message || error}`, "warn");
+    say(`The prompt was not saved: ${error.message || error}`, "error");
+    return;
+  }
+  setPromptStatus(target.id, "Saved");
+  promptStatusTimer = setTimeout(() => {
+    if (promptStatus && promptStatus.id === target.id
+        && promptStatus.text === "Saved") {
+      setPromptStatus(target.id, "");
+    }
+  }, 2500);
+  const scene = (state.scenes || [])[at];
+  if (scene) scene.keyword = value;
+  // 时间线上每一段写的就是它的提示词，存完要跟着变。但框还在手里时
+  // 不能重画整屏（会把框连光标一起换掉），所以只把那一行的前半截换了。
+  // 不换的话时间线上会一直写着旧词，看上去就是"根本没存下"。
+  if (document.activeElement === target.input) {
+    const label = ui.videoTrack.querySelector(
+      `.clip[data-index="${at}"] .clip-text`
+    );
+    if (label && scene) {
+      label.textContent = `${at + 1}. ${value || scene.material || ""}`
+        + (label.dataset.suffix || "");
+    }
+  } else {
+    draw();
+  }
+}
+
+/** 接管一个提示词框。换到别的场景时先把上一笔存掉（不等它）。 */
+function trackPromptEdits(scene, input) {
+  if (promptEdit && promptEdit.input !== input) savePromptEdit(promptEdit);
+  const edit = {
+    id: scene.id || materialKey(scene.material),
+    index: scene.index,
+    input,
+    saved: String(scene.keyword || ""),
+    timer: 0,
+  };
+  promptEdit = edit;
+  input.addEventListener("input", () => {
+    clearTimeout(edit.timer);
+    edit.timer = setTimeout(() => savePromptEdit(edit), PROMPT_SAVE_DELAY);
+  });
+  // 焦点离开就别再等那半秒了。点别的按钮也会先经过这里。
+  input.addEventListener("change", () => savePromptEdit(edit));
+}
+
 /* ---------- inspector ---------- */
 
 function drawInspector() {
@@ -1133,6 +1317,19 @@ function drawInspector() {
     keyword.input.placeholder = scene.keyword_suggestion;
   }
   ui.inspBody.append(keyword.wrap);
+  // 存没存下去要看得见。重画之后也要还在，所以话存在 ``promptStatus``
+  // 里，不存在这个节点上。
+  const promptNote = document.createElement("p");
+  promptNote.className = "hint prompt-status";
+  const sceneKey = scene.id || materialKey(scene.material);
+  if (promptStatus && promptStatus.id === sceneKey) {
+    promptNote.textContent = promptStatus.text;
+    if (promptStatus.kind) promptNote.classList.add(promptStatus.kind);
+  }
+  ui.inspBody.appendChild(promptNote);
+  // 改完就存。下面那个 "Save prompt" 按钮留着：它现在是"我现在就要存"，
+  // 而不再是"不点就丢"。
+  trackPromptEdits(scene, keyword.input);
 
   // 画风紧跟在关键词下面：关键词说画什么，画风说画成什么样，改完一起
   // 重生成。默认是这条片子出片时用的那个风格——以前重生成读的是 API
@@ -1150,14 +1347,18 @@ function drawInspector() {
   // **排队**：请求立刻回来，按钮也不禁用，用户接着挑下一段点"重出"，或者
   // 去改别处的台词和时长。等着出的那几张在上面那条队列栏里，出完一张
   // 时间线自己就换成新画面。
-  const regenerate = button(regenerateLabel(scene), "primary", () =>
+  const regenerate = button(regenerateLabel(scene), "primary", async () => {
+    // 框里的字先落盘再排队。这一张本来就是照这几个字画的，但清单里
+    // 存着的也得是它——不然待会儿"开画"还会照旧词把这一段再画一遍。
+    await savePromptEdit();
     queueRegeneration(
       scene.index,
       keyword.input.value || null,
       // 下拉框在就把它的值发出去，空字符串是"和这条片子一样"，
       // 和"没有下拉框"(null,沿用上次挑的)不是一回事。
       style ? style.input.value : null
-    ));
+    );
+  });
   ui.inspBody.appendChild(regenerate);
 
   // 这一段已经排着了就说出来。不说的话，用户点完看不出任何变化，只会
@@ -1379,7 +1580,11 @@ function isGenerated(scene) {
 }
 
 function regenerateLabel(scene) {
-  return isGenerated(scene) ? "Generate new image" : "Find another clip";
+  if (!isGenerated(scene)) return "Find another clip";
+  // 还没画过的那一段不是"重出",是第一次出。按钮写着"Generate new image"
+  // 时没人会去点它:这一屏在等"开画",用户以为得先让整批跑起来才轮得到这
+  // 一张。而这里恰恰是最该点的地方——只排这一张,看过画风再决定整批。
+  return isPending(scene) ? "Draw this one now" : "Generate new image";
 }
 
 function field(label, tag, value, type) {
@@ -1531,6 +1736,8 @@ function markSelection() {
 
 function startDrag(event) {
   if (event.target.classList.contains("handle")) return;
+  // 拖之前先把没存的那一笔存掉：拖完了下标全变，那一笔就难找归宿了。
+  savePromptEdit();
   const index = Number(event.currentTarget.dataset.index);
   state.selected = index;
   state.adding = false;
@@ -1583,6 +1790,8 @@ function startDrag(event) {
 
 function startTrim(event) {
   event.stopPropagation();
+  // 拉边框也会把面板换到别的段上去，和点别的画面一样要先存。
+  savePromptEdit();
   const index = Number(event.currentTarget.dataset.index);
   const side = event.currentTarget.dataset.side;
   const scene = state.scenes[index];
@@ -3102,3 +3311,24 @@ if (initial) {
   // 不是一个能开始工作的地方。
   loadLibrary(1);
 }
+
+/* 关页前的最后一次机会。``keepalive`` 让这一条在页面没了之后继续发完；
+   普通 fetch 会跟着页面一起被取消，那一笔就没了。 */
+window.addEventListener("pagehide", () => {
+  if (!promptEdit || !state.taskId) return;
+  const value = String(promptEdit.input.value);
+  if (value === promptEdit.saved) return;
+  const at = promptEdit.id ? sceneIndexById(promptEdit.id) : promptEdit.index;
+  if (!Number.isInteger(at) || at < 0) return;
+  const headers = { "Content-Type": "application/json" };
+  const key = apiKey();
+  if (key) headers["x-api-key"] = key;
+  try {
+    fetch(API + scenePath(at), {
+      method: "PUT",
+      headers,
+      body: JSON.stringify({ keyword: value }),
+      keepalive: true,
+    });
+  } catch { /* 走都走了，没人可以告诉 */ }
+});

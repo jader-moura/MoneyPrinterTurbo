@@ -220,3 +220,163 @@ class TestDrawingThemAll:
             with pytest.raises(scene_manifest.SceneError):
                 scene_regen_queue.enqueue_pending("bad")
         assert scene_regen_queue.snapshot("bad")["waiting"] == 0
+
+
+class TestTryingOneFirst:
+    """先试一张，再开整批。
+
+    出图最贵的错误不是某一张画坏了，而是两百张全照着一个不对的画风、一种
+    不对的提示词写法画完——几个小时之后才看得出来，而且钱已经花了。所以
+    提示词那一屏上要有"只画这一张"的入口：看过一张再决定整批。
+
+    服务端本来就允许还没出图的那几段单独进队（``check_regenerate`` 不要求
+    这一段已经有文件），所以那个入口不需要新接口。这组用例钉住的就是这条
+    路确实通、试的是用户改过的那个提示词、以及试完之后整批照常能开，不会
+    把试过的那张再画一遍。
+    """
+
+    @pytest.fixture(autouse=True)
+    def clean_queue(self):
+        scene_regen_queue._reset_for_tests()
+        yield
+        scene_regen_queue._reset_for_tests()
+
+    def test_one_slot_can_be_drawn_on_its_own(self, task_root):
+        _run_to_the_checkpoint(task_root, "sample")
+        scenes = scene_manifest.load("sample")["scenes"]
+        with patch.object(scene_regen_queue, "_ensure_worker"):
+            job = scene_regen_queue.enqueue("sample", 3)
+        assert job["scene_id"] == scenes[3]["id"]
+        assert job["keyword"] == scenes[3]["keyword"]
+        # 排的就是这一张，别人一张都没动。
+        assert scene_regen_queue.snapshot("sample")["waiting"] == 1
+
+    def test_the_prompt_typed_in_the_panel_is_the_one_drawn(self, task_root):
+        """改一笔再试——试的就该是改过的那一笔，否则这一趟白花。"""
+        _run_to_the_checkpoint(task_root, "typed")
+        with patch.object(scene_regen_queue, "_ensure_worker"):
+            job = scene_regen_queue.enqueue(
+                "typed", 1, keyword="a cracked wall clock at dawn"
+            )
+        assert job["keyword"] == "a cracked wall clock at dawn"
+
+    def test_drawing_the_rest_afterwards_skips_the_one_already_queued(self, task_root):
+        """试完一张接着开整批：试过的那张不该再排一次（双倍的钱和时间）。"""
+        _run_to_the_checkpoint(task_root, "then_all")
+        with patch.object(scene_regen_queue, "_ensure_worker"):
+            scene_regen_queue.enqueue("then_all", 2)
+            result = scene_regen_queue.enqueue_pending("then_all")
+        assert result["queued"] == 9
+        assert scene_regen_queue.snapshot("then_all")["waiting"] == 10
+
+
+class TestTheEditedPromptSurvivesTheClick:
+    """改完提示词就存，不等用户点保存。
+
+    "开画"和"先试一张"读的都是**清单里存着的**那个词。而提示词框原来只有
+    点了 "Save prompt" 才落盘：改完直接开画，画出来的是旧词那两百张，界面
+    上还看不出哪里不对——框里明明写着新的。编辑器现在改完就存（停手半秒、
+    焦点离开、开画之前各存一次），这一组钉住的是服务端这一半：存下去的就是
+    真正画出来的，而且存一个词不会把配音和字幕带下水。
+    """
+
+    @pytest.fixture(autouse=True)
+    def clean_queue(self):
+        scene_regen_queue._reset_for_tests()
+        yield
+        scene_regen_queue._reset_for_tests()
+
+    def test_a_saved_prompt_is_what_the_batch_draws(self, task_root):
+        _run_to_the_checkpoint(task_root, "saved")
+        scene_editor.update_scene("saved", 4, keyword="a cracked wall clock at dawn")
+        with patch.object(scene_regen_queue, "_ensure_worker"):
+            result = scene_regen_queue.enqueue_pending("saved")
+        assert result["jobs"][4]["keyword"] == "a cracked wall clock at dawn"
+        # 别人一个字都没被带着改。
+        assert result["jobs"][0]["keyword"] == "a clock"
+
+    def test_a_saved_prompt_is_what_a_single_draw_uses(self, task_root):
+        _run_to_the_checkpoint(task_root, "saved_one")
+        scene_editor.update_scene("saved_one", 2, keyword="a kitchen at night")
+        with patch.object(scene_regen_queue, "_ensure_worker"):
+            job = scene_regen_queue.enqueue("saved_one", 2)
+        assert job["keyword"] == "a kitchen at night"
+
+    def test_saving_a_prompt_does_not_invalidate_the_narration(self, task_root):
+        """自动保存现在每改几个字就发一次，所以它绝不能作废配音。
+
+        改台词会让配音和字幕一起失效（时间轴对不上了）。提示词不是台词：
+        它只说这一段画什么。如果存提示词顺手把 ``audio_stale`` 立起来，
+        用户在这一屏改几个提示词就会被要求重新配音一次。
+        """
+        _run_to_the_checkpoint(task_root, "quiet")
+        scene_editor.update_scene("quiet", 0, keyword="a kitchen at night")
+        assert not scene_manifest.load_raw("quiet").get("audio_stale")
+
+    def test_the_prompt_survives_a_reload(self, task_root):
+        """存下去的要能读回来——用户关掉页面再回来，改过的词还在。"""
+        _run_to_the_checkpoint(task_root, "reload")
+        scene_editor.update_scene("reload", 1, keyword="a hand winding a clock")
+        scenes = scene_manifest.load("reload")["scenes"]
+        assert scenes[1]["keyword"] == "a hand winding a clock"
+
+
+class TestWhatTheBatchLeavesAlone:
+    """开整批时，已经画出来的那几张不许再画一遍。
+
+    "先试一张"之后点"开画"，是这条流程里最自然的下一步。如果整批会把刚
+    试出来的那张再画一遍，用户就白花了一次等待和一次出图——而且试出来的
+    那张（他点头认可的那张）会被另一张悄悄换掉。
+
+    这不是靠"开画"那边特意记着谁画过：画出来的那一段清单里就有了素材，
+    而整批只认"还没有素材"的那几段。
+    """
+
+    @pytest.fixture(autouse=True)
+    def clean_queue(self):
+        scene_regen_queue._reset_for_tests()
+        yield
+        scene_regen_queue._reset_for_tests()
+
+    def _draw_one(self, task_root, task_id, index):
+        """真的把第 index 段画出来（只把出图那一步换掉）。"""
+        drawn = task_root / task_id / f"sample-{index}.mp4"
+        drawn.parent.mkdir(parents=True, exist_ok=True)
+        drawn.write_bytes(b"x")
+        with patch.object(
+            scene_editor,
+            "_produce_material",
+            return_value=(str(drawn), "openai_image"),
+        ):
+            scene_editor.regenerate_material(task_id, index)
+        return str(drawn)
+
+    def test_a_picture_already_drawn_is_not_drawn_again(self, task_root):
+        _run_to_the_checkpoint(task_root, "once")
+        drawn = self._draw_one(task_root, "once", 3)
+        scenes = scene_manifest.load("once")["scenes"]
+        assert scenes[3]["material"] == drawn, "先试的那一张要真的画出来了"
+
+        with patch.object(scene_regen_queue, "_ensure_worker"):
+            result = scene_regen_queue.enqueue_pending("once")
+
+        assert result["queued"] == 9, "十段里画过一段，整批只剩九段"
+        assert all(job["scene_id"] != scenes[3]["id"] for job in result["jobs"])
+
+    def test_the_picture_it_already_drew_is_left_on_disk(self, task_root):
+        """用户点头认可的那张不该被另一张悄悄换掉。"""
+        _run_to_the_checkpoint(task_root, "keep")
+        drawn = self._draw_one(task_root, "keep", 0)
+        with patch.object(scene_regen_queue, "_ensure_worker"):
+            scene_regen_queue.enqueue_pending("keep")
+        scenes = scene_manifest.load("keep")["scenes"]
+        assert scenes[0]["material"] == drawn
+
+    def test_drawing_every_remaining_picture_empties_the_waiting_list(self, task_root):
+        """画过的加上排着的，正好是全部——不多排，也不漏排。"""
+        _run_to_the_checkpoint(task_root, "tally")
+        self._draw_one(task_root, "tally", 7)
+        with patch.object(scene_regen_queue, "_ensure_worker"):
+            result = scene_regen_queue.enqueue_pending("tally")
+        scenes = scene_manifest.load("tally")["scenes"]
+        assert len(scene_manifest.pending_scenes(scenes)) == result["queued"] == 9
