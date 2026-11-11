@@ -410,9 +410,48 @@ async function watchQueue() {
 }
 
 /** 这一段上排着的活（含正在出的）。 */
+/** 素材文件名——"这是哪一张图"的身份。
+
+    时间线接口发的是文件名（``1a2b….mp4``），队列里记的是整条路径
+    （``C:\...\storage	asks\<id>a2b….mp4``）：同一个文件，两种写法。
+    直接比字符串永远不相等，所以比到文件名为止。 */
+function materialKey(path) {
+  const text = String(path || "");
+  const cut = Math.max(text.lastIndexOf("/"), text.lastIndexOf("\\"));
+  return cut >= 0 ? text.slice(cut + 1) : text;
+}
+
+/** 这个活现在落在第几段。
+
+    不能用 ``job.index``：那是**排队那一刻**的下标。排着的那几分钟里用户
+    完全可以去拖动画面，下标一旦不再指向同一张图，界面就会把"正在重出"
+    标在另一段上——那一段用户根本没点过，看起来就是程序自己在乱改别的图。
+
+    就地在**现在这张时间线**上按素材文件找。服务端也算了一份
+    （``scene_regen_queue.snapshot`` 的 ``job.scene``），但那是上一次拉队列那
+    一刻算的：拖完画面之后下一次轮询之前，它和下标一样是旧的。而这里每次
+    重画都重新找一遍，拖完立刻就是对的。
+
+    两边都认不出来（那一段被删了）就返回 null，由调用方说"没有了"，而不是
+    退回一个一定属于别人的编号。 */
+function jobScene(job) {
+  const key = materialKey(job.material);
+  if (key) {
+    const at = (state.scenes || []).findIndex(
+      (scene) => materialKey(scene.material) === key
+    );
+    if (at >= 0) return at;
+  }
+  // 客户端认不出来时（刚出完、时间线还没重读）用服务端那一份。
+  return Number.isInteger(job.scene) && (state.scenes || [])[job.scene]
+    ? job.scene
+    : null;
+}
+
 function pendingJobs(index) {
   return (state.queue.jobs || []).filter(
-    (job) => job.index === index && (job.state === "queued" || job.state === "running")
+    (job) => jobScene(job) === index
+      && (job.state === "queued" || job.state === "running")
   );
 }
 
@@ -490,19 +529,24 @@ function drawQueue() {
     const label = document.createElement("span");
     label.className = "queue-label";
     const term = job.keyword ? ` · ${job.keyword}` : "";
+    // 这一行说的是哪一段。按现在的位置说，所以重排之后它跟着那张图走。
+    // 那一段已经不在时间线上了（被删了）就别报一个编号——报出来的一定是
+    // 别人的编号。
+    const at = jobScene(job);
+    const where = at === null ? "A deleted scene" : `Scene ${at + 1}`;
     if (job.state === "running") {
-      label.textContent = `Scene ${job.index + 1}${term} · generating ${fmt(job.elapsed)}`;
+      label.textContent = `${where}${term} · generating ${fmt(job.elapsed)}`;
     } else if (job.state === "queued") {
-      label.textContent = `Scene ${job.index + 1}${term} · waiting`
+      label.textContent = `${where}${term} · waiting`
         + (job.position > 1 ? ` (${job.position - 1} ahead)` : " (next)");
     } else if (job.state === "done") {
-      label.textContent = `Scene ${job.index + 1}${term} · redrawn in ${fmt(job.elapsed)}`;
+      label.textContent = `${where}${term} · redrawn in ${fmt(job.elapsed)}`;
     } else {
       // 失败原因是服务端点名过的那一句（哪个源怎么失败的），照原样显示。
       // 只是把换行和连串空格压成一个空格：有些报错自带几行 ##### 分隔线，
       // 照原样塞进这块浮层会把它撑成半屏高。完整那段话在 title 里。
       const reason = String(job.error || "unknown error").replace(/\s+/g, " ").trim();
-      label.textContent = `Scene ${job.index + 1}${term} · failed: ${reason}`;
+      label.textContent = `${where}${term} · failed: ${reason}`;
       label.title = String(job.error || "");
     }
     row.appendChild(label);
@@ -522,9 +566,9 @@ function drawQueue() {
     }
     // 点一行就跳到那一段，省得自己在时间线上找。
     label.addEventListener("click", () => {
-      const scene = state.scenes[job.index];
-      if (!scene) return;
-      state.selected = job.index;
+      // 跳到它**现在**在的那一段，不是排队时那一段。
+      if (at === null || !state.scenes[at]) return;
+      state.selected = at;
       draw();
     });
     ui.queue.appendChild(row);

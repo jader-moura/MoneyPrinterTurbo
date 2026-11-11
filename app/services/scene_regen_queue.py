@@ -45,7 +45,7 @@ from typing import Any, Optional
 
 from loguru import logger
 
-from app.services import scene_editor
+from app.services import scene_editor, scene_manifest
 from app.services.scene_manifest import SceneError
 
 QUEUED = "queued"
@@ -119,6 +119,12 @@ class _Job:
             # ``None`` 和 "" 在重生成里不是一回事（沿用这一段上次挑的风格 /
             # 回到任务的风格），所以这里原样带出去，不要折成空字符串。
             "image_style": self.image_style,
+            # 排队时这一段用的素材文件,也就是"是哪一张图在重出"的身份。
+            # 界面拿它去现在的时间线上把那一段找回来,而不是拿下标去数。
+            # The material this scene had when the job was queued: the
+            # identity of the picture being redrawn, which the UI resolves
+            # against the current timeline instead of counting positions.
+            "material": self.material,
             "state": self.state,
             "error": self.error,
             # 排在第几个，1 表示下一个就是它。跑着的和跑完的是 0。
@@ -191,6 +197,39 @@ def enqueue(
     return job.payload(position)
 
 
+def _scene_positions(task_id: str) -> dict[str, int]:
+    """``{素材文件: 现在是第几段}``，用来把队列里的活对回时间线。
+
+    读不出清单就返回空字典：队列快照是界面用的辅助信息，一次读盘失败不该
+    让"还剩几张在排队"这件事也问不出来。
+    """
+    try:
+        scenes = scene_manifest.load(task_id)["scenes"]
+    except Exception as exc:  # pragma: no cover - 清单读不出时降级
+        logger.debug(f"cannot resolve queue positions for {task_id}: {exc}")
+        return {}
+    found: dict[str, int] = {}
+    for scene in scenes:
+        material = str(scene.get("material") or "")
+        # 同一个文件被两段共用时认第一段：那两段本来就是同一张图。
+        key = material_key(material)
+        if key and key not in found:
+            found[key] = int(scene.get("index", 0))
+    return found
+
+
+def material_key(path: Any) -> str:
+    """素材的身份：只认文件名那一截。
+
+    同一个文件在两处写法不同——清单和队列记的是整条路径，时间线接口发给
+    界面的是文件名。两边要能对上，就都退到文件名为止。界面那边有一份一样
+    的（``editor.js`` 的 ``materialKey``）。
+    """
+    text = str(path or "")
+    cut = max(text.rfind("/"), text.rfind("\\"))
+    return text[cut + 1:] if cut >= 0 else text
+
+
 def snapshot(task_id: str = "") -> dict:
     """这个任务的队列现状。不给 ``task_id`` 就是全部任务的。
 
@@ -205,11 +244,32 @@ def snapshot(task_id: str = "") -> dict:
     def mine(job: _Job) -> bool:
         return not task_id or job.task_id == task_id
 
-    jobs = [job.payload() for job in history if mine(job)]
+    # 每个活现在落在第几段，按素材文件现算，而不是用排队时记下的下标。
+    #
+    # 排着的时候用户完全可以去拖动画面。下标一旦不再指向同一张图，界面就会
+    # 把"正在重出"标在另一段上——那一段用户根本没点过，看起来就是程序自己
+    # 在乱改别的画面。执行那边早就是按文件认的（见 ``_locate_scene``），所以
+    # 真正写回去的位置一直是对的，错的只有显示。这里把显示也拉回同一个口径。
+    #
+    # Where each job sits *now*, resolved by material file rather than by the
+    # index recorded when it was queued. Pictures can be dragged while a job
+    # waits, and a stale index puts "being redrawn" on a scene the user never
+    # touched. The worker has always resolved by file (see ``_locate_scene``),
+    # so only the display was wrong; this brings it onto the same footing.
+    where = _scene_positions(task_id) if task_id else {}
+
+    def payload_of(job: _Job, position: int = 0) -> dict:
+        data = job.payload(position)
+        data["scene"] = where.get(material_key(job.material)) if where else None
+        return data
+
+    jobs = [payload_of(job) for job in history if mine(job)]
     if running is not None and mine(running):
-        jobs.append(running.payload())
+        jobs.append(payload_of(running))
     jobs.extend(
-        job.payload(position) for position, job in enumerate(queued, 1) if mine(job)
+        payload_of(job, position)
+        for position, job in enumerate(queued, 1)
+        if mine(job)
     )
     waiting = sum(1 for job in queued if mine(job))
     running_payload = (
@@ -325,6 +385,15 @@ def _run(job: _Job) -> None:
             job.index = int(scene.get("index", job.index))
         except (TypeError, ValueError):
             pass
+        # 锚点跟着换到新文件上。换完之后旧文件已经不在时间线上了，还拿它去
+        # 找那一段就会找不到——而"刚刚重出好的是哪一张"正是用户这时候最想
+        # 一眼看到的。
+        # The anchor moves to the new file: the old one is no longer in the
+        # timeline, and "which picture did that job just finish" is exactly
+        # what the user looks for at that moment.
+        new_material = str(scene.get("material") or "")
+        if new_material:
+            job.material = new_material
         logger.success(
             f"queued regeneration finished for scene {job.index} "
             f"of task {job.task_id}"
