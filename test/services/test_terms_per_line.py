@@ -5,6 +5,7 @@
 结构性的，不是偶发的。这里的测试钉住"条数由句子数决定"和"顺序不被打乱"。
 """
 
+import json
 from unittest.mock import patch
 
 import pytest
@@ -61,10 +62,17 @@ class TestGenerateTermsPerLine:
             assert llm.generate_terms_per_line("s", []) == []
         assert call.call_count == 0
 
-    def test_a_provider_error_returns_empty_not_the_error_text(self):
-        """错误文案当成关键词传下去，素材源会按字符去搜，产生无意义的请求。"""
+    def test_a_provider_error_is_raised_with_its_reason(self):
+        """错误文案不能当成关键词传下去——素材源会按字符去搜，白跑一堆请求。
+
+        以前这里返回空列表，于是原因就只剩在日志里，任务对外只会说一句
+        "failed to generate video search terms"。现在把原因带出去，任务的失败
+        信息才能指到要改的那一行配置上。
+        """
         with patch.object(llm, "_generate_response", return_value="Error: no key"):
-            assert llm.generate_terms_per_line("s", ["one"]) == []
+            with pytest.raises(llm.TermGenerationError) as error:
+                llm.generate_terms_per_line("s", ["one"])
+        assert "no key" in str(error.value)
 
     def test_the_prompt_numbers_the_lines_and_asks_for_that_count(self):
         lines = ["alpha", "beta", "gamma"]
@@ -349,3 +357,108 @@ class TestStyleAwareDescriptions:
             else:
                 app_config.app["openai_image_prompt_template"] = previous
         assert gen.call_args.kwargs["image_style"] == self.STICK
+
+
+class TestLongScripts:
+    """两百多句的片子不能挤进一次请求。
+
+    一条 210 句的任务让模型一次吐出一个 210 项的 JSON 数组：多数模型会中途
+    截断，或者为了凑数把后面几十句敷衍成同一句；而整个数组只要解析失败一次，
+    这一步就整个失败，任务报的还是那句什么都没说的 "failed to generate video
+    search terms"。
+    """
+
+    def _lines(self, count):
+        return [f"line number {index}" for index in range(count)]
+
+    def test_a_long_script_is_split_into_several_requests(self):
+        lines = self._lines(60)
+        seen = []
+
+        def fake(prompt, **kwargs):
+            # 每一批要几条就回几条，顺序和编号保持一致。
+            import re
+
+            asked = int(re.search(r"exactly (\d+) items", prompt).group(1))
+            seen.append(asked)
+            return json.dumps([f"shot {index}" for index in range(asked)])
+
+        with patch.object(llm, "_generate_response", side_effect=fake):
+            terms = llm.generate_terms_per_line("s", lines, visual_prompt=True)
+
+        assert len(terms) == 60
+        # 24 + 24 + 12，而不是一次 60。
+        assert seen == [24, 24, 12]
+        assert all(term for term in terms)
+
+    def test_a_short_script_is_still_one_request(self):
+        calls = []
+
+        def fake(prompt, **kwargs):
+            calls.append(prompt)
+            return json.dumps([f"shot {index}" for index in range(5)])
+
+        with patch.object(llm, "_generate_response", side_effect=fake):
+            llm.generate_terms_per_line("s", self._lines(5), visual_prompt=True)
+        assert len(calls) == 1
+
+    def test_every_line_still_gets_its_own_term_in_order(self):
+        """分批之后顺序还得是顺序，否则画面整体错位。"""
+        lines = self._lines(30)
+        batch = {"n": 0}
+
+        def fake(prompt, **kwargs):
+            import re
+
+            asked = int(re.search(r"exactly (\d+) items", prompt).group(1))
+            start = batch["n"]
+            batch["n"] += asked
+            return json.dumps([f"shot {start + i}" for i in range(asked)])
+
+        with patch.object(llm, "_generate_response", side_effect=fake):
+            terms = llm.generate_terms_per_line("s", lines, visual_prompt=True)
+        assert terms == [f"shot {index}" for index in range(30)]
+
+
+class TestSayingWhyItFailed:
+    """供应商说了原因就要带出去，而不是只留在日志里。"""
+
+    def test_a_provider_error_is_raised_with_its_reason(self):
+        with patch.object(
+            llm,
+            "_generate_response",
+            return_value="Error: ollama: model_name is not set, please set it in the config.toml file.",
+        ):
+            with pytest.raises(llm.TermGenerationError) as error:
+                llm.generate_terms_per_line("s", ["one"], visual_prompt=True)
+        assert "model_name is not set" in str(error.value)
+
+    def test_the_task_reports_that_reason_and_what_to_do(self, monkeypatch):
+        """任务的失败信息要指到那一行配置上，不是一句"failed to generate"。"""
+        from app.services import task as task_service
+
+        marked = {}
+
+        def fake_mark(task_id, stage, error, **kwargs):
+            marked.update({"stage": stage, "error": error})
+            return None
+
+        monkeypatch.setattr(task_service, "_mark_task_failed", fake_mark)
+        monkeypatch.setattr(
+            task_service.llm,
+            "generate_terms_per_line",
+            lambda **kwargs: (_ for _ in ()).throw(
+                llm.TermGenerationError("ollama: model_name is not set")
+            ),
+        )
+        params = VideoParams(
+            video_subject="s",
+            video_script="One. Two.",
+            video_source="openai_image",
+        )
+        params.align_terms_to_narration = True
+        params.video_terms = None
+        task_service.generate_terms("t", params, "One. Two.")
+        assert marked["stage"] == "terms"
+        assert "model_name is not set" in marked["error"]
+        assert "config.toml" in marked["error"]

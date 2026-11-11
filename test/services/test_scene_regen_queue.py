@@ -64,7 +64,6 @@ class FakeGenerator:
             self.gate.set()
         self.lock = threading.Lock()
         self.calls = []
-        self.prompts = []
         self.entered = threading.Semaphore(0)
         self.inflight = 0
         self.most_at_once = 0
@@ -72,14 +71,8 @@ class FakeGenerator:
 
     def __call__(self, **kwargs):
         terms = list(kwargs.get("search_terms") or [])
-        prompt = terms[0] if terms else ""
-        # 出图模型拿到的是"关键词 + 这一段的台词 + 片子主题"拼出来的提示词
-        # （见 scene_editor._written_image_prompt）。这些用例关心的是"哪一段
-        # 被画了、按什么顺序"，不是提示词的措辞，所以这里把开头那个关键词
-        # 切出来记账，完整提示词另存一份备查。
-        term = prompt.split(",")[0].strip()
+        term = terms[0] if terms else ""
         with self.lock:
-            self.prompts.append(prompt)
             self.calls.append(term)
             self.inflight += 1
             self.most_at_once = max(self.most_at_once, self.inflight)

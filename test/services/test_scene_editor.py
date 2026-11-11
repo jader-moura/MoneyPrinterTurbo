@@ -140,16 +140,33 @@ class TestRegenerateMaterial:
             scene = scene_editor.regenerate_material(task_id, 0)
         # 单关键词、单片长：不能为一个场景重新规划一整批素材。
         #
-        # 比"包含"而不是"等于"：文生图的源拿到的不再是光秃秃一个关键词，还
-        # 带着这条片子的主题和这一段念的话（见 ``_written_image_prompt``）。
-        # 这条用例钉的是"只取一份素材",不是提示词的具体措辞。
-        terms = download.call_args.kwargs["search_terms"]
-        assert len(terms) == 1
-        assert "a" in terms[0]
+        # 等于，不是包含：重生成就该拿用户填的那几个字去画，中间不加东西。
+        # 这一条正是用来挡住"又在提示词里塞别的"的。
+        assert download.call_args.kwargs["search_terms"] == ["a"]
         assert download.call_args.kwargs["audio_duration"] == 5.0
         assert download.call_args.kwargs["source"] == "openai_image"
         assert scene["material"] == replacement
         assert scene_manifest.load(task_id)["scenes"][0]["material"] == replacement
+
+    def test_regenerating_asks_for_a_fresh_picture_not_an_earlier_one(
+        self, task_root
+    ):
+        """重生成不能打开"接着用上一趟的画面"那个开关。
+
+        它和"把这条任务铺满旁白"共用同一个下载函数，但那一趟只要一段片长,
+        任务目录里随便哪张旧图都"够"了。开关一开,用户把提示词改成
+        "Thousand of clocks running late" 拿回来的还是片子里已经在用的
+        那张微波炉。
+        """
+        task_id, _ = _reviewed_task(task_root)
+        replacement = _material_file(task_root, task_id, "new.png")
+        with patch.object(
+            material, "download_videos", return_value=[replacement]
+        ) as download:
+            scene_editor.regenerate_material(
+                task_id, 0, keyword="Thousand of clocks running late"
+            )
+        assert download.call_args.kwargs.get("continue_unfinished") in (None, False)
 
     def test_a_regenerated_scene_is_locked(self, task_root):
         task_id, _ = _reviewed_task(task_root)
@@ -164,8 +181,8 @@ class TestRegenerateMaterial:
             material, "download_videos", return_value=[replacement]
         ) as download:
             scene_editor.regenerate_material(task_id, 0, keyword="a farmer sowing")
-        # 用户填的那个关键词必须真的到出图模型手上（现在还会带上主题和台词）。
-        assert "a farmer sowing" in download.call_args.kwargs["search_terms"][0]
+        # 用户填的那几个字原样到出图模型手上，一个字不多。
+        assert download.call_args.kwargs["search_terms"] == ["a farmer sowing"]
         assert scene_manifest.load(task_id)["scenes"][0]["keyword"] == "a farmer sowing"
 
     def test_other_scenes_are_untouched(self, task_root):

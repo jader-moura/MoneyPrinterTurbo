@@ -1382,6 +1382,23 @@ words in your own text.
 """
 
 
+# 一次请求最多写多少句。几十项的 JSON 数组模型还能稳定吐完，两百项不行。
+_PER_LINE_BATCH = 24
+
+
+class TermGenerationError(Exception):
+    """写不出画面关键词，并且知道是为什么。
+
+    为什么需要它
+    ------------
+    这一层返回空列表时，任务层只能报一句 "failed to generate video search
+    terms"。而真正的原因——"ollama: model_name is not set, please set it in the
+    config.toml file"——只写进了日志。用户在界面上看到的是前者：一句既没说哪里
+    坏了、也没说要改什么的话。把原因带出来，任务的失败信息就能直接指到要改
+    的那一行配置上。
+    """
+
+
 def _scene_image_prompt_request(
     subject: str, numbered: str, count: int, style: str = ""
 ) -> str:
@@ -1494,112 +1511,6 @@ China about ten thousand years ago.
 """.strip()
 
 
-def _one_scene_image_prompt_request(
-    subject: str, narration: str, keyword: str, style: str = ""
-) -> str:
-    """重出一张图时，把主题、这一段念的话和用户的关键词一起交给模型。"""
-    steer = (
-        f"\n### What the user asked to see\n{keyword}\n"
-        if str(keyword or "").strip()
-        else ""
-    )
-    spoken = str(narration or "").strip() or "(this scene has no narration)"
-    return f"""
-# Role: Scene Image Prompt Writer
-
-## Goals:
-Write ONE English image-generation prompt for a single scene of a video about
-the subject below. The picture has to carry what is being said at this moment,
-not merely decorate it.
-
-## Constrains:
-1. reply with the prompt sentence only - no json, no quotes, no preamble.
-2. one sentence, roughly 15-35 words, concrete and physically depictable.
-3. show what the narration below is saying, read in the context of the subject.
-4. **show a person or people doing something.** name who they are and the
-   action they are taking. a bare object with nobody in frame is a stock photo,
-   not a story beat.
-5. **when the narration carries a feeling or a judgement, put it on a face** -
-   frustrated, astonished, exhausted, delighted - rather than illustrating the
-   noun in the sentence.
-6. **state the period, place and culture explicitly**, taking them from the
-   subject and the narration ("ten thousand years ago", "ancient", "in
-   southern China"). the picture is drawn with no knowledge of the rest of the
-   video, so leaving this out gives a modern scene in a historical story.
-7. if the user asked for something specific below, that is the instruction:
-   keep their subject, their action and their mood, and add the context,
-   period and place around it. do not replace their idea with your own.
-8. never ask for text, captions, numbers or letters inside the picture.
-9. no camera directions, no style words, no lighting or render instructions.
-10. english only.
-
-## Context:
-### Video Subject
-{subject}
-{_style_guidance(style)}
-### What is said over this scene
-{spoken}{steer}
-""".strip()
-
-
-def generate_scene_image_prompt(
-    video_subject: str,
-    narration: str,
-    keyword: str = "",
-    app_config=None,
-    *,
-    image_style: str = "",
-) -> str:
-    """为**一段**画面写一句提示词，失败时返回空串。
-
-    为什么需要它
-    ------------
-    出片那条路上，提示词是模型读着主题和整篇旁白逐句写出来的,所以画面知道
-    "这一刻在讲什么"。但在审片界面里重出一张图走的是另一条路：只把关键词替
-    进画风模板,主题和这一段的台词一个字都没带上(见
-    ``material._openai_image_prompt``)。于是 "bowl of rice" 这种词出来的就是
-    一张库存图,它摆在哪一段下面都成立,也就等于什么都没讲。
-
-    这里把重生成也接回同一条路：主题是上下文，台词是这一刻的事，关键词是用
-    户要的东西，三样一起交给模型，让它写出该看到的画面。
-
-    The pipeline writes prompts from the subject and the whole narration, so
-    the picture knows what this moment is about. Regenerating from the review
-    screen did not: it substituted the keyword into the style template and sent
-    nothing else. The subject, the line spoken here and the user's keyword now
-    all reach the writer.
-    """
-    subject = str(video_subject or "").strip()
-    spoken = str(narration or "").strip()
-    steer = str(keyword or "").strip()
-    if not subject and not spoken and not steer:
-        return ""
-
-    prompt = _one_scene_image_prompt_request(subject, spoken, steer, image_style)
-    try:
-        if app_config is None:
-            response = _generate_response(prompt)
-        else:
-            response = _generate_response(prompt, app_config=app_config)
-    except Exception as exc:
-        logger.warning(f"failed to write a scene image prompt: {exc}")
-        return ""
-    if not response or response.startswith("Error: "):
-        logger.warning(f"failed to write a scene image prompt: {response}")
-        return ""
-
-    # 模型偶尔会裹一层引号或者前面带一句"Here is the prompt:"。
-    written = _strip_code_fence(str(response)).strip().strip('"').strip()
-    written = written.split("\n")[-1].strip() if "\n" in written else written
-    if not written:
-        return ""
-    # 写跑偏了（整段解释、或者把旁白原样抄回来）就不要，交回去用原始关键词。
-    if len(written) > 600:
-        logger.warning("the written scene image prompt was too long; ignoring it")
-        return ""
-    return written
-
-
 def generate_terms_per_line(
     video_subject: str,
     narration_lines: List[str],
@@ -1635,6 +1546,30 @@ def generate_terms_per_line(
         return []
 
     subject = str(video_subject or "").strip()
+    # 句子多的时候要分批。一条 210 句的片子让模型一次吐出一个 210 项的 JSON
+    # 数组，不是"慢一点"的问题：多数模型会中途截断，或者为了凑数把后面几十句
+    # 敷衍成同一句话；而整个数组只要解析失败一次，这一步就整个失败，任务直接
+    # 报"failed to generate video search terms"。分批之后每次只要几十项，某一
+    # 批出问题也不会把别的批拖下水。
+    if len(lines) > _PER_LINE_BATCH:
+        collected: List[str] = []
+        for start in range(0, len(lines), _PER_LINE_BATCH):
+            chunk = lines[start:start + _PER_LINE_BATCH]
+            logger.info(
+                f"writing {'image prompts' if visual_prompt else 'search terms'}"
+                f" for lines {start + 1}-{start + len(chunk)} of {len(lines)}"
+            )
+            collected.extend(
+                generate_terms_per_line(
+                    video_subject=subject,
+                    narration_lines=chunk,
+                    app_config=app_config,
+                    visual_prompt=visual_prompt,
+                    image_style=image_style,
+                )
+            )
+        return collected
+
     numbered = "\n".join(
         f"{index + 1}. {utils.remove_pause_tags(line)}"
         for index, line in enumerate(lines)
@@ -1662,9 +1597,17 @@ def generate_terms_per_line(
                 response = _generate_response(prompt, app_config=app_config)
             if response.startswith("Error: "):
                 # 与 generate_terms 一致：不要把错误文案当成关键词传下去。
+                #
+                # 但要把原因带出去。只返回一个空列表的话，上面那层只会报
+                # "failed to generate video search terms"——而真正的原因
+                # ("ollama: model_name is not set") 只留在日志里,用户在界面上
+                # 看到的是一句什么都没说的话。
                 logger.error(f"failed to generate per-line terms: {response}")
-                return []
+                raise TermGenerationError(response[len("Error: "):].strip())
             terms = json.loads(_strip_code_fence(response))
+        except TermGenerationError:
+            # 供应商自己报的错：重试多少次都是同一句，而且原因要原样送上去。
+            raise
         except Exception as exc:
             logger.warning(f"failed to generate per-line terms: {exc}")
             if response:

@@ -20,8 +20,6 @@ from __future__ import annotations
 
 import os
 
-from unittest.mock import patch
-
 import pytest
 
 
@@ -31,25 +29,6 @@ def _config_path() -> str:
     except Exception:  # pragma: no cover - 配置模块本身坏了时不挡着测试
         return ""
     return str(getattr(config, "config_file", "") or "")
-
-
-@pytest.fixture(autouse=True)
-def never_call_a_real_llm_for_an_image_prompt():
-    """测试不准真的去问 LLM 要画面提示词。
-
-    重生成一段画面现在会先让 LLM 把关键词写成一句带上下文的描述
-    （``scene_editor._written_image_prompt``）。测试里那条路是用假的
-    ``download_videos`` 跑通的，但写提示词那一步会**真的发出去**——在配了
-    API Key 的机器上，跑一次测试就是一串真金白银的调用；在没配的机器上则是
-    每个用例都等一次失败。
-
-    默认返回空串，也就是"写不出来"，于是走拼接兜底那条路——这正是本机现在的
-    真实行为。要测"写出来了"的用例自己 patch 回去。
-    """
-    from app.services import llm
-
-    with patch.object(llm, "generate_scene_image_prompt", return_value=""):
-        yield
 
 
 @pytest.fixture(scope="session", autouse=True)

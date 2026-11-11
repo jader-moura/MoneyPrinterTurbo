@@ -511,13 +511,27 @@ def generate_terms(task_id, params, video_script):
         style_template = (
             resolve_image_prompt_template(params) if wants_visual_prompt else ""
         )
-        video_terms = llm.generate_terms_per_line(
-            video_subject=params.video_subject,
-            narration_lines=narration_lines,
-            visual_prompt=wants_visual_prompt,
-            image_style=style_template,
-            **_llm_override_kwargs(params),
-        )
+        try:
+            video_terms = llm.generate_terms_per_line(
+                video_subject=params.video_subject,
+                narration_lines=narration_lines,
+                visual_prompt=wants_visual_prompt,
+                image_style=style_template,
+                **_llm_override_kwargs(params),
+            )
+        except llm.TermGenerationError as exc:
+            # 供应商自己说了原因，原样送到界面上。只报一句"failed to generate
+            # video search terms" 的话，用户既不知道哪里坏了，也不知道要改
+            # 什么——而答案("ollama: model_name is not set")就在手上。
+            _mark_task_failed(
+                task_id,
+                "terms",
+                f"cannot write one picture per narration line: {exc}. "
+                "Set an LLM in config.toml (ollama_model_name, or another "
+                "llm_provider), or turn off \"Match each picture to its "
+                "narration line\" to fall back to a few topic keywords.",
+            )
+            return None
         aligned_per_line = bool(video_terms)
         logger.info(
             f"generated {len(video_terms)} per-line "

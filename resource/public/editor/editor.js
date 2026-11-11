@@ -995,9 +995,20 @@ function drawInspector() {
   }
   ui.inspTitle.textContent = `Scene ${scene.index + 1}${scene.locked ? " · locked" : ""}`;
 
-  const keyword = field("Keyword", "input", scene.keyword || "");
-  // 关键词空着的那几段（关键词常常比场景少）会拿主题加这一段的台词去画。
-  // 把它当占位文字摆出来，用户看得见要画什么，改一笔就是自己的。
+  // 这个框在两种源下根本不是一回事，所以名字也不能是同一个。
+  //
+  // 文生图：这几个字**就是**提示词，原样交给出图模型（后面接画风模板），
+  // 不改写、不补充。叫它 "Keyword" 会让人以为只是个检索词，于是用户往里
+  // 塞两三个名词,而它其实能写一整句画面描述——那正是出图模型要的。
+  // 库存素材：它真的是一个检索词，拿去库里搜。
+  const keyword = field(
+    isGenerated(scene) ? "Picture prompt" : "Search keyword",
+    "textarea",
+    scene.keyword || ""
+  );
+  keyword.input.rows = 2;
+  // 空着的那几段（关键词常常比场景少）会拿主题加这一段的台词去画。把它当
+  // 占位文字摆出来，用户看得见要画什么，改一笔就是自己的。
   if (!scene.keyword && scene.keyword_suggestion) {
     keyword.input.placeholder = scene.keyword_suggestion;
   }
@@ -1047,42 +1058,36 @@ function drawInspector() {
   const sourceNote = document.createElement("p");
   sourceNote.className = "hint";
   sourceNote.textContent = isGenerated(scene)
-    ? "Draws a new picture from the keyword. Edit the keyword first if the "
-      + "subject itself is wrong — that is usually what fixes it. Pictures are "
-      + "drawn one at a time and a local image server takes a few minutes "
-      + "each, so this only joins the queue — keep working while it runs."
+    ? "The text above is the prompt, used exactly as written with the style "
+      + "added after it — nothing is rewritten and nothing else is sent. A full "
+      + "sentence works better than a few nouns: say who is in shot, what they "
+      + "are doing, and when and where. Pictures are drawn one at a time and a "
+      + "local image server takes a few minutes each, so this only joins the "
+      + "queue — keep working while it runs."
     : "Stock searches are cached, so the same keyword returns the same clip. "
       + "Change the keyword to get a different one.";
   ui.inspBody.appendChild(sourceNote);
 
-  // 台词按时间算出来的：这段画面在屏幕上时真正会念到的那几句。配音是一整
-  // 条，字幕按那条配音的时间轴生成，所以"这张图上会念什么"只由它在成片里
-  // 的起止时间决定——把图拖到别的位置，念的词不跟着走。
-  //
-  // 标题要说清这件事。以前写的是 "Narration"，用户会以为那是这张图自己的
-  // 台词，于是重排之后看到另一段的词，以为渲染器配错了。
-  const narration = field(
-    scene.narration_edited ? "Spoken here (edited)" : "Spoken here",
-    "textarea",
-    scene.narration || ""
+  /* 这里不再显示"这段画面上会念到什么"。
+
+     配音是一整条，字幕按那条配音的时间轴生成，所以某张图上念的是什么，只由
+     它在成片里的起止时间决定。把第 9 张拖到第 2 位，念的词不跟着走——第 2 位
+     念的还是第 2 位那几句。
+
+     原来的那个框标题写着 "Spoken here"，重排之后它显示的是新位置上的词,
+     看起来却像是"这张图的台词被换掉了"。它说的其实是对的,但没人会这么读：
+     用户看到的是一个贴在这张图上的文本框,里面的字自己变了。
+
+     而这件事根本不需要一个文本框来回答：按播放，听见的就是这一刻念的词，
+     预览上还压着那一刻的字幕。整段正文要改就开 Script，那里改的是"念什么",
+     本来就该在整段文字上做,不是在某一张图上做。 */
+
+  const save = button(
+    isGenerated(scene) ? "Save prompt" : "Save keyword",
+    "small",
+    () => run("Saving", () =>
+      call("PUT", scenePath(scene.index), { keyword: keyword.input.value })),
   );
-  ui.inspBody.append(narration.wrap);
-
-  const spokenNote = document.createElement("p");
-  spokenNote.className = "hint";
-  spokenNote.textContent = scene.narration_edited
-    ? "You rewrote these words, so they stay as you typed them. Clear the box "
-      + "and save to drop them from the script instead."
-    : "Taken from the narration by time — the lines that play while this "
-      + "picture is on screen. It follows the timeline, so it changes when you "
-      + "move or retime pictures. Use Script for the whole text.";
-  ui.inspBody.appendChild(spokenNote);
-
-  const save = button("Save text", "small", () => run("Saving", () =>
-    call("PUT", scenePath(scene.index), {
-      keyword: keyword.input.value,
-      narration: narration.input.value,
-    })));
   ui.inspBody.appendChild(save);
 
   // 这一段怎么出场。放在时长前面：先决定它长什么样，再决定它停多久。
