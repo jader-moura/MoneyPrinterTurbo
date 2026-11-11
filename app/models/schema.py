@@ -154,6 +154,20 @@ class VideoParams(BaseModel):
     # (start_from="materials") 根本不跑那个阶段,所以重新出片不会再问一次
     # 模型,也不会重新生成任何图片。
     align_terms_to_narration: bool = True
+
+    # 一张图配一整句话，而不是配逗号切出来的半句。
+    #
+    # 断句用的是 ``split_string_by_punctuations``，它连逗号一起断——配音和
+    # 字幕要的就是这么细。可画面不是：一条真片子里 13 句话被切成 29 段，
+    # 其中 16 段是 "in Texas"、"Your laptop" 这样的碎片。为每个碎片单画一
+    # 张图，是按念 0.7 秒的半句话去烧几分钟显卡，而且那张图短到看不清。
+    #
+    # 关掉它就回到一段一张图。
+    #
+    # One picture per whole sentence instead of per comma-clause. Splitting
+    # on commas is right for the voice and the subtitles; for pictures it
+    # means drawing a separate image for "in Texas", spoken in 0.7s.
+    one_picture_per_sentence: bool = True
     video_count: int = Field(default=1, ge=1)
 
     # Pictures generated on this machine rather than stock footage searched for

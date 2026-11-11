@@ -38,6 +38,7 @@ from typing import Any, Iterable
 from loguru import logger
 
 from app.services import scene_manifest
+from app.utils import utils
 
 # 低于这个长度的片段在成片里基本是一帧闪过，而且 30fps 下不足 6 帧，
 # 转场也无从施加。拒绝比渲染出一段看不见的画面更有用。
@@ -566,6 +567,49 @@ def _windows_from_cues(cues: list[dict], target: float) -> list[dict]:
     return windows
 
 
+def _windows_from_grouped_cues(
+    task_id: str, cues: list[dict], scenes: list[dict], target: float
+) -> list[dict]:
+    """一张图配一整句话时，这一句占的那几条字幕合成一段窗口。
+
+    配音和字幕是按逗号断的，画面是按句子来的，两边条数本来就不等。要把画面
+    对到声音上，就得知道这一句占了哪几条字幕——条数由同一段脚本、同一个
+    ``split_narration_into_sentences`` 算出来，两边不会各算一套。
+
+    对不上就返回空，交回上面按比例铺：宁可对得不够准，也不能把某一句的时间
+    安到另一句的画面上——那看起来像是图配错了，比平均铺更难查。
+
+    The voice and subtitles are split on commas while the pictures follow
+    sentences, so the counts differ by design. Both sides derive the mapping
+    from the same script with the same function; a mismatch returns nothing
+    and falls back rather than pinning one line's time to another's picture.
+    """
+    try:
+        script = str(scene_manifest.load_raw(task_id).get("script") or "")
+    except Exception:  # pragma: no cover - 读不到脚本不该让时间线打不开
+        return []
+    if not script.strip():
+        return []
+
+    counts = [
+        count
+        for _, count in utils.split_narration_into_sentences(
+            utils.remove_pause_tags(script)
+        )
+    ]
+    if len(counts) != len(scenes) or sum(counts) != len(cues):
+        return []
+
+    merged: list[dict] = []
+    at = 0
+    for count in counts:
+        if count < 1:
+            return []
+        merged.append({"start": cues[at]["start"], "end": cues[at + count - 1]["end"]})
+        at += count
+    return _windows_from_cues(merged, target)
+
+
 def plan_windows(
     task_id: str,
     scenes: Iterable[dict],
@@ -619,20 +663,26 @@ def plan_windows(
     # 不该被我们再按字幕重算一遍。
     if not scene_manifest.has_timing_edits(scenes):
         cues = scene_manifest.narration_segments(task_id)
-        if cues and len(cues) == len(scenes):
-            spoken = _windows_from_cues(cues, target)
-            if spoken:
-                longest = max(item["end"] - item["start"] for item in spoken)
-                if cap and longest > cap + 0.05:
-                    # 不按上限截断：截断就是把错位重新造出来。如实说一句，
-                    # 让用户知道那一句话比他填的单段上限长。
-                    logger.info(
-                        f"holding one picture for {longest:.1f}s to stay with "
-                        f"its narration line, which is longer than the "
-                        f"{cap:.1f}s maximum clip duration; the line decides "
-                        "here, otherwise the pictures drift out of sync"
-                    )
-                return spoken
+        # 一段画面一条字幕时直接用；一张图配一整句话时先把那几条合起来。
+        spoken = (
+            _windows_from_cues(cues, target)
+            if cues and len(cues) == len(scenes)
+            else _windows_from_grouped_cues(task_id, cues, scenes, target)
+            if cues
+            else []
+        )
+        if spoken:
+            longest = max(item["end"] - item["start"] for item in spoken)
+            if cap and longest > cap + 0.05:
+                # 不按上限截断：截断就是把错位重新造出来。如实说一句，
+                # 让用户知道那一句话比他填的单段上限长。
+                logger.info(
+                    f"holding one picture for {longest:.1f}s to stay with "
+                    f"its narration line, which is longer than the "
+                    f"{cap:.1f}s maximum clip duration; the line decides "
+                    "here, otherwise the pictures drift out of sync"
+                )
+            return spoken
 
     lengths = [
         _natural_length(

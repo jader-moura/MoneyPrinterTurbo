@@ -712,6 +712,12 @@ def _initialize_session_state():
         "align_terms_to_narration": bool(
             config.app.get("align_terms_to_narration", True)
         ),
+        # 一张图配一整句话。界面上暂时不给开关：默认就是对的，而关掉它意味着
+        # 为 "in Texas" 这种念 0.7 秒的半句单画一张图。要关就在 config.toml 里
+        # 写 one_picture_per_sentence = false。
+        "one_picture_per_sentence": bool(
+            config.app.get("one_picture_per_sentence", True)
+        ),
         "match_materials_to_script": bool(
             config.app.get("match_materials_to_script", False)
         ),
@@ -6294,6 +6300,15 @@ def _render_video_settings(panel, params):
                 "app",
                 "align_terms_to_narration",
                 params.align_terms_to_narration,
+            )
+            # 一张图配一整句话。没有勾选框：默认就是对的，关掉它要去
+            # config.toml 写 one_picture_per_sentence = false，所以这里只是把
+            # 那个值送进 params，而不是再加一个大多数人不该去动的开关。
+            params.one_picture_per_sentence = bool(
+                st.session_state.get(
+                    "one_picture_per_sentence",
+                    config.app.get("one_picture_per_sentence", True),
+                )
             )
             _set_runtime_config(
                 "app",

@@ -316,7 +316,17 @@ _THAI_OR_LAO_SENTENCE_SPACE = re.compile(
 )
 
 
-def split_string_by_punctuations(s, *, split_thai_and_lao_sentences=True):
+def _split_with_boundaries(s, *, split_thai_and_lao_sentences=True):
+    """断句结果，连着每一段是被哪个标点结束的。
+
+    ``split_string_by_punctuations`` 只取文本那一半。断句规则只有这一份:
+    另写一个"按句号断"的函数，迟早会和这里对不上——而对不上的后果是画面和
+    旁白错位,正是这套东西要防的事。
+
+    The boundary character is what tells a clause (",") from a sentence
+    ("."). Keeping one implementation means a sentence-level grouping can
+    never disagree with this about where a clause ends.
+    """
     result = []
     txt = ""
     if split_thai_and_lao_sentences:
@@ -328,7 +338,7 @@ def split_string_by_punctuations(s, *, split_thai_and_lao_sentences=True):
     for i in range(len(s)):
         char = s[i]
         if char == "\n":
-            result.append(txt.strip())
+            result.append((txt.strip(), "\n"))
             txt = ""
             continue
 
@@ -381,12 +391,61 @@ def split_string_by_punctuations(s, *, split_thai_and_lao_sentences=True):
         if char not in const.PUNCTUATIONS:
             txt += char
         else:
-            result.append(txt.strip())
+            result.append((txt.strip(), char))
             txt = ""
-    result.append(txt.strip())
+    result.append((txt.strip(), ""))
     # filter empty string
-    result = list(filter(None, result))
-    return result
+    return [(text, boundary) for text, boundary in result if text]
+
+
+def split_string_by_punctuations(s, *, split_thai_and_lao_sentences=True):
+    return [
+        text
+        for text, _ in _split_with_boundaries(
+            s, split_thai_and_lao_sentences=split_thai_and_lao_sentences
+        )
+    ]
+
+
+# 句子结尾的标点，和"句子内部"的标点（逗号、分号、冒号）分开。
+# 一张图配一个完整的意思，而不是配半句话:"in Texas" 这种逗号片段念 0.7 秒,
+# 为它单画一张图是白烧显卡,而且短到根本看不清。
+#
+# Sentence-ending punctuation, as opposed to the commas, semicolons and
+# colons *inside* a sentence. A picture illustrates one complete thought.
+SENTENCE_ENDINGS = frozenset(
+    "?.!\u2026\uff1f\u3002\uff01\u061f\u0964\u0965\u06d4\u104b\u17d4\u1362"
+) | {"\n", ""}
+
+
+def split_narration_into_sentences(s, *, split_thai_and_lao_sentences=True):
+    """整句旁白，以及每句被断成了几段。
+
+    为什么要连条数一起给：配音和字幕都是按"段"来的（一段一条字幕）,而画面
+    现在是按"句"来的。要把画面对到声音上,就得知道这一句占了哪几条字幕——
+    条数就是这个桥。两边都从同一段脚本、用同一个函数算出来,所以不会错位。
+
+    Returns (sentence, clause_count) pairs. The voice and the subtitles are
+    per clause while the pictures are per sentence, so the count is the
+    bridge between them; both sides derive it from the same script with the
+    same function.
+    """
+    groups: list[tuple[str, int]] = []
+    pieces: list[str] = []
+    count = 0
+    for text, boundary in _split_with_boundaries(
+        s, split_thai_and_lao_sentences=split_thai_and_lao_sentences
+    ):
+        # 原样把标点接回去，句子才读得通顺——送给模型的是一句话，
+        # 不是用空格拼起来的几个碎片。
+        pieces.append(text + (boundary if boundary not in ("\n", "") else ""))
+        count += 1
+        if boundary in SENTENCE_ENDINGS:
+            groups.append((" ".join(pieces).strip(), count))
+            pieces, count = [], 0
+    if pieces:
+        groups.append((" ".join(pieces).strip(), count))
+    return groups
 
 
 PAUSE_TAG_KEYWORDS = (

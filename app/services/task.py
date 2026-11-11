@@ -539,9 +539,25 @@ def generate_terms(task_id, params, video_script):
         #
         # 失败时不静默回退到旧逻辑：那会让用户以为逐句生成生效了，实际拿到
         # 的还是错配的结果。下面的空值检查会把任务明确判失败。
-        narration_lines = utils.split_string_by_punctuations(
-            utils.remove_pause_tags(video_script)
-        )
+        # 一张图配一整句话，还是配逗号切出来的半句。配音和字幕按半句走
+        # （它们要的就是这么细），画面按整句走：一句话是一个完整的意思，
+        # 一张图画的就该是一个完整的意思。一条真片子里 13 句被切成 29 段，
+        # 其中 16 段是 "in Texas"、"Your laptop" 这样念不到一秒的碎片。
+        #
+        # 时间线那边用同一个函数把每句占的那几条字幕合回去，所以这里改了
+        # 条数，画面照样精确对着声音。
+        spoken = utils.remove_pause_tags(video_script)
+        if getattr(params, "one_picture_per_sentence", True):
+            narration_lines = [
+                text for text, _ in utils.split_narration_into_sentences(spoken)
+            ]
+            logger.info(
+                f"one picture per sentence: {len(narration_lines)} sentences "
+                f"from {len(utils.split_string_by_punctuations(spoken))} "
+                "narration lines"
+            )
+        else:
+            narration_lines = utils.split_string_by_punctuations(spoken)
         # 文生图的素材源直接吃这段文字当提示词，所以要的是一整句画面描述,
         # 里面带上主题和这一句在讲什么；库存素材源拿它去搜索,要的是短查询。
         # 用同一个函数的两种产物,而不是让文生图也只拿到两三个词——那样模型
