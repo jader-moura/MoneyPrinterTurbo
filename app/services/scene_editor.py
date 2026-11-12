@@ -1461,6 +1461,67 @@ def suggested_keyword(task_id: str, index: Any) -> str:
     return ". ".join(parts)[:400]
 
 
+def suggest_image_prompt(
+    task_id: str, index: Any, *, direction: str = "", current: str = ""
+) -> str:
+    """按用户的一句话，把这一段的提示词写成一条完整的画面描述。
+
+    只返回那句话，不落盘。用户在界面上看到的是填进框里的草稿，要不要留下来
+    由他按"保存"或"重新生成"决定——模型写得不对的时候，一次点击不该已经把
+    原来那条覆盖掉了。
+
+    Returns the text without saving it: the suggestion lands in the box as a
+    draft and the user decides whether to keep it, so one click cannot
+    overwrite a prompt they wrote by hand.
+
+    ``current`` 是框里**当前**的内容（可能有还没保存的改动），空的时候才退回
+    清单里存着的那条。``direction`` 是用户那句短话；两者都空、这一段又没有
+    旁白时才会报错。
+
+    上下文（主题、画风、前后几句旁白、这是第几段）在这里组好再交给
+    ``llm.improve_image_prompt``：界面不该知道这些，而模型少了它们就会把一段
+    中间的画面写成开场镜头或者"记得订阅"。
+    """
+    manifest = scene_manifest.load(task_id)
+    scenes = manifest["scenes"]
+    position = _scene_at(scenes, index)
+    scene = scenes[position]
+
+    spoken = narration_for_scenes(task_id, manifest)
+
+    def _line(at: int) -> str:
+        if at < 0 or at >= len(spoken):
+            return ""
+        return " ".join(str(spoken[at] or "").split())
+
+    # 前后各两句只给模型读，用来接住人物和场景，不给它们写提示词。连续取,
+    # 中间那句是空的也照样占位,否则 ``_numbered_lines`` 的编号会对错行。
+    before = [_line(at) for at in range(max(0, position - 2), position)]
+    after = [_line(at) for at in range(position + 1, min(len(scenes), position + 3))]
+
+    params = load_params(task_id)
+    subject = str(getattr(params, "video_subject", "") or "").strip()
+    # 这一段自己挑过画风就用它，没挑过才用整条片子的——和重新生成走同一个解析,
+    # 所以草稿和真正出图时用的是同一套风格词。
+    style = _image_prompt_template(params, scene.get("image_style"))
+
+    chosen = str(current or "").strip() or str(scene.get("keyword") or "")
+    try:
+        return llm.improve_image_prompt(
+            subject,
+            _line(position),
+            direction=direction,
+            current=chosen,
+            style=style,
+            number=position + 1,
+            total=len(scenes),
+            before=before if any(before) else (),
+            after=after if any(after) else (),
+        )
+    except llm.TermGenerationError as exc:
+        raise SceneError(str(exc)) from exc
+
+
 def _patch_params(task_id: str, **fields: Any) -> dict:
     """改这条任务自己存着的渲染参数。
 

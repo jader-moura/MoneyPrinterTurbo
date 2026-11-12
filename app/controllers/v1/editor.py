@@ -43,6 +43,8 @@ from app.models.schema import (
     PublishTextRequest,
     PublishThumbnailRequest,
     PublishThumbnailTextRequest,
+    ScenePromptSuggestRequest,
+    ScenePromptSuggestResponse,
     SceneListResponse,
     SceneAddRequest,
     SceneEffectsRequest,
@@ -754,6 +756,41 @@ def cancel_regen_job(
     _require_task(task_id, request_id)
     job = _handle(task_id, request_id, lambda: scene_regen_queue.cancel(job_id))
     return utils.get_response(200, job)
+
+
+@router.post(
+    "/tasks/{task_id}/scenes/{index}/prompt",
+    response_model=ScenePromptSuggestResponse,
+    summary="Write this scene's picture prompt from a short description",
+)
+def suggest_scene_prompt(
+    request: Request,
+    body: ScenePromptSuggestRequest,
+    task_id: str = Path(..., description="Task ID"),
+    index: int = Path(..., ge=0, description="Scene index"),
+):
+    """用户写一句短话，模型把它补成这一段完整的画面提示词。
+
+    手写那条路一个字没动：``PUT /scenes/{index}`` 仍然把框里的内容原样存下
+    去，出图时也仍然原样使用。这里只是多一条路——要记着"画面里得有人在做
+    事、情绪落在脸上、年代地点每条都重写、不能出现文字"这十来条规矩才能写
+    好一条提示词，而用户敲进去的往往只有"让她在笑"。
+
+    **不写盘。** 返回的是草稿，存不存由调用方决定：模型写歪的时候，一次点击
+    不该已经把用户手写的那条覆盖掉。
+
+    任务正在渲染时也可以调——它只是读旁白和参数，不碰任何文件。
+    """
+    request_id = base.get_task_id(request)
+    _require_task(task_id, request_id)
+    prompt = _handle(
+        task_id,
+        request_id,
+        lambda: scene_editor.suggest_image_prompt(
+            task_id, index, direction=body.direction or "", current=body.current or ""
+        ),
+    )
+    return utils.get_response(200, {"prompt": prompt})
 
 
 @router.post(

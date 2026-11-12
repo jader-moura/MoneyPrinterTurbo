@@ -48,8 +48,17 @@ def test_the_cap_has_a_control_on_the_page(app):
 
 
 def test_it_starts_at_the_configured_default(app):
-    """默认 8 秒：按用户那条真片子选的,96 句里 15 句超过。"""
-    assert float(_control(app).value) == pytest.approx(8.0)
+    """格子里是 config.toml 里那个数，没写才是 8 秒。
+
+    这里不写死 8.0。写死过一次,然后用户把自己的 config.toml 调成 7 秒,
+    这条立刻报红——而代码做的正是它该做的事。出厂默认的 8 秒钉在
+    ``test_image_scene_length_cap.py`` 的 ``VideoParams`` 上,那个不受
+    本机配置影响。
+    """
+    from app.config import config
+
+    expected = float(config.app.get("max_image_scene_duration", 8.0))
+    assert float(_control(app).value) == pytest.approx(expected)
 
 
 def test_zero_is_allowed_because_it_means_no_limit():

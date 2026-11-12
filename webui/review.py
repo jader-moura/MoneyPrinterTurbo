@@ -324,6 +324,13 @@ def _render_controls(task_id: str, scene: dict, total: int, tr) -> None:
     # 文生图那条路里这段文字就是发给模型的提示词原文，一句完整的画面描述
     # 塞不进单行输入框。用多行框显示，用户读到的就是真正生成这张图的那段
     # 文字，改完重生成也不会有"我改的和它用的不是一回事"。
+    # 模型写好的草稿要在控件创建**之前**放进 session_state。Streamlit 不允许
+    # 控件已经实例化之后再改它自己的键，所以写提示词那一步只记下草稿并重跑
+    # 这一行，真正填进框里是在下一次重跑的这里发生的。
+    draft = st.session_state.pop(f"review_prompt_draft_{task_id}_{index}", None)
+    if draft is not None:
+        st.session_state[f"review_keyword_{task_id}_{index}"] = draft
+
     keyword = st.text_area(
         tr("Scene Keyword"),
         value=scene["keyword"],
@@ -331,6 +338,7 @@ def _render_controls(task_id: str, scene: dict, total: int, tr) -> None:
         height=68,
         help=tr("Scene Keyword Help"),
     )
+    _render_prompt_assist(task_id, index, keyword, tr)
     narration = st.text_area(
         tr("Scene Narration"),
         value=scene["narration"],
@@ -399,6 +407,75 @@ def _render_controls(task_id: str, scene: dict, total: int, tr) -> None:
             use_container_width=True,
         ):
             _replace_from_upload(task_id, index, uploaded, tr)
+
+
+def _render_prompt_assist(task_id: str, index: int, current: str, tr) -> None:
+    """用一句短话让模型把这一段的提示词写完整。
+
+    为什么和手敲并存
+    ----------------
+    上面那个框始终可以自己改，这里只是多一条路：用户写 "换成晚上"、"让她在
+    笑"，模型把它补成一句符合整套规矩的画面描述（有人在做事、情绪在脸上、
+    年代和地点每条都重写、画面里不出现文字）。手敲的人一个字都不会少，照样
+    改完直接保存或重新生成。
+
+    写出来的只是草稿：它填进上面那个框里，保存与否仍然是用户点的。所以还留
+    了一个"恢复上一条"——模型写歪的时候，刚才那条手写的提示词不该已经没了。
+    """
+    with st.expander(tr("Improve Prompt With AI"), expanded=False):
+        st.caption(tr("Improve Prompt Help"))
+        direction = st.text_input(
+            tr("Prompt Direction"),
+            key=f"review_prompt_direction_{task_id}_{index}",
+            placeholder=tr("Prompt Direction Placeholder"),
+        )
+        if st.button(
+            tr("Improve Prompt"),
+            key=f"review_improve_{task_id}_{index}",
+            use_container_width=True,
+        ):
+            _improve_prompt(task_id, index, direction, current, tr)
+
+        replaced = st.session_state.get(f"review_prompt_replaced_{task_id}_{index}")
+        if replaced and replaced.strip() != str(current or "").strip():
+            st.caption(tr("Previous Prompt").format(prompt=replaced))
+            if st.button(
+                tr("Restore Previous Prompt"),
+                key=f"review_restore_prompt_{task_id}_{index}",
+                use_container_width=True,
+            ):
+                st.session_state[f"review_prompt_draft_{task_id}_{index}"] = replaced
+                st.session_state.pop(
+                    f"review_prompt_replaced_{task_id}_{index}", None
+                )
+                st.rerun(scope="fragment")
+
+
+def _improve_prompt(task_id: str, index: int, direction: str, current: str, tr) -> None:
+    """跑一次提示词改写。失败原因原样显示，和 ``_run`` 的理由一样。
+
+    成功之后只重跑这一行：什么都还没写进磁盘，整页重跑反而会把用户在其它
+    行里没保存的编辑一起丢掉。
+    """
+    try:
+        with st.spinner(tr("Improving Prompt")):
+            improved = scene_editor.suggest_image_prompt(
+                task_id, index, direction=direction, current=current
+            )
+    except scene_editor.SceneBusyError as exc:
+        st.warning(str(exc))
+        return
+    except scene_editor.SceneError as exc:
+        st.error(str(exc))
+        return
+    except Exception as exc:
+        logger.exception(f"failed to improve the image prompt: {exc}")
+        st.error(f"{type(exc).__name__}: {exc}")
+        return
+    st.session_state[f"review_prompt_draft_{task_id}_{index}"] = improved
+    if str(current or "").strip():
+        st.session_state[f"review_prompt_replaced_{task_id}_{index}"] = str(current)
+    st.rerun(scope="fragment")
 
 
 def _render_reorder(task_id: str, index: int, total: int, tr) -> None:

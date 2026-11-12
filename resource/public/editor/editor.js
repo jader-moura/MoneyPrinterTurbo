@@ -1377,6 +1377,13 @@ const PROMPT_SAVE_DELAY = 600;
     可以去拖动画面；下标一旦不再指向同一段，这一笔就存到别人头上了。 */
 let promptEdit = null;
 
+/** "用 AI 写这条提示词"那一小块的状态：``{ id, open, direction, undo, note }``。
+
+    留在模块级而不是闭包里，因为整个 inspector 会被重画（存完一次、队列
+    轮询回来一次），闭包里的东西活不过那一次重画。真正要活下来的是
+    ``undo``：模型写歪的时候，用户得能把刚被顶掉的那条拿回来。 */
+let promptAssist = null;
+
 /** 输入框下面那一行小字：``{ id, text, kind }``，``null`` 是不说话。
 
     自动保存最大的毛病是看不见：存了没存都是同一副样子，用户只能赌。
@@ -1478,6 +1485,111 @@ function trackPromptEdits(scene, input) {
   input.addEventListener("change", () => savePromptEdit(edit));
 }
 
+/** "用 AI 写这条提示词"那一小块。
+
+    为什么写出来的直接填回上面那个框
+    --------------------------------
+    框里那几个字**就是**拿去出图的提示词。模型写好的东西如果存在别处，用户
+    看到的就不再是真正会被画出来的那一条。填回去之后接着走的还是原来那条
+    自动保存，和手打一个字完全一样——所以"保存"、"重出一张"全都不用改。
+
+    为什么多一个撤销
+    ----------------
+    手打是一个字一个字来的，顶掉的是自己刚写的半句；这里是一下子换掉一整
+    条，被顶掉的可能是用户认真写了很久的那条。默认收起来也是同一个道理：
+    自己写才是主路，这是旁边那条。 */
+function drawPromptAssist(scene, input) {
+  const id = scene.id || materialKey(scene.material);
+  if (!promptAssist || promptAssist.id !== id) {
+    // 换了一段就从头开始：上一段的撤销内容按到这一段上就是张冠李戴。
+    promptAssist = { id, open: false, direction: "", undo: null, note: "", kind: "" };
+  }
+  const state_ = promptAssist;
+
+  const box = document.createElement("details");
+  box.className = "drawer prompt-assist";
+  box.open = state_.open;
+  box.addEventListener("toggle", () => { state_.open = box.open; });
+
+  const title = document.createElement("summary");
+  title.textContent = "Write this prompt with AI";
+  box.appendChild(title);
+
+  const hint = document.createElement("p");
+  hint.className = "hint";
+  hint.textContent =
+    "Say in a few words what this picture should show, or what to change "
+    + "about it. The model writes the whole prompt into the box above, "
+    + "keeping the people, the period and the setting of the rest of the "
+    + "video. The picture itself does not change until you redraw it.";
+  box.appendChild(hint);
+
+  const direction = field("What it should show", "input", state_.direction);
+  direction.input.placeholder = "at night · have her smiling · not in an office";
+  direction.input.addEventListener("input", () => {
+    state_.direction = direction.input.value;
+  });
+  box.appendChild(direction.wrap);
+
+  const note = document.createElement("p");
+  const undo = button("Undo", "small", async () => {
+    if (state_.undo === null) return;
+    input.value = state_.undo;
+    state_.undo = null;
+    state_.note = "Put back the prompt that was there before.";
+    state_.kind = "";
+    input.focus();
+    await savePromptEdit();
+    show();
+  });
+
+  function show() {
+    note.className = "hint" + (state_.kind ? " " + state_.kind : "");
+    note.textContent = state_.note;
+    undo.hidden = state_.undo === null;
+  }
+
+  const write = button("Write the prompt", "small", async () => {
+    if (write.disabled) return;
+    write.disabled = true;
+    state_.note = "Writing the prompt…";
+    state_.kind = "";
+    show();
+    try {
+      const data = await call("POST", `${scenePath(scene.index)}/prompt`, {
+        direction: direction.input.value,
+        current: input.value,
+      });
+      const written = String((data && data.prompt) || "").trim();
+      if (!written) throw new Error("the model returned no prompt");
+      state_.undo = input.value;
+      input.value = written;
+      state_.note = "Written into the box above. Read it, change what you "
+        + "like, then redraw the picture.";
+      state_.kind = "";
+      // 焦点先落回提示词框：``savePromptEdit`` 看见框在手里就只改时间线上
+      // 那一行的字，不整屏重画——重画会把这一小块连同刚写好的字一起换掉。
+      input.focus();
+      await savePromptEdit();
+    } catch (error) {
+      // 服务端的错误文案是点名的（哪个供应商、缺哪一行配置），照原样显示。
+      state_.note = String(error.message || error);
+      state_.kind = "warn";
+    } finally {
+      write.disabled = false;
+      show();
+    }
+  });
+
+  const row = document.createElement("div");
+  row.className = "row";
+  row.append(write, undo);
+  box.append(row, note);
+  show();
+  return box;
+}
+
+
 /* ---------- inspector ---------- */
 
 function drawInspector() {
@@ -1522,6 +1634,13 @@ function drawInspector() {
   // 改完就存。下面那个 "Save prompt" 按钮留着：它现在是"我现在就要存"，
   // 而不再是"不点就丢"。
   trackPromptEdits(scene, keyword.input);
+
+  // 第二条路：写一句短话，让模型把它补成一条完整的提示词。上面那个框照旧
+  // 可以自己从头写——这里加的是"不想记那十来条规矩时"的入口，不是替换。
+  // 只对文生图的段落出现：库存源那个框是检索词,补成一整句反而搜不到。
+  if (isGenerated(scene)) {
+    ui.inspBody.appendChild(drawPromptAssist(scene, keyword.input));
+  }
 
   // 画风紧跟在关键词下面：关键词说画什么，画风说画成什么样，改完一起
   // 重生成。默认是这条片子出片时用的那个风格——以前重生成读的是 API

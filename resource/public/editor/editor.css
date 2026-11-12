@@ -1037,6 +1037,10 @@ body {
 }
 .drawer > summary:hover { color: var(--text); }
 
+/* "用 AI 写这条提示词"。``.insp-body`` 的 gap 管不到 <details> 的里面，
+   所以展开之后自己再撑开一次，不然里面几行会黏成一坨。 */
+.prompt-assist[open] { display: flex; flex-direction: column; gap: 8px; }
+
 /* 下载是一个 <a>，但在这排按钮里要和旁边的按钮一样高、一样居中。 */
 #publish-download {
   display: inline-flex;

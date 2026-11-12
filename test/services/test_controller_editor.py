@@ -234,3 +234,93 @@ class TestSubmission:
         kwargs = manager.add_task.call_args.kwargs
         assert kwargs["start_from"] == "audio"
         assert kwargs["stop_at"] == "subtitle"
+
+
+class TestWritingAPromptWithAi:
+    """用一句短话写提示词的那条接口。
+
+    它和别的编辑接口有两处不同，都要钉住：**不写盘**（返回的是草稿，存不存
+    由调用方决定），以及**任务在渲染时也能调**（它只读旁白和参数）。
+    """
+
+    def test_it_returns_what_the_model_wrote(self, client, reviewed):
+        with patch.object(
+            scene_editor.llm,
+            "improve_image_prompt",
+            return_value="a tired nurse rubbing her eyes at 3am",
+        ):
+            response = client.post(
+                f"/api/v1/tasks/{reviewed}/scenes/0/prompt",
+                json={"direction": "at night", "current": "a nurse"},
+            )
+        assert response.status_code == 200
+        assert response.json()["data"]["prompt"] == (
+            "a tired nurse rubbing her eyes at 3am"
+        )
+
+    def test_the_users_words_and_the_box_both_reach_the_service(
+        self, client, reviewed
+    ):
+        with patch.object(
+            scene_editor.llm, "improve_image_prompt", return_value="written"
+        ) as model:
+            client.post(
+                f"/api/v1/tasks/{reviewed}/scenes/1/prompt",
+                json={"direction": "at night", "current": "unsaved wording"},
+            )
+        kwargs = model.call_args.kwargs
+        assert kwargs["direction"] == "at night"
+        assert kwargs["current"] == "unsaved wording"
+        assert kwargs["number"] == 2
+
+    def test_nothing_is_written_to_the_task(self, client, reviewed):
+        """模型写歪的时候，清单里那条还得是原来的。"""
+        before = scene_manifest.load(reviewed)["scenes"][0]["keyword"]
+        with patch.object(
+            scene_editor.llm, "improve_image_prompt", return_value="something else"
+        ):
+            client.post(
+                f"/api/v1/tasks/{reviewed}/scenes/0/prompt",
+                json={"direction": "at night"},
+            )
+        assert scene_manifest.load(reviewed)["scenes"][0]["keyword"] == before
+
+    def test_a_busy_task_can_still_be_asked(self, client, reviewed):
+        """只读旁白和参数，不碰文件，所以渲染时也能用——改完等渲染完再存。"""
+        with patch.object(scene_editor.tm, "is_task_busy", return_value=True):
+            with patch.object(
+                scene_editor.llm, "improve_image_prompt", return_value="written"
+            ):
+                response = client.post(
+                    f"/api/v1/tasks/{reviewed}/scenes/0/prompt",
+                    json={"direction": "at night"},
+                )
+        assert response.status_code == 200
+
+    def test_an_out_of_range_scene_is_400(self, client, reviewed):
+        response = client.post(
+            f"/api/v1/tasks/{reviewed}/scenes/9/prompt", json={"direction": "x"}
+        )
+        assert response.status_code == 400
+
+    def test_a_provider_failure_is_400_and_names_the_reason(self, client, reviewed):
+        with patch.object(
+            scene_editor.llm,
+            "improve_image_prompt",
+            side_effect=scene_editor.llm.TermGenerationError(
+                "ollama: model_name is not set"
+            ),
+        ):
+            response = client.post(
+                f"/api/v1/tasks/{reviewed}/scenes/0/prompt",
+                json={"direction": "at night"},
+            )
+        assert response.status_code == 400
+        assert "model_name is not set" in response.json()["message"]
+
+    def test_an_unknown_task_is_404(self, client, task_root):
+        with patch.object(sm.state, "get_task", return_value=None):
+            response = client.post(
+                "/api/v1/tasks/ghost/scenes/0/prompt", json={"direction": "x"}
+            )
+        assert response.status_code == 404

@@ -718,6 +718,27 @@ class SceneRegenerateRequest(BaseModel):
     image_style: Optional[str] = None
 
 
+class ScenePromptSuggestRequest(BaseModel):
+    """用一句短话，让模型把这一段的画面提示词写完整。
+
+    ``direction`` 是用户自己那句话——"换成晚上"、"让她在笑"。``current`` 是
+    框里**当前**的内容（可能有还没保存的改动）；不给就用清单里存着的那条。
+
+    两个都可以空：只给 ``direction`` 就是从头写一条，只给 ``current`` 就是
+    照规矩把现在这条写好。什么都没有、这一段又没有旁白时会报错，不瞎编。
+
+    这个接口**不写盘**。返回的是草稿，存不存由调用方决定——模型写歪的时候，
+    一次点击不该已经把用户手写的那条覆盖掉。
+    """
+
+    direction: Optional[str] = Field(default="", max_length=1000)
+    current: Optional[str] = Field(default="", max_length=4000)
+
+
+class ScenePromptSuggestResponse(BaseResponse):
+    data: dict = {"prompt": "an exhausted nurse rubbing her eyes at 3am"}
+
+
 class SceneReplaceRequest(BaseModel):
     """用已上传的素材替换场景画面。``material`` 是上传接口返回的文件名。"""
 

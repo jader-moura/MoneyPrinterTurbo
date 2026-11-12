@@ -1846,6 +1846,125 @@ def generate_terms_per_line(
     return collected
 
 
+def _direction_guidance(direction: str, current: str) -> str:
+    """把用户那句话、和这一段现在用的提示词，一起交给模型。
+
+    为什么要连旧提示词一起给
+    ------------------------
+    用户在审片里改的通常不是整张画面，而是其中一处："换成晚上"、"让她在
+    笑"、"别再是办公室"。只拿着这句话重写一遍，模型就会从主题开始重新编一
+    张图：人物的年代、衣着、地点全换了，而那几样正是上一轮逐句生成好不容易
+    对齐的（``_scene_image_prompt_request`` 的第 7、8 条）。所以旧提示词要
+    在场，并且明确说"只改他要改的那一处"。
+
+    The user is usually asking for one change ("make it night", "have her
+    smiling"), not a new picture. Rewriting from the subject alone throws away
+    the period, cast and setting that the per-line pass had aligned, so the
+    prompt in use is handed over with an instruction to change only what was
+    asked.
+    """
+    parts = []
+    text = " ".join(str(direction or "").split()).strip()
+    existing = " ".join(str(current or "").split()).strip()
+    if existing:
+        parts.append(
+            "### The Prompt This Picture Uses Now\n"
+            f"{existing}\n\n"
+            "Keep what already works in it - the same people, period, place, "
+            "clothing and season - and change only what the direction below "
+            "asks for. Do not start over from the subject."
+        )
+    if text:
+        parts.append(
+            "### What The User Asked For\n"
+            f"{text}\n\n"
+            "This is the user's own direction for this one picture, and it "
+            "wins over your own choice of what to depict. It may be a few "
+            "words, half a sentence, or written in another language: work out "
+            "what they want to see and write it out in full, still following "
+            "every constraint above - no words, letters or numbers inside the "
+            "picture, no camera or style instructions, English only."
+        )
+    if not parts:
+        return ""
+    return "\n" + "\n\n".join(parts) + "\n"
+
+
+def improve_image_prompt(
+    subject: str,
+    line: str,
+    *,
+    direction: str = "",
+    current: str = "",
+    style: str = "",
+    number: int = 1,
+    total: int = 1,
+    before=(),
+    after=(),
+    app_config=None,
+) -> str:
+    """把用户的一句话，写成这一段能直接拿去出图的一条完整提示词。
+
+    为什么需要它
+    ------------
+    审片里那个框写的就是最终提示词，所以手改它一直是可以的——而且要一直可以。
+    但要改得有用，得记着十来条规矩：画面里要有人、情绪要落在脸上、年代地点
+    每条都要重写一遍、不能出现文字、不能写镜头和风格词。用户敲进去的是
+    "让她在笑"，而模型拿到的就是这四个字，于是画出来的是一张没有年代、没有
+    地点、属于别的段落的脸。
+
+    这里让用户继续写那句短的，由模型把它补成符合同一套规矩的一句话——规矩
+    不在这里重写一遍，而是直接复用逐句生成那条请求（``count=1``），所以手动
+    改出来的提示词和整批生成出来的是同一个标准。
+
+    The box already holds the final prompt and hand-editing it stays
+    supported. Writing a *good* one means remembering a dozen rules the
+    per-line pass applies automatically, so a hand-typed "have her smiling"
+    loses the period, the place and the cast. This lets the user keep typing
+    the short version and has the model expand it under those same rules -
+    reused from the per-line request with ``count=1`` rather than restated
+    here, so a hand-edited prompt is held to the same standard as a generated
+    one.
+
+    返回模型写出来的那一句。写不出来时抛 ``TermGenerationError``，不退回原文、
+    也不退回用户那句话：悄悄把 "让她在笑" 当成提示词存下去,正是这里要修的
+    毛病。
+    """
+    spoken = " ".join(str(line or "").split())
+    wanted = " ".join(str(direction or "").split())
+    existing = " ".join(str(current or "").split())
+    if not (spoken or wanted or existing):
+        raise TermGenerationError(
+            "there is nothing to work from: this scene has no narration and "
+            "no prompt yet, so say in a few words what the picture should show"
+        )
+    position = max(1, int(number or 1))
+    numbered = _numbered_lines([spoken or wanted or existing], position)
+    placement = _placement_guidance(
+        start=position,
+        count=1,
+        total=max(int(total or 1), position),
+        before=before,
+        after=after,
+    )
+    prompt = _scene_image_prompt_request(
+        subject,
+        numbered,
+        1,
+        style,
+        placement + _direction_guidance(wanted, existing),
+    )
+    written = _request_terms(prompt, app_config)
+    improved = next((item.strip() for item in written if item.strip()), "")
+    if not improved:
+        raise TermGenerationError(
+            "the model returned no prompt for this picture; try again, or "
+            "write the prompt yourself in the box"
+        )
+    logger.info(f"rewrote the image prompt for line {position}: {improved}")
+    return improved
+
+
 # =============================================================================
 # Social publishing metadata
 #
