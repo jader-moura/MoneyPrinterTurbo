@@ -888,18 +888,56 @@ def generate_audio(
 
 def generate_subtitle(task_id, params, video_script, sub_maker, audio_file):
     """
-    Generate subtitle for the video script.
-    If subtitle generation is disabled or no subtitle maker is provided, it will return an empty string.
-    Otherwise, it will generate the subtitle using the specified provider.
-    Returns:
-        - subtitle_path: path to the generated subtitle file
+    Generate the subtitle file for the video script.
+
+    The file serves two purposes: captions burned into the picture, which
+    ``subtitle_enabled`` controls, and the per-line timing that the pictures
+    are aligned against, which is needed either way. So it is written even
+    when captions are switched off - but then only from the timings the TTS
+    already returned, never by loading whisper.
+
+    Returns the path, or "" when no timings are available at all.
     """
     logger.info("\n\n## generating subtitle")
-    if not params.subtitle_enabled:
-        return ""
+
+    # 字幕文件有两个用途，而这里原来只认一个。
+    #
+    # 看得见的那个是烧进画面的字幕，由 ``subtitle_enabled`` 控制。看不见的那个
+    # 是**画面对齐旁白的唯一时间来源**：``scene_manifest.narration_segments``
+    # 读的就是这个文件，读不到就返回空列表，于是 ``plan_windows`` 退回按比例
+    # 平均铺——每张图一样长，不管它那句话念了多久。
+    #
+    # 所以"不显示字幕"不该把时间轴一起关掉。实测一位用户的
+    # subtitle_enabled = false，于是逐句同步一次都没有生效过，而两边都不知道
+    # ——界面上没有任何地方会说"这条片子没有时间轴，画面是平均铺的"。
+    #
+    # 但只要时间轴的时候绝不能为它去下载 whisper 模型：那是几 GB 的下载，而
+    # 用户要的只是别显示字幕。所以这条路只用 TTS 顺手给出的时间轴；拿不到就
+    # 如实说一句，然后维持原来的行为。
+    #
+    # The subtitle file is also the only source of per-line timing, so turning
+    # captions off used to turn the picture sync off with it, silently. This
+    # keeps writing the file for timing, and never reaches for whisper to do
+    # it, because that would be a multi-gigabyte download for someone who only
+    # asked not to see captions.
+    wants_captions = bool(params.subtitle_enabled)
+    timing_only = not wants_captions
 
     final_subtitle_path = path.join(utils.task_dir(task_id), "subtitle.srt")
     subtitle_provider = config.app.get("subtitle_provider", "edge").strip().lower()
+    if timing_only:
+        if sub_maker is None:
+            logger.info(
+                "subtitles are off and the voice returned no timings, so the "
+                "pictures will be spread evenly rather than following each "
+                "narration line"
+            )
+            return ""
+        # 不碰 whisper——见上。
+        subtitle_provider = "edge"
+        logger.info(
+            "subtitles are off, writing the cue file for picture timing only"
+        )
     logger.info(f"\n\n## generating subtitle, provider: {subtitle_provider}")
 
     if not subtitle_provider:

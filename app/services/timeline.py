@@ -567,6 +567,79 @@ def _windows_from_cues(cues: list[dict], target: float) -> list[dict]:
     return windows
 
 
+def picture_ceiling(task_id: str) -> float:
+    """一张图最多该停多久，按这条任务当时的设置读。
+
+    读任务自己的 params，而不是现在的配置：老任务是按当时的设置出的图，用
+    今天的默认值去评判它只会给出一堆没法处理的告警。任务里没有这个字段时才
+    退回配置，再退回 0（不限）。
+    """
+    try:
+        params = scene_manifest.load_raw(task_id).get("params") or {}
+    except Exception:  # pragma: no cover - 读不到清单不该让时间线打不开
+        params = {}
+    value = params.get("max_image_scene_duration")
+    if value is None:
+        try:
+            from app.config import config
+
+            value = config.app.get("max_image_scene_duration", 0.0)
+        except Exception:  # pragma: no cover
+            value = 0.0
+    try:
+        return max(0.0, float(value or 0.0))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _report_long_holds(task_id: str, windows: list[dict]) -> None:
+    """哪几张图停得比上限还久，明说出来。
+
+    为什么只是说，而不是切开
+    ------------------------
+    这里不能靠切窗口来强制上限。推拉镜头是**烘进素材**的（``.zoom-*.mp4``,
+    见 ``material._render_openai_image_video``），所以把一段窗口切成相邻的几
+    片，放出来和原来一模一样——观众看到的还是那一个连续的长镜头，只是剪辑表
+    长了几项。让每一片都从头开始放倒是能看出变化，可那是同一个推拉镜头重放
+    两三遍，像卡带，比一个慢镜头更难看。
+
+    真正能把上限落实的地方是出图之前：``max_image_scene_duration`` 会把念得
+    太长的句子拆回分句，于是那段时间由**几张不同的图**来填。到了这一步图已
+    经画完了，数量是定的——这时候要么让图停满那句话（同步，但停得久），要么
+    让它早走（画面和声音开始错开）。同步更重要，所以保持停满，并且如实说出
+    来：知道是哪几句，用户才能回去把它们拆开重画。
+
+    The cap cannot be enforced here. The zoom is baked into the material, so
+    slicing a window into adjacent pieces renders identically, and restarting
+    each piece replays the same zoom like a stuck tape. The cap belongs before
+    the pictures are drawn, where a long line is split into clauses and gets
+    several different pictures. By this point the count is fixed: holding is
+    the only option that stays in sync, so it holds and says which lines did
+    it.
+    """
+    ceiling = picture_ceiling(task_id)
+    if not ceiling:
+        return
+    over = [
+        (position, window["end"] - window["start"])
+        for position, window in enumerate(windows)
+        if window["end"] - window["start"] > ceiling + 0.05
+    ]
+    if not over:
+        return
+    longest = max(length for _, length in over)
+    listed = ", ".join(f"{position} ({length:.1f}s)" for position, length in over[:8])
+    if len(over) > 8:
+        listed += f", +{len(over) - 8} more"
+    logger.warning(
+        f"{len(over)} of {len(windows)} pictures are held longer than the "
+        f"{ceiling:.1f}s limit, up to {longest:.1f}s, because that is how long "
+        f"their narration line runs: scenes {listed}. They stay in sync this "
+        f"way; to shorten them, split those lines so each part gets its own "
+        f"picture."
+    )
+
+
 def _counts_from_scene_narration(scenes: list[dict]) -> list[int]:
     """每段画面占几条字幕，照它自己存着的那句旁白数。
 
@@ -715,16 +788,7 @@ def plan_windows(
             else []
         )
         if spoken:
-            longest = max(item["end"] - item["start"] for item in spoken)
-            if cap and longest > cap + 0.05:
-                # 不按上限截断：截断就是把错位重新造出来。如实说一句，
-                # 让用户知道那一句话比他填的单段上限长。
-                logger.info(
-                    f"holding one picture for {longest:.1f}s to stay with "
-                    f"its narration line, which is longer than the "
-                    f"{cap:.1f}s maximum clip duration; the line decides "
-                    "here, otherwise the pictures drift out of sync"
-                )
+            _report_long_holds(task_id, spoken)
             return spoken
 
     lengths = [

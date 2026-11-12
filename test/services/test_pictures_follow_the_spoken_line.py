@@ -109,20 +109,50 @@ class TestTheLineWinsOverTheClipCeiling:
         )
         assert windows[3]["end"] - windows[3]["start"] == pytest.approx(5.4, abs=0.05)
 
-    def test_and_it_says_so_in_the_log(self, task):
+    def test_and_it_says_which_lines_did_it(self, task):
+        """停得比上限久时要点名是哪几句。
+
+        这条原来对的是 ``video_clip_duration``，那是**视频素材**的切片长度，
+        和"一张图最多停多久"根本不是一个设置，日志里写"maximum clip
+        duration"只会让人去改错的那个值。现在对的是
+        ``max_image_scene_duration``，而且点出具体哪几段——知道是哪几句，才
+        能回去把它们拆开重画，这是用户唯一能做的事。
+        """
         from loguru import logger
 
         said: list[str] = []
-        sink = logger.add(said.append, level="INFO")
+        sink = logger.add(said.append, level="WARNING")
         try:
-            _plan(
-                task, scenes_of(5), UNEVEN_CUES, audio_duration=12.3, clip_duration=2
-            )
+            with patch.object(
+                scene_manifest,
+                "load_raw",
+                return_value={"params": {"max_image_scene_duration": 2.0}},
+            ):
+                _plan(task, scenes_of(5), UNEVEN_CUES, audio_duration=12.3)
         finally:
             logger.remove(sink)
         text = " ".join(said)
-        assert "maximum clip duration" in text
-        assert "drift" in text, "要说清为什么不按上限来"
+        assert "2.0s limit" in text
+        assert "3 (5.4s)" in text, "要点名是哪几段停太久，还要说停了多久"
+        assert "2 of 5 pictures" in text
+        assert "stay in sync" in text, "要说清为什么不按上限截断"
+        assert "split those lines" in text, "要说清用户能做什么"
+
+    def test_nothing_is_said_when_no_ceiling_is_set(self, task):
+        from loguru import logger
+
+        said: list[str] = []
+        sink = logger.add(said.append, level="WARNING")
+        try:
+            with patch.object(
+                scene_manifest,
+                "load_raw",
+                return_value={"params": {"max_image_scene_duration": 0}},
+            ):
+                _plan(task, scenes_of(5), UNEVEN_CUES, audio_duration=12.3)
+        finally:
+            logger.remove(sink)
+        assert not [line for line in said if "limit" in line]
 
 
 class TestWhenTheCuesCannotBeTrusted:
