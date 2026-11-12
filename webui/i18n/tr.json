@@ -563,6 +563,8 @@
     "Pick Scene To Replace": "Hangi sahne?",
     "Align Visuals To Narration": "Her görseli kendi anlatım satırına eşle",
     "Align Visuals To Narration Help": "Tüm senaryo için birkaç konu almak yerine, her konuşulan satırın neyle ilgili olduğunu modele sorar ve o satır için görsel üretir. Videonun başka bir bölümüne ait görselleri düzeltir. Satır başına bir görsel ürettiği için ücretli kaynaklar daha pahalıya gelir.",
+    "Max Image Scene Duration": "Görsel başına maks. süre (sn)",
+    "Max Image Scene Duration Help": "Bir görüntünün ekranda ne kadar kalabileceği. Görüntüler, açıkladıkları anlatım satırı kadar sürer; eşzamanlılığı sağlayan budur, ancak uzun bir cümle sabit bir görüntüyü 18 saniye tutabilir. Bunu aşan satırlar, her biri kendi görüntüsünü alan öbeklere bölünür. 0 sınır yok demektir.",
     "Keywords Override Alignment Drawn": "Bu anahtar kelimeler artık görsel istemlerinin kendisidir. Bu kutuda bir şey bulunduğu sürece “Her görseli kendi anlatım satırıyla eşleştir” hiçbir şey yapmaz: her görsel bu listeden, sırayla döndürülerek çizilir ve hiçbiri o anda söylenenle örtüşmez. Senaryo oluşturmak bu kutuyu kendiliğinden doldurur, çizmeden önce kontrol edin. Her anlatım satırına bir istem almak için kutuyu boşaltın.",
     "Keywords Override Alignment Searched": "Bu anahtar kelimeler artık arama sorgularının kendisidir. Bu kutuda bir şey bulunduğu sürece “Her görseli kendi anlatım satırıyla eşleştir” hiçbir şey yapmaz: her klip bu listeden, sırayla döndürülerek aranır. Senaryo oluşturmak bu kutuyu kendiliğinden doldurur, önceden kontrol edin. Her anlatım satırı için arama yapmak üzere kutuyu boşaltın.",
     "Clear Video Keywords": "Anahtar kelimeleri temizle ve anlatıma hizala",

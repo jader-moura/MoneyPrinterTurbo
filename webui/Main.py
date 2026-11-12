@@ -672,6 +672,29 @@ def _save_uploaded_local_materials(uploaded_files):
     return materials, persisted
 
 
+#: 界面上这个数最多能填到几秒。
+MAX_IMAGE_SCENE_DURATION_LIMIT = 60.0
+
+
+def _coerce_max_image_scene_duration(value, default=8.0):
+    """把"一张图最多停几秒"读成一个 number_input 敢接的数。
+
+    为什么要单独挡一层
+    ------------------
+    config.toml 是用户手写的，写成 "8s"、负数、空字符串都有可能；而
+    ``st.number_input`` 拿到 NaN 或越界值时不是报错，是让整个控件的状态变得
+    不可预期。读不出来就回默认值，而不是把脏值送进控件。
+    """
+    try:
+        seconds = float(value)
+    except (TypeError, ValueError):
+        return float(default)
+    if seconds != seconds:  # NaN
+        return float(default)
+    # 0 是"不设上限"，是个有效选择，所以下界是 0 而不是默认值。
+    return float(min(max(seconds, 0.0), MAX_IMAGE_SCENE_DURATION_LIMIT))
+
+
 def _initialize_session_state():
     """集中初始化跨 rerun 保留的页面状态。"""
     if not st.session_state.get("cross_post_recovery_checked"):
@@ -717,6 +740,11 @@ def _initialize_session_state():
         # 写 one_picture_per_sentence = false。
         "one_picture_per_sentence": bool(
             config.app.get("one_picture_per_sentence", True)
+        ),
+        # 一张图最多停多久（秒）。按整句出图时长句会让一张静图干停十几秒
+        # ——实测最长的一句 18.6 秒——所以给"拉长"一个上限。0 = 不限。
+        "max_image_scene_duration": _coerce_max_image_scene_duration(
+            config.app.get("max_image_scene_duration", 8.0)
         ),
         "match_materials_to_script": bool(
             config.app.get("match_materials_to_script", False)
@@ -1655,6 +1683,16 @@ def _apply_restored_params(params):
     )
     st.session_state["match_materials_to_script"] = bool(
         params.get("match_materials_to_script", False)
+    )
+    # 旧任务没有这个字段，按当前配置的默认值恢复，而不是恢复成 0（不限）——
+    # 0 会让长句又变回十几秒的定格。
+    st.session_state["max_image_scene_duration"] = (
+        _coerce_max_image_scene_duration(
+            params.get(
+                "max_image_scene_duration",
+                config.app.get("max_image_scene_duration", 8.0),
+            )
+        )
     )
 
     # 音频设置。TTS server 未写入旧任务，根据历史 voice_name 推断。
@@ -6309,6 +6347,27 @@ def _render_video_settings(panel, params):
                     "one_picture_per_sentence",
                     config.app.get("one_picture_per_sentence", True),
                 )
+            )
+            # 一张图最多停多久。画面是按它配的那句话有多长就停多长的，这正是
+            # 同步的来源；可长句会让一张静图在屏幕上干停十几秒——实测最长的一
+            # 句 18.6 秒。超过这个数的句子拆成两张图，同步不变，定格变短。
+            #
+            # 这个开关给了界面，而 one_picture_per_sentence 没给：那个默认就是
+            # 对的，而"停多久算太久"是口味问题,只有用户自己知道。
+            params.max_image_scene_duration = float(
+                st.number_input(
+                    tr("Max Image Scene Duration"),
+                    min_value=0.0,
+                    max_value=MAX_IMAGE_SCENE_DURATION_LIMIT,
+                    step=0.5,
+                    help=tr("Max Image Scene Duration Help"),
+                    key="max_image_scene_duration",
+                )
+            )
+            _set_runtime_config(
+                "app",
+                "max_image_scene_duration",
+                params.max_image_scene_duration,
             )
             _set_runtime_config(
                 "app",

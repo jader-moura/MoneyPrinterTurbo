@@ -563,6 +563,8 @@
     "Pick Scene To Replace": "Hansı səhnə?",
     "Align Visuals To Narration": "Hər şəkli öz mətn sətri ilə uyğunlaşdır",
     "Align Visuals To Narration Help": "Bütün ssenari üçün bir neçə mövzu götürmək əvəzinə, hər deyilən sətrin nədən bəhs etdiyini modeldən soruşur və həmin sətir üçün şəkil yaradır. Videonun başqa hissəsinə aid şəkilləri düzəldir. Sətir başına bir şəkil yaratdığı üçün ödənişli mənbələr daha baha başa gəlir.",
+    "Max Image Scene Duration": "Bir şəkil üçün maks. müddət (san)",
+    "Max Image Scene Duration Help": "Bir şəklin ekranda nə qədər qala biləcəyi. Şəkillər izah etdikləri danışıq sətri qədər davam edir, sinxronluğu təmin edən də budur, lakin uzun bir cümlə hərəkətsiz şəkli 18 saniyə saxlaya bilər. Bundan uzun sətirlər hər biri öz şəklini alan hissələrə bölünür. 0 limitsiz deməkdir.",
     "Keywords Override Alignment Drawn": "Bu açar sözlər artıq şəkil promptlarının özüdür. Bu xanada nəsə olduğu müddətcə “Hər şəkli öz danışıq sətri ilə uyğunlaşdır” heç nə etmir: hər şəkil bu siyahıdan, ardıcıl təkrarlanaraq çəkilir və heç biri o anda deyilənlə uyğun gəlmir. Ssenari yaradılanda bu xana avtomatik dolur, ona görə çəkməzdən əvvəl yoxlayın. Hər danışıq sətri üçün bir prompt almaq üçün xananı boşaldın.",
     "Keywords Override Alignment Searched": "Bu açar sözlər artıq axtarış sorğularının özüdür. Bu xanada nəsə olduğu müddətcə “Hər şəkli öz danışıq sətri ilə uyğunlaşdır” heç nə etmir: hər klip bu siyahıdan, ardıcıl təkrarlanaraq axtarılır. Ssenari yaradılanda bu xana avtomatik dolur, ona görə əvvəlcədən yoxlayın. Hər danışıq sətri üzrə axtarmaq üçün xananı boşaldın.",
     "Clear Video Keywords": "Açar sözləri təmizlə və danışığa uyğunlaşdır",

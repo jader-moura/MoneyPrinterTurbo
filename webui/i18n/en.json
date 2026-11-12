@@ -818,6 +818,8 @@
     "Pick Scene To Replace": "Which scene?",
     "Align Visuals To Narration": "Match each picture to its narration line",
     "Align Visuals To Narration Help": "Ask the model what each spoken line is about and generate a picture for that line, instead of a few topics for the whole script. Fixes pictures that belong to a different part of the video. Produces one picture per line, so paid material sources cost more.",
+    "Max Image Scene Duration": "Max picture hold (s)",
+    "Max Image Scene Duration Help": "How long one picture may stay on screen. Pictures last as long as the narration line they illustrate, which is what keeps them in sync, but a long sentence can hold a still image for 18 seconds. A line over this is split into its clauses, each getting its own picture. Set 0 for no limit.",
     "Keywords Override Alignment Drawn": "These keywords are now the image prompts. While this box has anything in it, “Match each picture to its narration line” does nothing: every picture is drawn from this list, cycled in order, so none of them follow what is being said at that moment. Generating a script fills this box for you, so check it before you draw. Clear it to get one prompt per narration line.",
     "Keywords Override Alignment Searched": "These keywords are now the search queries. While this box has anything in it, “Match each picture to its narration line” does nothing: every clip is searched from this list, cycled in order. Generating a script fills this box for you, so check it before you generate. Clear it to search for each narration line instead.",
     "Clear Video Keywords": "Clear the keywords and align to the narration",

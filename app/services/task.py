@@ -548,13 +548,25 @@ def generate_terms(task_id, params, video_script):
         # 条数，画面照样精确对着声音。
         spoken = utils.remove_pause_tags(video_script)
         if getattr(params, "one_picture_per_sentence", True):
+            # 一张图最多停多久。按整句出图时，长句会让一张静图在屏幕上干停
+            # 十几秒——实测最长的一句 18.6 秒。超过上限的句子拆回分句，每段
+            # 各一张图：同步不变，定格变短。
+            cap = getattr(params, "max_image_scene_duration", 0.0) or 0.0
             narration_lines = [
-                text for text, _ in utils.split_narration_into_sentences(spoken)
+                text
+                for text, _ in utils.split_narration_into_sentences(
+                    spoken, max_seconds=cap
+                )
             ]
             logger.info(
                 f"one picture per sentence: {len(narration_lines)} sentences "
                 f"from {len(utils.split_string_by_punctuations(spoken))} "
                 "narration lines"
+                + (
+                    f", holding no picture longer than {float(cap):.1f}s"
+                    if cap
+                    else ""
+                )
             )
         else:
             narration_lines = utils.split_string_by_punctuations(spoken)

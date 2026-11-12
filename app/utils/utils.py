@@ -418,7 +418,57 @@ SENTENCE_ENDINGS = frozenset(
 ) | {"\n", ""}
 
 
-def split_narration_into_sentences(s, *, split_thai_and_lao_sentences=True):
+# 语速。这两个数字是量出来的，不是猜的：用户那条 499 秒的片子共 1151 个词，
+# 合 2.31 词/秒。估算只用在"这一句要不要拆开"这个判断上，每张图具体停到哪
+# 一秒还是按字幕里真正念完的时间算，所以估得差一点不会弄丢同步。
+#
+# Measured, not guessed: the user's 499-second video has 1151 words.
+DEFAULT_WORDS_PER_SECOND = 2.31
+# 中日韩没有空格，按字数算。
+DEFAULT_CJK_CHARS_PER_SECOND = 5.2
+
+_CJK_CHARACTERS = re.compile(
+    r"[⺀-鿿가-힯豈-﫿･-ￜ]"
+)
+
+
+def estimate_spoken_seconds(
+    text,
+    words_per_second=DEFAULT_WORDS_PER_SECOND,
+    cjk_chars_per_second=DEFAULT_CJK_CHARS_PER_SECOND,
+):
+    """这段话大概要念多少秒。
+
+    为什么是估的
+    ------------
+    画面提示词是在配音之前写的（terms 是第 1 步，audio 是第 2 步），所以要在
+    那一刻判断"这一句会不会让一张图停太久"，手上只有文字。估得不准的代价很
+    小：它只决定拆不拆，拆完之后每张图具体停到哪一秒，仍然是按字幕里真正
+    念完的时间算的。
+
+    The prompts are written before the audio exists, so the decision of
+    whether a line would hold one picture too long has to be made from text.
+    Being approximate costs little: it only decides whether to split, while
+    the actual on-screen times still come from the subtitle timings.
+    """
+    sentence = str(text or "")
+    cjk = len(_CJK_CHARACTERS.findall(sentence))
+    words = len(_CJK_CHARACTERS.sub(" ", sentence).split())
+    seconds = 0.0
+    if words_per_second > 0:
+        seconds += words / words_per_second
+    if cjk_chars_per_second > 0:
+        seconds += cjk / cjk_chars_per_second
+    return seconds
+
+
+def split_narration_into_sentences(
+    s,
+    *,
+    split_thai_and_lao_sentences=True,
+    max_seconds=None,
+    words_per_second=DEFAULT_WORDS_PER_SECOND,
+):
     """整句旁白，以及每句被断成了几段。
 
     为什么要连条数一起给：配音和字幕都是按"段"来的（一段一条字幕）,而画面
@@ -429,22 +479,60 @@ def split_narration_into_sentences(s, *, split_thai_and_lao_sentences=True):
     per clause while the pictures are per sentence, so the count is the
     bridge between them; both sides derive it from the same script with the
     same function.
+
+    ``max_seconds`` 是一张图最多停多久。画面是按它配的那句话有多长就停多长的
+    ——这正是同步的来源——但实测用户那条片子里最长的一句要念 18.6 秒，于是一
+    张静图就在屏幕上干停 18.6 秒。超过上限的句子在这里被拆回它的分句，每段各
+    配一张图：同步不变，但不再有那么长的定格。
+
+    拆开不会动条数总和：各组 count 加起来永远等于分句总数，因为时间线那边正
+    是拿这个和去对字幕条数的。一个分句自己就超了上限时再拆不下去，它就超着
+    ——指望不上把一句话从中间切开。
+
+    ``max_seconds`` caps how long one picture may hold. Pictures last as long
+    as the line they illustrate, which is what keeps them in sync, but the
+    longest line in the measured task runs 18.6 seconds. A line over the cap
+    is split back into its clauses, each taking its own picture: same sync,
+    no 18-second freeze. The clause counts still sum to the clause total,
+    which is what the timeline checks against the subtitle count.
     """
     groups: list[tuple[str, int]] = []
     pieces: list[str] = []
     count = 0
+    try:
+        cap = float(max_seconds) if max_seconds else 0.0
+    except (TypeError, ValueError):
+        cap = 0.0
+
+    def flush():
+        nonlocal pieces, count
+        if pieces:
+            groups.append((" ".join(pieces).strip(), count))
+            pieces, count = [], 0
+
     for text, boundary in _split_with_boundaries(
         s, split_thai_and_lao_sentences=split_thai_and_lao_sentences
     ):
         # 原样把标点接回去，句子才读得通顺——送给模型的是一句话，
         # 不是用空格拼起来的几个碎片。
-        pieces.append(text + (boundary if boundary not in ("\n", "") else ""))
+        piece = text + (boundary if boundary not in ("\n", "") else "")
+        # 加上这一段就超上限的话，先把手里的发出去，让这一句用两张图讲完。
+        # 判断用的是"加上之后"而不是"已经超了"：等超了再切，切点就永远落在
+        # 上限的另一边。
+        if (
+            cap
+            and pieces
+            and estimate_spoken_seconds(
+                " ".join(pieces + [piece]), words_per_second=words_per_second
+            )
+            > cap
+        ):
+            flush()
+        pieces.append(piece)
         count += 1
         if boundary in SENTENCE_ENDINGS:
-            groups.append((" ".join(pieces).strip(), count))
-            pieces, count = [], 0
-    if pieces:
-        groups.append((" ".join(pieces).strip(), count))
+            flush()
+    flush()
     return groups
 
 

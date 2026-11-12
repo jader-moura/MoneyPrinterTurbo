@@ -567,6 +567,32 @@ def _windows_from_cues(cues: list[dict], target: float) -> list[dict]:
     return windows
 
 
+def _counts_from_scene_narration(scenes: list[dict]) -> list[int]:
+    """每段画面占几条字幕，照它自己存着的那句旁白数。
+
+    为什么优先用它
+    --------------
+    这是当时真正用的分组，不是事后重算的一套。只要出图的分组规则带上参数
+    （比如"一张图最多停 8 秒"会把长句拆开），从脚本重算就对不上，而对不上
+    的后果是整条退回平均铺——同步白做，而且不会报错，很难查。
+
+    The scene already records the line it illustrates, which is the grouping
+    that was actually used. Re-deriving it from the script disagrees as soon
+    as the grouping takes a parameter, and a disagreement silently falls back
+    to an even spread rather than failing loudly.
+    """
+    counts: list[int] = []
+    for scene in scenes or []:
+        text = str(scene.get("narration") or "").strip()
+        if not text:
+            return []
+        count = len(utils.split_string_by_punctuations(text))
+        if count < 1:
+            return []
+        counts.append(count)
+    return counts
+
+
 def _windows_from_grouped_cues(
     task_id: str, cues: list[dict], scenes: list[dict], target: float
 ) -> list[dict]:
@@ -584,19 +610,36 @@ def _windows_from_grouped_cues(
     from the same script with the same function; a mismatch returns nothing
     and falls back rather than pinning one line's time to another's picture.
     """
-    try:
-        script = str(scene_manifest.load_raw(task_id).get("script") or "")
-    except Exception:  # pragma: no cover - 读不到脚本不该让时间线打不开
-        return []
-    if not script.strip():
-        return []
+    # 先照每段画面自己存着的那句旁白去数。
+    #
+    # 从脚本重新断一遍句，等于让时间线自己再算一套分组。只要分组规则带上了
+    # 参数——"一张图最多停 8 秒"就会把长句拆开——两边算出来的就不是一套东西，
+    # 而不一致的后果不是报错，是整条退回平均铺，同步白做。场景里存的
+    # narration 就是当时真正用的分组，照它数不会错。
+    counts = _counts_from_scene_narration(scenes)
 
-    counts = [
-        count
-        for _, count in utils.split_narration_into_sentences(
-            utils.remove_pause_tags(script)
-        )
-    ]
+    if not counts or sum(counts) != len(cues):
+        # 旧任务可能没存 narration，或者脚本后来被改过。退回从脚本重算，
+        # 并且带上这条任务当时用的上限,而不是用现在的默认值。
+        try:
+            raw = scene_manifest.load_raw(task_id)
+        except Exception:  # pragma: no cover - 读不到脚本不该让时间线打不开
+            return []
+        script = str(raw.get("script") or "")
+        if not script.strip():
+            return []
+        cap = 0.0
+        try:
+            cap = float((raw.get("params") or {}).get("max_image_scene_duration") or 0.0)
+        except (TypeError, ValueError):
+            cap = 0.0
+        counts = [
+            count
+            for _, count in utils.split_narration_into_sentences(
+                utils.remove_pause_tags(script), max_seconds=cap
+            )
+        ]
+
     if len(counts) != len(scenes) or sum(counts) != len(cues):
         return []
 

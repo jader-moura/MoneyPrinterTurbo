@@ -563,6 +563,8 @@
     "Pick Scene To Replace": "Qual cena?",
     "Align Visuals To Narration": "Alinhar cada imagem à sua fala",
     "Align Visuals To Narration Help": "Pergunta ao modelo sobre o que cada fala trata e gera uma imagem para aquela fala, em vez de alguns temas para o roteiro inteiro. Corrige imagens que pertencem a outra parte do vídeo. Gera uma imagem por fala, então fontes pagas custam mais.",
+    "Max Image Scene Duration": "Duração máx. por imagem (s)",
+    "Max Image Scene Duration Help": "Quanto tempo uma imagem pode ficar na tela. As imagens duram o tempo da linha de narração que ilustram, o que as mantém sincronizadas, mas uma frase longa pode deixar uma imagem estática por 18 segundos. Linhas acima disso são divididas em orações, cada uma com sua própria imagem. 0 = sem limite.",
     "Keywords Override Alignment Drawn": "Estas palavras-chave são agora os prompts de imagem. Enquanto houver algo nesta caixa, “Combinar cada imagem com a sua linha de narração” não faz nada: cada imagem é desenhada a partir desta lista, repetida em ordem, e nenhuma acompanha o que está a ser dito naquele momento. Gerar um roteiro preenche esta caixa automaticamente, por isso confira antes de desenhar. Limpe-a para ter um prompt por linha de narração.",
     "Keywords Override Alignment Searched": "Estas palavras-chave são agora as consultas de busca. Enquanto houver algo nesta caixa, “Combinar cada imagem com a sua linha de narração” não faz nada: cada clipe é buscado a partir desta lista, repetida em ordem. Gerar um roteiro preenche esta caixa automaticamente, por isso confira antes. Limpe-a para buscar por linha de narração.",
     "Clear Video Keywords": "Limpar as palavras-chave e alinhar com a narração",

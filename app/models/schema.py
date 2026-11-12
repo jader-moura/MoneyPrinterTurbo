@@ -168,6 +168,25 @@ class VideoParams(BaseModel):
     # on commas is right for the voice and the subtitles; for pictures it
     # means drawing a separate image for "in Texas", spoken in 0.7s.
     one_picture_per_sentence: bool = True
+
+    # 一张图最多停多久（秒）。
+    #
+    # 画面是按它配的那句话有多长就停多长的，这正是同步的来源；可实测用户那条
+    # 499 秒的片子里，最长的一句要念 18.6 秒——一张静图干停这么久。超过这个数
+    # 的句子会被拆回分句，每段各配一张图。
+    #
+    # 8 秒是按那条真片子选的：96 句里 15 句超过，多画约 16 张图（96 → 112），
+    # 最长的定格从 18.6 秒降到 13 秒。剩下那 13 秒是一个 30 词、中间没有任何
+    # 标点的分句，再拆就得把一句话从中间切开，所以不拆。
+    #
+    # 填 0 就是不设上限，回到按整句停。
+    #
+    # How long one picture may hold. Pictures last as long as the line they
+    # illustrate, which is what keeps them in sync, but the longest line in
+    # the measured task ran 18.6 seconds. Lines over this are split back into
+    # their clauses, one picture each. A single clause with no internal
+    # punctuation cannot be split further and still goes over. 0 disables it.
+    max_image_scene_duration: float = 8.0
     video_count: int = Field(default=1, ge=1)
 
     # Pictures generated on this machine rather than stock footage searched for

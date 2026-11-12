@@ -563,6 +563,8 @@
     "Pick Scene To Replace": "Welche Szene?",
     "Align Visuals To Narration": "Bilder auf die Erzählung abstimmen",
     "Align Visuals To Narration Help": "Fragt das Modell für jede gesprochene Zeile, welches Bild dazu passt, statt einige Themen für das ganze Skript zu nehmen. Behebt Bilder, die zu einem anderen Teil des Videos gehören. Erzeugt ein Bild pro Zeile, kostenpflichtige Quellen werden dadurch teurer.",
+    "Max Image Scene Duration": "Max. Standbilddauer (s)",
+    "Max Image Scene Duration Help": "Wie lange ein Bild auf dem Bildschirm bleiben darf. Bilder dauern so lange wie der Satz, den sie illustrieren - das hält sie synchron -, aber ein langer Satz kann ein Standbild 18 Sekunden halten. Längere Sätze werden in Teilsätze aufgeteilt, jeder mit eigenem Bild. 0 = kein Limit.",
     "Keywords Override Alignment Drawn": "Diese Stichwörter sind jetzt die Bildprompts. Solange hier etwas steht, bewirkt „Jedes Bild auf seine Erzählzeile abstimmen“ nichts: Jedes Bild entsteht aus dieser Liste, der Reihe nach wiederholt, und keines passt zu dem, was gerade gesagt wird. Beim Erzeugen eines Skripts wird dieses Feld automatisch gefüllt – prüfen Sie es vor dem Zeichnen. Leeren Sie es, um einen Prompt pro Erzählzeile zu erhalten.",
     "Keywords Override Alignment Searched": "Diese Stichwörter sind jetzt die Suchanfragen. Solange hier etwas steht, bewirkt „Jedes Bild auf seine Erzählzeile abstimmen“ nichts: Jeder Clip wird aus dieser Liste gesucht, der Reihe nach wiederholt. Beim Erzeugen eines Skripts wird dieses Feld automatisch gefüllt – prüfen Sie es vorher. Leeren Sie es, um stattdessen pro Erzählzeile zu suchen.",
     "Clear Video Keywords": "Stichwörter leeren und an der Erzählung ausrichten",
