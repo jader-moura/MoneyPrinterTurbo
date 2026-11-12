@@ -27,15 +27,27 @@ class TestGenerateTermsPerLine:
         ]
 
     def test_the_result_is_always_the_same_length_as_the_lines(self):
-        """少给就补，不能让后面的句子整体前移——错位一格比画面泛一点糟得多。"""
+        """少给就先把缺的那几句再问一次，但条数无论如何都要对得上。
+
+        条数不对会让后面的句子整体前移，而错位一格比画面泛一点糟得多。
+
+        以前这里是直接拿视频主题把缺口填满的。那是能保住对齐的最后手段，可
+        代价是一张跟这句话无关的泛图——实测那条片子的第 72、96 个画面就是
+        "What happens to your body when you stop sleeping enough" 这句主题
+        本身，正好是第三、第四批的最后一句。所以现在先补问；主题兜底只在补问
+        也写不出来时才用，那条路在
+        ``test_chunked_prompts_know_their_place.py`` 里钉。
+        """
         lines = ["one", "two", "three", "four"]
-        with patch.object(llm, "_generate_response", return_value='["a", "b"]'):
+        with patch.object(llm, "_generate_response", return_value='["a", "b"]') as call:
             terms = llm.generate_terms_per_line("my subject", lines)
         assert len(terms) == 4
         assert terms[:2] == ["a", "b"]
-        # 兜底用主题，而不是把别的句子的词挪过来。
-        assert terms[2] == "my subject"
-        assert terms[3] == "my subject"
+        # 缺的两句被单独再问了一次，而不是填成主题。
+        assert call.call_count == 2
+        followup = call.call_args.args[0]
+        assert "3. three" in followup and "4. four" in followup
+        assert "my subject" not in terms
 
     def test_extra_terms_are_truncated(self):
         lines = ["one", "two"]

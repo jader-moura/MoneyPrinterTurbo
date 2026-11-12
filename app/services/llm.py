@@ -1313,7 +1313,9 @@ Please note that you must use English for generating video search terms; Chinese
     return search_terms
 
 
-def _scene_search_term_request(subject: str, numbered: str, count: int) -> str:
+def _scene_search_term_request(
+    subject: str, numbered: str, count: int, placement: str = ""
+) -> str:
     """逐句要一个"拿去搜素材"的短关键词。
 
     素材库搜索吃的是短查询：把一整句画面描述丢给 Pexels 只会搜不到东西，
@@ -1342,7 +1344,7 @@ spoken**.
 ## Context:
 ### Video Subject
 {subject}
-
+{placement}
 ### Narration Lines
 {numbered}
 """.strip()
@@ -1385,6 +1387,87 @@ words in your own text.
 # 一次请求最多写多少句。几十项的 JSON 数组模型还能稳定吐完，两百项不行。
 _PER_LINE_BATCH = 24
 
+# 分批时把接缝处前后各几句也给模型看——只是读，不要给它们写提示词。
+# 模型写第 73 句时要知道第 72 句刚讲到哪，否则每一批的开头都是一个
+# 全新的定场镜头。
+_PER_LINE_CONTEXT = 3
+
+
+def _numbered_lines(lines, start: int) -> str:
+    """按整篇的真实序号编号，而不是每一批都从 1 开始。"""
+    return "\n".join(
+        f"{start + offset}. {utils.remove_pause_tags(line)}"
+        for offset, line in enumerate(lines)
+    )
+
+
+def _placement_guidance(
+    *,
+    start: int,
+    count: int,
+    total: int,
+    before=(),
+    after=(),
+) -> str:
+    """告诉模型这一批在整条片子里的哪一段。
+
+    为什么需要它
+    ------------
+    一条 125 句的片子是分 6 次请求写完的，每次 24 句。可每次请求看到的都是
+    "1. … 24."，没有任何东西说明前面还有 72 句——于是模型把每一批当成一整条
+    片子来写：开头给一个定场镜头，结尾给一段"记得订阅"。
+
+    实测用户那条片子：第 94、95 个画面是 "signs that read 'Subscribe!'" 和
+    "wave at the audience"，而旁白还在讲补觉；第 97 个画面又是一个全新的
+    定场镜头。这不是偶发：94-96 正好是第四批的结尾，97 正好是第五批的
+    开头。模型没有做错任何事，是我们没告诉它它在哪里。
+
+    Each batch is numbered from 1 with nothing saying 72 lines came before, so
+    the model writes a complete arc per batch: an establishing shot at the top
+    and a "remember to subscribe" at the bottom. In the measured task, scenes
+    94 and 95 were a call to action while the narration was still on recovery
+    sleep, and scene 97 opened a fresh arc - exactly the end of batch four and
+    the start of batch five. Saying where the batch sits removes the cause.
+    """
+    end = start + count - 1
+    if start == 1 and end >= total:
+        # 一次就写完整条片子，没有接缝可说。
+        return ""
+
+    parts = [
+        "### Where This Section Sits",
+        f"These are lines {start}-{end} of {total} in ONE continuous video. "
+        f"Write prompts for these {count} lines only.",
+    ]
+    if start > 1:
+        parts.append(
+            f"This is NOT the beginning of the video. The viewer has already "
+            f"been watching through {start - 1} earlier lines, so line {start} "
+            f"is a continuation, not an opening. Do not write an establishing "
+            f"shot, a title shot or a 'here is what this video is about' "
+            f"picture."
+        )
+    if end < total:
+        parts.append(
+            f"This is NOT the end of the video. {total - end} more lines follow "
+            f"after line {end}. Do not write any closing, summary or "
+            f"call-to-action picture: nothing reading 'Subscribe', no 'like and "
+            f"comment', no waving at the camera or at the audience, no thumbs "
+            f"up, no end card, no presenter signing off."
+        )
+    if before:
+        parts.append(
+            "### Lines Just Before This Section (context only - write no "
+            "prompts for these)\n"
+            + _numbered_lines(before, start - len(before))
+        )
+    if after:
+        parts.append(
+            "### Lines Just After This Section (context only - write no "
+            "prompts for these)\n" + _numbered_lines(after, end + 1)
+        )
+    return "\n\n" + "\n\n".join(parts) + "\n"
+
 
 class TermGenerationError(Exception):
     """写不出画面关键词，并且知道是为什么。
@@ -1400,7 +1483,7 @@ class TermGenerationError(Exception):
 
 
 def _scene_image_prompt_request(
-    subject: str, numbered: str, count: int, style: str = ""
+    subject: str, numbered: str, count: int, style: str = "", placement: str = ""
 ) -> str:
     """逐句写一句完整的画面描述，直接拿去给文生图模型。
 
@@ -1505,10 +1588,182 @@ China about ten thousand years ago.
 ## Context:
 ### Video Subject
 {subject}
-{_style_guidance(style)}
+{_style_guidance(style)}{placement}
 ### Narration Lines
 {numbered}
 """.strip()
+
+
+def _continuity_guidance(previous_prompt: str) -> str:
+    """把上一批最后一个画面带给下一批，人物才不会每 24 句换一张脸。
+
+    为什么需要它
+    ------------
+    每一批是一次独立的请求，模型记不住上一批写过什么。实测那条片子里
+    "the same child"、"the same office worker" 这种说法每 24 句重新开始一次：
+    第 91 句是一个在公园玩的小孩，第 97 句突然变成一个办公室里的西装男——
+    两边都自称"同一个人"。规则 8 要求"同一个人每次描述一致"，可模型手上
+    根本没有上一批的描述。
+
+    Each batch is a separate request, so the model cannot remember the cast it
+    invented in the previous one. Rule 8 asks for recurring people to be
+    described consistently, which is impossible without showing it what came
+    before. Handing over the previous section's last prompt is the cheapest
+    way to keep one story instead of a slideshow of strangers.
+    """
+    text = " ".join(str(previous_prompt or "").split())
+    if not text:
+        return ""
+    return f"""
+### Continuity With The Previous Section
+The picture written for the line immediately before this section was:
+"{text}"
+
+If a person in that picture recurs here, describe them the same way (age,
+build, clothing, setting) so the pictures read as one story. Do not restart
+the cast or re-introduce anyone as though the viewer has not met them.
+"""
+
+
+def _request_terms(prompt: str, app_config=None) -> List[str]:
+    """发一次请求，把模型给的那几条拿回来（不负责补齐）。"""
+    terms: List[str] = []
+    for attempt in range(_max_retries):
+        response = ""
+        try:
+            if app_config is None:
+                response = _generate_response(prompt)
+            else:
+                response = _generate_response(prompt, app_config=app_config)
+            if response.startswith("Error: "):
+                # 与 generate_terms 一致：不要把错误文案当成关键词传下去，
+                # 但要把原因带出去，否则界面上只有一句什么都没说的话。
+                logger.error(f"failed to generate per-line terms: {response}")
+                raise TermGenerationError(response[len("Error: "):].strip())
+            terms = json.loads(_strip_code_fence(response))
+        except TermGenerationError:
+            # 供应商自己报的错：重试多少次都是同一句。
+            raise
+        except Exception as exc:
+            logger.warning(f"failed to generate per-line terms: {exc}")
+            if response:
+                try:
+                    terms = _extract_embedded_json(response, "[")
+                except ValueError as inner:
+                    logger.warning(f"failed to generate per-line terms: {inner}")
+
+        if isinstance(terms, list) and all(isinstance(term, str) for term in terms):
+            terms = [term.strip() for term in terms]
+            if any(terms):
+                return terms
+        terms = []
+        if attempt < _max_retries - 1:
+            logger.warning(
+                f"failed to generate per-line terms, trying again... {attempt + 1}"
+            )
+    return terms
+
+
+def _terms_for_chunk(
+    subject: str,
+    lines: List[str],
+    app_config=None,
+    *,
+    visual_prompt: bool = False,
+    image_style: str = "",
+    start: int = 1,
+    total: int = 0,
+    before=(),
+    after=(),
+    previous_prompt: str = "",
+    reask: bool = True,
+) -> List[str]:
+    """一批的提示词。返回的条数可能少于句子数，补齐由 ``_pad_to_lines`` 做。
+
+    模型少给时先把缺的那几句再问一次，而不是直接拿视频主题填上。
+    填主题是能保住对齐的最后手段，但它的代价是一张与这句话无关的泛图：
+    实测那条片子的第 72、96 个画面就是两句字面的"What happens to your body
+    when you stop sleeping enough"——正好是第三批和第四批的最后一句。
+    """
+    placement = _placement_guidance(
+        start=start, count=len(lines), total=total or len(lines),
+        before=before, after=after,
+    )
+    if previous_prompt:
+        placement += _continuity_guidance(previous_prompt)
+
+    numbered = _numbered_lines(lines, start)
+    # 文生图那条路要的是一整句画面描述，库存素材那条路要的是短查询。
+    prompt = (
+        _scene_image_prompt_request(
+            subject, numbered, len(lines), image_style, placement
+        )
+        if visual_prompt
+        else _scene_search_term_request(subject, numbered, len(lines), placement)
+    )
+
+    wanted = "image prompt" if visual_prompt else "search term"
+    logger.info(
+        f"generating one {wanted} per narration line: {len(lines)} lines"
+    )
+
+    terms = [term.strip() for term in _request_terms(prompt, app_config)[:len(lines)]]
+    # 末尾的空字符串算没给，否则再问那一步会被一个 "" 挡住。
+    while terms and not terms[-1]:
+        terms.pop()
+
+    if reask and terms and len(terms) < len(lines):
+        done = len(terms)
+        missing = lines[done:]
+        logger.warning(
+            f"the model wrote {done} of {len(lines)} {wanted}s for lines "
+            f"{start}-{start + len(lines) - 1}; asking again for the remaining "
+            f"{len(missing)} rather than filling them with the video subject"
+        )
+        terms.extend(
+            _terms_for_chunk(
+                subject,
+                missing,
+                app_config,
+                visual_prompt=visual_prompt,
+                image_style=image_style,
+                start=start + done,
+                total=total or len(lines),
+                before=lines[max(0, done - _PER_LINE_CONTEXT):done],
+                after=after,
+                previous_prompt=terms[-1],
+                reask=False,
+            )
+        )
+    return terms
+
+
+def _pad_to_lines(
+    lines: List[str], terms: List[str], subject: str, start: int
+) -> List[str]:
+    """条数必须等于句子数。
+
+    少一条就会让后面所有句子整体前移一格，那比配一张泛图糟得多：
+    泛图只是这一句不好看，前移是从这里开始每一句都配错。但也不能悄悄地
+    填：哪几句被填了要说清楚，否则用户只能在成片里自己发现。
+    """
+    short = [
+        start + index
+        for index in range(len(lines))
+        if not (terms[index].strip() if index < len(terms) else "")
+    ]
+    if short:
+        logger.warning(
+            f"no prompt was written for narration line(s) "
+            f"{', '.join(str(number) for number in short)}; using the video "
+            f"subject there so every other line stays aligned - those pictures "
+            f"will be generic rather than wrong"
+        )
+    aligned = []
+    for index in range(len(lines)):
+        term = terms[index].strip() if index < len(terms) else ""
+        aligned.append(term or subject or lines[index])
+    return aligned
 
 
 def generate_terms_per_line(
@@ -1546,97 +1801,49 @@ def generate_terms_per_line(
         return []
 
     subject = str(video_subject or "").strip()
+    total = len(lines)
+
     # 句子多的时候要分批。一条 210 句的片子让模型一次吐出一个 210 项的 JSON
     # 数组，不是"慢一点"的问题：多数模型会中途截断，或者为了凑数把后面几十句
-    # 敷衍成同一句话；而整个数组只要解析失败一次，这一步就整个失败，任务直接
-    # 报"failed to generate video search terms"。分批之后每次只要几十项，某一
-    # 批出问题也不会把别的批拖下水。
-    if len(lines) > _PER_LINE_BATCH:
-        collected: List[str] = []
-        for start in range(0, len(lines), _PER_LINE_BATCH):
-            chunk = lines[start:start + _PER_LINE_BATCH]
+    # 敲演成同一句话；而整个数组只要解析失败一次，这一步就整个失败。
+    #
+    # 但分批本身会带来另一个问题：每一批都被模型当成一整条片子来写，于是
+    # 每 24 句就来一个定场镜头、一段"记得订阅"。所以这里把三样东西交给
+    # 它：这一批在整篇里的位置、接缝前后的句子、以及上一批最后一个画面。
+    collected: List[str] = []
+    for start in range(0, total, _PER_LINE_BATCH):
+        chunk = lines[start:start + _PER_LINE_BATCH]
+        if total > _PER_LINE_BATCH:
             logger.info(
                 f"writing {'image prompts' if visual_prompt else 'search terms'}"
-                f" for lines {start + 1}-{start + len(chunk)} of {len(lines)}"
+                f" for lines {start + 1}-{start + len(chunk)} of {total}"
             )
-            collected.extend(
-                generate_terms_per_line(
-                    video_subject=subject,
-                    narration_lines=chunk,
-                    app_config=app_config,
-                    visual_prompt=visual_prompt,
-                    image_style=image_style,
-                )
+        written = _terms_for_chunk(
+            subject,
+            chunk,
+            app_config,
+            visual_prompt=visual_prompt,
+            image_style=image_style,
+            start=start + 1,
+            total=total,
+            before=lines[max(0, start - _PER_LINE_CONTEXT):start],
+            after=lines[start + len(chunk):start + len(chunk) + _PER_LINE_CONTEXT],
+            previous_prompt=collected[-1] if collected else "",
+        )
+        if not written and total <= _PER_LINE_BATCH:
+            # 整篇就一批还写不出来：维持原来的行为，返回空让上层报错。
+            return []
+        if not written:
+            logger.error(
+                f"no {'image prompts' if visual_prompt else 'search terms'} at "
+                f"all for lines {start + 1}-{start + len(chunk)}; filling them "
+                f"with the video subject to keep the later lines aligned"
             )
-        return collected
-
-    numbered = "\n".join(
-        f"{index + 1}. {utils.remove_pause_tags(line)}"
-        for index, line in enumerate(lines)
-    )
-    # 文生图那条路要的是一整句画面描述，库存素材那条路要的是短查询。
-    # 同一个函数两种产物，是因为"每句一条、条数对齐"这套保证两边都要。
-    prompt = (
-        _scene_image_prompt_request(subject, numbered, len(lines), image_style)
-        if visual_prompt
-        else _scene_search_term_request(subject, numbered, len(lines))
-    )
+        collected.extend(_pad_to_lines(chunk, written, subject, start + 1))
 
     wanted = "image prompt" if visual_prompt else "search term"
-    logger.info(
-        f"generating one {wanted} per narration line: {len(lines)} lines"
-    )
-
-    terms: List[str] = []
-    for attempt in range(_max_retries):
-        response = ""
-        try:
-            if app_config is None:
-                response = _generate_response(prompt)
-            else:
-                response = _generate_response(prompt, app_config=app_config)
-            if response.startswith("Error: "):
-                # 与 generate_terms 一致：不要把错误文案当成关键词传下去。
-                #
-                # 但要把原因带出去。只返回一个空列表的话，上面那层只会报
-                # "failed to generate video search terms"——而真正的原因
-                # ("ollama: model_name is not set") 只留在日志里,用户在界面上
-                # 看到的是一句什么都没说的话。
-                logger.error(f"failed to generate per-line terms: {response}")
-                raise TermGenerationError(response[len("Error: "):].strip())
-            terms = json.loads(_strip_code_fence(response))
-        except TermGenerationError:
-            # 供应商自己报的错：重试多少次都是同一句，而且原因要原样送上去。
-            raise
-        except Exception as exc:
-            logger.warning(f"failed to generate per-line terms: {exc}")
-            if response:
-                try:
-                    terms = _extract_embedded_json(response, "[")
-                except ValueError as inner:
-                    logger.warning(f"failed to generate per-line terms: {inner}")
-
-        if isinstance(terms, list) and all(isinstance(term, str) for term in terms):
-            terms = [term.strip() for term in terms]
-            if any(terms):
-                break
-        terms = []
-        if attempt < _max_retries - 1:
-            logger.warning(
-                f"failed to generate per-line terms, trying again... {attempt + 1}"
-            )
-
-    if not terms:
-        return []
-
-    # 长度必须对齐。模型少给时用主题兜底，而不是让后面的句子整体前移——
-    # 错位一格比配一个泛一点的画面糟糕得多。
-    aligned: List[str] = []
-    for index in range(len(lines)):
-        term = terms[index].strip() if index < len(terms) else ""
-        aligned.append(term or subject or lines[index])
-    logger.success(f"completed: {len(aligned)} per-line {wanted}s")
-    return aligned
+    logger.success(f"completed: {len(collected)} per-line {wanted}s")
+    return collected
 
 
 # =============================================================================
