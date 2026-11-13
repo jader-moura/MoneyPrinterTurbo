@@ -480,7 +480,13 @@ def _produce_material(
         raise SceneError(f"{source} failed to produce a material: {exc}") from exc
 
     if not produced:
-        raise SceneError(f"{source} returned no material for {term!r}")
+        # 素材源按约定返回空列表而不是抛异常，所以"为什么"要单独去取一次。
+        # 不取的话用户看到的就是"没出图"，然后得去翻日志才知道是显卡掉了。
+        why = material.last_failure(source)
+        raise SceneError(
+            f"{source} returned no material for {term!r}"
+            + (f": {why}" if why else "")
+        )
     return str(produced[0]), source
 
 

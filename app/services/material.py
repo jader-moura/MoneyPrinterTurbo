@@ -1818,6 +1818,31 @@ def _save_openai_image_file(
     return image_path, width, height
 
 
+# 这一次失败的原话。素材源按约定返回空列表（上层跳过这个关键词继续），
+# 原话就只剩在日志里——用户看到的是"没出图"，看不到"为什么"。
+#
+# 用 thread-local 而不是全局：每个任务、每个重画任务各跑在自己的线程里，
+# 全局会让这条片子的错误出现在另一条片子的提示里。
+_LAST_FAILURE = threading.local()
+
+
+def remember_failure(source: str, detail: str) -> None:
+    """记下某个素材源这一次失败的原话。``detail`` 为空表示"重新开始"。"""
+    _LAST_FAILURE.source = str(source or "")
+    # 一行、不太长：这段文字要进界面。CUDA 的报错后面跟着三行链接和提示，
+    # 真正有用的那半句在最前面。
+    _LAST_FAILURE.detail = " ".join(str(detail or "").split())[:240]
+
+
+def last_failure(source: str = "") -> str:
+    """这个线程里那个素材源上一次失败的原话，没有就是空字符串。"""
+    if getattr(_LAST_FAILURE, "detail", "") == "":
+        return ""
+    if source and getattr(_LAST_FAILURE, "source", "") != source:
+        return ""
+    return str(_LAST_FAILURE.detail)
+
+
 def generate_images_openai(
     search_term: str,
     minimum_duration: int,
@@ -1873,12 +1898,15 @@ def generate_images_openai(
         )
     )
     generation_progress.submitting("openai_image")
+    remember_failure("openai_image", "")
     image_bytes, failure_detail = _request_openai_image(endpoint, payload)
     if image_bytes is None:
         logger.error(
             f"openai image generation failed: term={search_term!r}, "
             f"detail={failure_detail}"
         )
+        # 原话留给上层：这一句是用户唯一能看到的东西。
+        remember_failure("openai_image", failure_detail)
         return []
 
     try:
@@ -1890,6 +1918,9 @@ def generate_images_openai(
         logger.error(
             "openai image response is not a decodable image, skipping term: "
             f"term={search_term!r}, error={type(e).__name__}, detail={e}"
+        )
+        remember_failure(
+            "openai_image", f"the answer was not a picture this can read: {e}"
         )
         return []
     item = MaterialInfo()

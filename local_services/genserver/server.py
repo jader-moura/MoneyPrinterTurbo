@@ -106,6 +106,65 @@ DEFAULT_MODEL = os.environ.get("GEN_DEFAULT_MODEL", "zimage-turbo")
 MAX_IMAGES_PER_REQUEST = 4
 
 
+# A CUDA context can be lost for good while the process stays up: the
+# display driver resets, the machine sleeps with a model resident, a kernel
+# faults. Every call afterwards fails, often as something that reads like a
+# different problem each time - a 40 MB allocation "out of memory" with six
+# gigabytes free, then "unknown error". Watching for these means saying what
+# happened once, instead of handing out a fresh traceback per click.
+FATAL_CUDA = (
+    "cuda error: unknown error",
+    "cuda error: unspecified launch failure",
+    "cuda error: illegal memory access",
+    "an illegal memory access was encountered",
+    "device-side assert triggered",
+    "cuda error: misaligned address",
+    "cublas_status_not_initialized",
+    "no kernel image is available",
+)
+
+# The words of the first fatal error, once there has been one. Nothing clears
+# it: the context does not come back, so only restarting this process does.
+LOST: Optional[str] = None
+
+
+class CardLost(Exception):
+    """The card was lost and this process cannot get it back.
+
+    Separate from `Busy`, which means "ask again in a moment". This one means
+    "asking again will fail the same way until someone restarts the server",
+    which is the one thing the reader needs to know.
+    """
+
+
+def lost_the_card(exc: BaseException) -> Optional[str]:
+    """The fatal marker in this exception, or None if it is an ordinary error.
+
+    A plain out-of-memory is **not** fatal: the next request may well fit, and
+    a card that refuses work for ever because one picture was too big would be
+    worse than the error it is avoiding.
+    """
+    said = f"{type(exc).__name__}: {exc}".lower()
+    for marker in FATAL_CUDA:
+        if marker in said:
+            return marker
+    return None
+
+
+def remember_if_lost(exc: BaseException) -> None:
+    global LOST
+    marker = lost_the_card(exc)
+    if marker is None or LOST is not None:
+        return
+    LOST = f"{type(exc).__name__}: {str(exc).splitlines()[0]}"
+    print(
+        f"[genserver] the CUDA context is gone ({marker}). Every generation "
+        "from here on will fail, and the resident model cannot be given back "
+        "without restarting this process.",
+        flush=True,
+    )
+
+
 class Busy(Exception):
     """The card is in use and this request will not wait for it.
 
@@ -301,7 +360,11 @@ def health() -> dict:
         except Exception:
             arch_list = []
     return {
-        "ok": TORCH_IMPORT_ERROR is None,
+        # Up is not the same as able to work. A process that has lost the card
+        # answers every request and generates nothing, so saying ok here would
+        # send the reader looking anywhere but at the real problem.
+        "ok": TORCH_IMPORT_ERROR is None and LOST is None,
+        "lost": LOST,
         # The process actually holding the card, so a client can stop a
         # sidecar it did not start. On Windows this is the real interpreter,
         # not the .venv redirector stub that launched it, which is exactly
@@ -525,6 +588,13 @@ def fit_reference(image: Any, width: int, height: int) -> Any:
 
 
 def generate(body: dict) -> dict:
+    if LOST is not None:
+        raise CardLost(
+            f"this server lost the GPU ({LOST}) and cannot generate anything "
+            "until it is restarted. Nothing here can recover it: the context "
+            "is gone and the resident model is stuck in this process. Stop it "
+            "and start it again."
+        )
     model_id = str(body.get("model") or "").strip()
     spec = spec_for(model_id)
     prompt = str(body.get("prompt") or "").strip()
@@ -630,6 +700,9 @@ def generate(body: dict) -> dict:
 
             buffer = io.BytesIO()
             image.save(buffer, format="PNG")
+        except Exception as exc:
+            remember_if_lost(exc)
+            raise
         finally:
             RESIDENT.generating = None
             LAST_USED = time.monotonic()
@@ -851,6 +924,10 @@ class Handler(BaseHTTPRequestHandler):
             self._send(422, {"error": {"message": str(err), "type": "invalid_request_error"}})
         except KeyError as err:
             self._send(404, {"error": str(err).strip('"')})
+        except CardLost as err:
+            # 503 like Busy: the server is up, the card is not. A 500 here
+            # reads as "that request was wrong", and it was not.
+            self._send(503, {"error": str(err)})
         except Busy as err:
             # 503, not a hang. A client that waits for a lock reports "could
             # not reach the server" when it gives up, which is a lie about a

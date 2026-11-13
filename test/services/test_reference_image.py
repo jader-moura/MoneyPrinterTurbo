@@ -841,6 +841,119 @@ class TestTheSamePhotoTwiceIsObvious:
         assert seen["avoid"] == ["https://pics/one.jpg", "https://pics/three.jpg"]
 
 
+class TestTheReasonReachesTheScreen:
+    """用户的原话："it's failing for a reason that I don't know"。
+
+    素材源失败时按约定返回空列表（上层跳过这个关键词继续往下），所以原话
+    只留在日志里，界面上只剩"没出图"。
+    """
+
+    def test_the_source_s_own_words_are_kept_for_the_message(self):
+        from app.services import material
+
+        material.remember_failure("openai_image", "HTTP 500: the card is gone")
+        assert material.last_failure("openai_image") == "HTTP 500: the card is gone"
+        assert material.last_failure() == "HTTP 500: the card is gone"
+
+    def test_another_source_s_failure_is_not_put_in_this_one_s_mouth(self):
+        from app.services import material
+
+        material.remember_failure("openai_image", "the card is gone")
+        assert material.last_failure("pexels") == ""
+
+    def test_starting_a_new_attempt_forgets_the_last_one(self):
+        from app.services import material
+
+        material.remember_failure("openai_image", "the card is gone")
+        material.remember_failure("openai_image", "")
+        assert material.last_failure("openai_image") == ""
+
+    def test_it_is_one_line_and_not_a_whole_traceback(self):
+        """这段文字要进界面。CUDA 的报错后面跟着三行链接。"""
+        from app.services import material
+
+        material.remember_failure(
+            "openai_image",
+            "HTTP 500: CUDA error: unknown error\nSearch for `cudaErrorUnknown'\n"
+            + "x" * 500,
+        )
+        said = material.last_failure("openai_image")
+        assert "\n" not in said
+        assert len(said) <= 240
+        assert said.startswith("HTTP 500: CUDA error: unknown error")
+
+    def test_each_task_keeps_its_own_failure(self):
+        """两条片子同时在重画，一条的错误不能冒出来挂在另一条上。"""
+        import threading
+
+        from app.services import material
+
+        material.remember_failure("openai_image", "this thread's failure")
+        seen = []
+
+        def other():
+            material.remember_failure("openai_image", "the other thread's failure")
+            seen.append(material.last_failure("openai_image"))
+
+        thread = threading.Thread(target=other)
+        thread.start()
+        thread.join()
+        assert seen == ["the other thread's failure"]
+        assert material.last_failure("openai_image") == "this thread's failure"
+
+    def test_the_scene_error_says_what_the_source_said(self, monkeypatch):
+        from types import SimpleNamespace
+
+        from app.services import material, scene_editor
+
+        monkeypatch.setattr(
+            scene_editor,
+            "load_params",
+            lambda task_id: SimpleNamespace(
+                video_source="openai_image",
+                video_clip_duration=5,
+                image_motion="zoom",
+            ),
+        )
+
+        def nothing(**kwargs):
+            material.remember_failure(
+                "openai_image",
+                "HTTP 500: this server lost the GPU and cannot generate "
+                "anything until it is restarted",
+            )
+            return []
+
+        monkeypatch.setattr(scene_editor.material, "download_videos", nothing)
+        with pytest.raises(scene_editor.SceneError) as caught:
+            scene_editor._produce_material("a-task", "a comet", what="scene 1")
+        said = str(caught.value)
+        assert "returned no material" in said
+        assert "lost the GPU" in said
+        assert "restarted" in said
+
+    def test_a_source_that_said_nothing_adds_nothing(self, monkeypatch):
+        """没有原话的时候不要留一个孤零零的冒号。"""
+        from types import SimpleNamespace
+
+        from app.services import material, scene_editor
+
+        monkeypatch.setattr(
+            scene_editor,
+            "load_params",
+            lambda task_id: SimpleNamespace(
+                video_source="openai_image",
+                video_clip_duration=5,
+                image_motion="zoom",
+            ),
+        )
+        material.remember_failure("openai_image", "")
+        monkeypatch.setattr(scene_editor.material, "download_videos", lambda **k: [])
+        with pytest.raises(scene_editor.SceneError) as caught:
+            scene_editor._produce_material("a-task", "a comet", what="scene 1")
+        assert str(caught.value).endswith("'a comet'")
+
+
 class TestHowFarItMayMove:
     def test_the_default_keeps_the_composition(self):
         assert reference_image.strength({}) == 0.75

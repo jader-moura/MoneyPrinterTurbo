@@ -156,6 +156,8 @@ def server(monkeypatch):
         srv.RESIDENT.model_id = spec.id
         return {"resident": spec.id, "seconds": 0.0, "offload": offload}
 
+    # 模块级的"显卡丢了"状态不能从一条测试漏到下一条。
+    monkeypatch.setattr(srv, "LOST", None)
     monkeypatch.setattr(srv, "torch", FakeTorch())
     monkeypatch.setattr(srv, "TORCH_IMPORT_ERROR", None)
     monkeypatch.setattr(srv, "requests", ollama)
@@ -468,6 +470,134 @@ def draw(server, **body):
     body.setdefault("prompt", "a forge")
     body.setdefault("size", "1536x864")
     return server.post("/generate", **body)
+
+
+class FlakyPipe:
+    """Raises a given error for the first `failures` calls, then paints."""
+
+    def __init__(self, error, failures=1):
+        self.error = error
+        self.failures = failures
+        self.calls = 0
+
+    def __call__(self, **kwargs):
+        self.calls += 1
+        if self.calls <= self.failures:
+            raise self.error
+        return type("Result", (), {"images": [Image.new("RGB", (8, 8))]})()
+
+
+def install(monkeypatch, pipe):
+    """Make the next load hand out this pipe instead of the harness's."""
+
+    def load(spec, offload):
+        srv.RESIDENT.pipe = pipe
+        srv.RESIDENT.model_id = spec.id
+        return {"resident": spec.id, "seconds": 0.0, "offload": offload}
+
+    monkeypatch.setattr(srv.RESIDENT, "load", load)
+    return pipe
+
+
+# --- a card that is gone is gone -------------------------------------------
+
+
+UNKNOWN = RuntimeError(
+    "CUDA error: unknown error\n"
+    "Search for `cudaErrorUnknown' in https://docs.nvidia.com/cuda/ for more "
+    "information.\nCUDA kernel errors might be asynchronously reported."
+)
+
+
+def test_a_lost_card_is_reported_once_and_then_refused(server, monkeypatch):
+    """用户的原话："it got an errror and persisted on this error"。
+
+    CUDA 上下文掉了之后，这个进程里的每一次调用都会失败，而且每次失败的样
+    子都不一样——40 MB 分不出来的"显存不足"（当时还空着 6 GB），然后是
+    "unknown error"。所以第一次就说清楚，后面直接拒绝。
+    """
+    pipe = install(monkeypatch, FlakyPipe(UNKNOWN, failures=99))
+
+    first = draw(server)
+    assert first.status_code == 500
+    assert "unknown error" in first.json()["error"]
+
+    second = draw(server)
+    # 503，不是 500：服务器活着，显卡没了，而且再点一次也是一样的结果。
+    assert second.status_code == 503
+    assert "restart" in second.json()["error"].lower()
+    # 第二次根本没碰显卡。
+    assert pipe.calls == 1
+
+
+def test_health_stops_claiming_to_be_well(server, monkeypatch):
+    install(monkeypatch, FlakyPipe(UNKNOWN, failures=99))
+    assert server.get("/health").json()["ok"] is True
+
+    draw(server)
+
+    health = server.get("/health").json()
+    assert health["ok"] is False
+    assert "unknown error" in str(health["lost"])
+
+
+def test_the_openai_route_refuses_too(server, monkeypatch):
+    install(monkeypatch, FlakyPipe(UNKNOWN, failures=99))
+    draw(server)
+
+    response = server.image(size="1536x864")
+    assert response.status_code == 503
+    assert "restart" in response.json()["error"].lower()
+
+
+def test_running_out_of_memory_is_not_the_end_of_the_world(server, monkeypatch):
+    """一张图太大和显卡掉了是两件事。
+
+    为了一次装不下就从此拒绝干活，比它要避免的那个错误更糟。
+    """
+    pipe = install(
+        monkeypatch,
+        FlakyPipe(
+            RuntimeError(
+                "CUDA out of memory. Tried to allocate 2.00 GiB. GPU 0 has a "
+                "total capacity of 15.90 GiB of which 1.20 GiB is free."
+            ),
+            failures=1,
+        ),
+    )
+
+    assert draw(server).status_code == 500
+    # 下一次照常画。
+    assert draw(server).status_code == 200
+    assert pipe.calls == 2
+    assert server.get("/health").json()["ok"] is True
+
+
+@pytest.mark.parametrize(
+    "said",
+    [
+        "CUDA error: unknown error",
+        "CUDA error: unspecified launch failure",
+        "RuntimeError: CUDA error: an illegal memory access was encountered",
+        "device-side assert triggered",
+        # 换错 torch 的那个：卡是 sm_120，装的是 cu124。
+        "no kernel image is available for execution on the device",
+    ],
+)
+def test_the_errors_that_mean_the_context_is_gone(said):
+    assert srv.lost_the_card(RuntimeError(said)) is not None
+
+
+@pytest.mark.parametrize(
+    "said",
+    [
+        "CUDA out of memory. Tried to allocate 40.00 MiB",
+        "Size must be positive",
+        "connection reset by peer",
+    ],
+)
+def test_the_errors_that_do_not(said):
+    assert srv.lost_the_card(RuntimeError(said)) is None
 
 
 def a_png(width=40, height=10, colour=(200, 40, 40)):
