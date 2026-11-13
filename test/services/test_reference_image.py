@@ -63,7 +63,9 @@ class FakeRequests:
 
     def get(self, url, **kwargs):
         self.calls.append((url, kwargs))
-        if url.startswith(reference_image.GOOGLE_CSE_ENDPOINT):
+        if url.startswith(reference_image.GOOGLE_CSE_ENDPOINT) or url.startswith(
+            reference_image.BRAVE_ENDPOINT
+        ):
             if isinstance(self.search, Exception):
                 raise self.search
             return self.search
@@ -91,10 +93,24 @@ def photo_at(url, **kwargs):
     }
 
 
+def brave_hit(url, *, page="https://example.org/a-page"):
+    """Brave 的一条结果：图在 ``properties.url``，页面在 ``url``。"""
+    return {"type": "image_result", "properties": {"url": url}, "url": page}
+
+
+def brave_found(*items):
+    return FakeResponse(payload={"type": "images", "results": list(items)})
+
+
 CONFIG = {
     "reference_image_provider": "google_cse",
     "google_search_api_key": "test-key",
     "google_search_engine_id": "test-cx",
+}
+
+BRAVE_CONFIG = {
+    "reference_image_provider": "brave",
+    "brave_search_api_key": "brave-test-key",
 }
 
 
@@ -133,6 +149,25 @@ class TestItNeedsToBeConfigured:
             reference_image.search("comet", app_config={**CONFIG, "reference_image_provider": "bing"})
         assert "bing" in str(caught.value)
         assert "google_cse" in str(caught.value)
+        # 认识哪几个要全说出来，不然用户不知道还有第二条路。
+        assert "brave" in str(caught.value)
+
+    def test_the_google_one_mentions_the_other_way_to_search(self):
+        """Google 那套要先建搜索引擎，不是每个人都愿意。"""
+        with pytest.raises(reference_image.ReferenceImageError) as caught:
+            reference_image.search("comet", app_config={})
+        assert "brave" in str(caught.value)
+
+    def test_brave_names_the_setting_it_needs(self):
+        with pytest.raises(reference_image.ReferenceImageError) as caught:
+            reference_image.search(
+                "comet", app_config={"reference_image_provider": "brave"}
+            )
+        message = str(caught.value)
+        assert "brave_search_api_key" in message
+        assert "api-dashboard.search.brave.com" in message
+        # Brave 不用建引擎，这就是选它的理由，所以要说。
+        assert "google_search_engine_id" not in message
 
     def test_an_empty_query_is_refused_before_anything_is_sent(self, web):
         fake = web(FakeRequests())
@@ -289,6 +324,124 @@ class TestWhatItRefuses:
         with pytest.raises(reference_image.ReferenceImageError) as caught:
             reference_image.search("comet", app_config=CONFIG)
         assert "test-key" not in str(caught.value)
+        assert "OSError" in str(caught.value)
+
+
+class TestBraveFindsThemToo:
+    """同一个按钮，换一家搜索引擎。下载和检查那几道还是同一套。"""
+
+    def test_it_comes_back_with_the_photo_and_where_it_came_from(self, web):
+        url = "https://pics.example.org/comet.jpg"
+        web(FakeRequests(search=brave_found(brave_hit(url)), downloads=photo_at(url)))
+        reference = reference_image.search("comet 1952", app_config=BRAVE_CONFIG)
+        assert reference.provider == "brave"
+        assert reference.source_url == url
+        assert reference.page_url == "https://example.org/a-page"
+        assert reference.data[:8] == b"\x89PNG\r\n\x1a\n"
+
+    def test_the_key_travels_in_the_header_not_the_url(self, web):
+        """URL 会出现在日志和异常里，请求头不会。"""
+        url = "https://pics.example.org/comet.jpg"
+        fake = web(
+            FakeRequests(search=brave_found(brave_hit(url)), downloads=photo_at(url))
+        )
+        reference_image.search("comet", app_config=BRAVE_CONFIG)
+        endpoint, kwargs = fake.calls[0]
+        assert endpoint == reference_image.BRAVE_ENDPOINT
+        assert kwargs["headers"]["X-Subscription-Token"] == "brave-test-key"
+        assert "brave-test-key" not in json.dumps(kwargs["params"])
+
+    def test_safe_search_is_on_unless_it_is_turned_off(self, web):
+        url = "https://pics.example.org/comet.jpg"
+        fake = web(
+            FakeRequests(search=brave_found(brave_hit(url)), downloads=photo_at(url))
+        )
+        reference_image.search("comet", app_config=BRAVE_CONFIG)
+        assert fake.calls[0][1]["params"]["safesearch"] == "strict"
+
+        fake = web(
+            FakeRequests(search=brave_found(brave_hit(url)), downloads=photo_at(url))
+        )
+        reference_image.search(
+            "comet", app_config={**BRAVE_CONFIG, "reference_image_safe": "off"}
+        )
+        assert fake.calls[0][1]["params"]["safesearch"] == "off"
+
+    def test_a_hit_that_will_not_download_is_skipped_for_the_next_one(self, web):
+        dead = "https://dead.example.org/gone.jpg"
+        good = "https://pics.example.org/comet.jpg"
+        web(
+            FakeRequests(
+                search=brave_found(brave_hit(dead), brave_hit(good)),
+                downloads={dead: FakeResponse(status=403), **photo_at(good)},
+            )
+        )
+        found_one = reference_image.search("comet", app_config=BRAVE_CONFIG)
+        assert found_one.source_url == good
+
+    def test_a_thumbnail_is_not_good_enough_here_either(self, web):
+        """两家供应商必须共用同一套检查，不然换一家等于换一套。"""
+        tiny = "https://pics.example.org/thumb.jpg"
+        web(
+            FakeRequests(
+                search=brave_found(brave_hit(tiny)),
+                downloads=photo_at(tiny, width=200, height=120),
+            )
+        )
+        with pytest.raises(reference_image.ReferenceImageError) as caught:
+            reference_image.search("comet", app_config=BRAVE_CONFIG)
+        assert "512" in str(caught.value)
+
+    def test_it_gives_up_after_a_few_tries_rather_than_all_of_them(self, web):
+        hits = [brave_hit(f"https://dead.example.org/{at}.jpg") for at in range(20)]
+        fake = web(
+            FakeRequests(
+                search=brave_found(*hits),
+                downloads={
+                    hit["properties"]["url"]: FakeResponse(status=404) for hit in hits
+                },
+            )
+        )
+        with pytest.raises(reference_image.ReferenceImageError) as caught:
+            reference_image.search("comet", app_config=BRAVE_CONFIG)
+        assert "none could be used" in str(caught.value)
+        assert len(fake.calls) == 1 + reference_image.MAX_ATTEMPTS
+
+    def test_no_results_says_what_was_searched_for(self, web):
+        web(FakeRequests(search=FakeResponse(payload={"type": "images"})))
+        with pytest.raises(reference_image.ReferenceImageError) as caught:
+            reference_image.search("de havilland comet", app_config=BRAVE_CONFIG)
+        message = str(caught.value)
+        assert "de havilland comet" in message
+        # 点名是谁没找到：用户配了两家里的哪一家，错误要自己说清楚。
+        assert "brave" in message
+
+    def test_a_refusal_from_brave_is_passed_on_in_words(self, web):
+        web(
+            FakeRequests(
+                search=FakeResponse(
+                    status=429,
+                    payload={
+                        "type": "ErrorResponse",
+                        "error": {
+                            "code": "RATE_LIMITED",
+                            "detail": "Request rate limit exceeded",
+                        },
+                    },
+                )
+            )
+        )
+        with pytest.raises(reference_image.ReferenceImageError) as caught:
+            reference_image.search("comet", app_config=BRAVE_CONFIG)
+        assert "429" in str(caught.value)
+        assert "Request rate limit exceeded" in str(caught.value)
+        assert "RATE_LIMITED" in str(caught.value)
+
+    def test_the_api_key_never_reaches_the_error_message(self, web):
+        web(FakeRequests(search=OSError("failed talking to brave-test-key")))
+        with pytest.raises(reference_image.ReferenceImageError) as caught:
+            reference_image.search("comet", app_config=BRAVE_CONFIG)
+        assert "brave-test-key" not in str(caught.value)
         assert "OSError" in str(caught.value)
 
 

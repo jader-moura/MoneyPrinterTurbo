@@ -275,8 +275,8 @@ openai_image_prompt_template = "{term}, candid cinematic photograph, natural lig
 # (Z-Image-Turbo img2img); nothing else in this file can, and asking for it
 # with another source is refused rather than silently ignored.
 #
-# reference_image_provider: only "google_cse" today. An unknown value is an
-# error, never a quiet fall back to another search engine.
+# reference_image_provider: "google_cse" (the default) or "brave". An unknown
+# value is an error, never a quiet fall back to another search engine.
 # reference_image_provider = "google_cse"
 #
 # Google Programmable Search, which is the Custom Search JSON API:
@@ -287,13 +287,22 @@ openai_image_prompt_template = "{term}, candid cinematic photograph, natural lig
 # google_search_api_key = ""
 # google_search_engine_id = ""
 #
+# Brave image search, if the Google one is more trouble than it is worth: one
+# key, nothing to build first.
+#   key: https://api-dashboard.search.brave.com/
+# Brave has no "photographs only" switch, so a drawing or a piece of clip art
+# can come back where Google would have been told to leave it out. The size and
+# type checks still apply, so the picture is usable - just less certainly a
+# photograph.
+# brave_search_api_key = ""
+#
 # How far the redraw may move from the photograph. 1.0 ignores it entirely,
 # 0.75 keeps the composition and repaints everything else, 0.3 hands back
 # nearly the same picture. The step count is scaled to match, so a low
 # strength is not a faster image.
 # reference_image_strength = 0.75
 #
-# Google SafeSearch: "active" or "off".
+# SafeSearch: "active" or "off" ("active" is Brave's "strict").
 # reference_image_safe = "active"
 #
 # The photograph itself is never kept: it goes to the image model and is

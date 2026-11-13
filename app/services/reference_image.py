@@ -12,10 +12,19 @@
 
 供应商
 ------
-``reference_image_provider`` 选一个，默认 ``google_cse``（Google 可编程搜索
-的 Custom Search JSON API，``searchType=image``）。配置不全时点名缺哪一项，
-**不会**悄悄换成别的供应商：换一个供应商等于换一批搜索结果，用户按下那个
-按钮时以为搜的是 Google。
+``reference_image_provider`` 选一个：
+
+``google_cse``（默认）
+    Google 可编程搜索的 Custom Search JSON API，``searchType=image``。能直接
+    要"只要照片、要大图"（``imgType``/``imgSize``）。免费额度 100 次/天，而且
+    要先去建一个搜索引擎、把图片搜索打开。
+
+``brave``
+    Brave 的图片搜索 API，一把 key 就够，不用建引擎。代价是它没有"只要照片"
+    这个开关——剪贴画和插画也可能回来，只能靠底下那几道尺寸和类型的检查挡。
+
+配置不全时点名缺哪一项，**不会**悄悄换成别的供应商：换一个供应商等于换一批
+搜索结果，用户按下那个按钮时以为搜的是他配的那个。
 
 拿回来的东西是外部内容
 ----------------------
@@ -36,6 +45,11 @@ from app.config import config
 
 GOOGLE_CSE = "google_cse"
 GOOGLE_CSE_ENDPOINT = "https://www.googleapis.com/customsearch/v1"
+
+BRAVE = "brave"
+BRAVE_ENDPOINT = "https://api.search.brave.com/res/v1/images/search"
+
+PROVIDERS = (GOOGLE_CSE, BRAVE)
 
 # 一张底图最多多大。和 genserver 的 ``MAX_REFERENCE_MB`` 对齐：它那边会拒，
 # 这边先别下。
@@ -130,13 +144,21 @@ def search(query: str, *, app_config: Optional[dict] = None) -> Reference:
         raise ReferenceImageError("there is nothing to search for: the query is empty")
 
     provider = str(_setting(app_config, "reference_image_provider", GOOGLE_CSE)).strip()
-    if provider != GOOGLE_CSE:
+    finder = {GOOGLE_CSE: _google_cse, BRAVE: _brave}.get(provider)
+    if finder is None:
         # 不认识的供应商不能退回默认那个：用户以为搜的是他写的那个。
         raise ReferenceImageError(
             f"reference_image_provider {provider!r} is not one this build knows; "
-            f"the only one is {GOOGLE_CSE!r}"
+            "the ones it knows are "
+            + " and ".join(repr(name) for name in PROVIDERS)
         )
-    return _google_cse(wanted, app_config)
+    return finder(wanted, app_config)
+
+
+def _safe_on(app_config: Optional[dict]) -> bool:
+    """要不要开 SafeSearch。两家的参数名和取值不一样，这里只管开关。"""
+    value = str(_setting(app_config, "reference_image_safe", "active")).strip().lower()
+    return value not in ("off", "none", "false", "0", "no")
 
 
 def _google_cse(query: str, app_config: Optional[dict]) -> Reference:
@@ -157,7 +179,9 @@ def _google_cse(query: str, app_config: Optional[dict]) -> Reference:
             + " in [app] of config.toml. The key comes from "
             "https://developers.google.com/custom-search/v1/introduction and the "
             "engine id from https://programmablesearchengine.google.com/ "
-            "(switch image search on for it)."
+            "(switch image search on for it). Brave is the other way to search: "
+            'set reference_image_provider = "brave" and brave_search_api_key, '
+            "which needs no engine to be built first."
         )
 
     params = {
@@ -200,21 +224,126 @@ def _google_cse(query: str, app_config: Optional[dict]) -> Reference:
         ) from None
 
     items = payload.get("items") if isinstance(payload, dict) else None
-    if not isinstance(items, list) or not items:
-        raise ReferenceImageError(f"google found no pictures for {query!r}")
+    return _first_usable(query, GOOGLE_CSE, _google_candidates(items))
 
-    refused: list[str] = []
+
+def _google_candidates(items: Any) -> "list[tuple[str, str]]":
+    out: list[tuple[str, str]] = []
+    if not isinstance(items, list):
+        return out
     for item in items:
+        if not isinstance(item, dict):
+            continue
+        meta = item.get("image") if isinstance(item.get("image"), dict) else {}
+        out.append((str(item.get("link") or ""), str(meta.get("contextLink") or "")))
+    return out
+
+
+def _brave(query: str, app_config: Optional[dict]) -> Reference:
+    key = str(_setting(app_config, "brave_search_api_key", "")).strip()
+    if not key:
+        raise ReferenceImageError(
+            "brave is not configured: set brave_search_api_key in [app] of "
+            "config.toml. The key comes from "
+            "https://api-dashboard.search.brave.com/ - subscribe to an image "
+            "search plan and the key works straight away, with no search engine "
+            "to build first."
+        )
+
+    params = {
+        "q": query,
+        "count": SEARCH_COUNT,
+        # Brave 的图片搜索只认 "strict" 和 "off"。
+        "safesearch": "strict" if _safe_on(app_config) else "off",
+    }
+    logger.info(f"searching brave for a reference photo: query={query!r}")
+    try:
+        response = requests.get(
+            BRAVE_ENDPOINT,
+            params=params,
+            headers={
+                "User-Agent": USER_AGENT,
+                "Accept": "application/json",
+                # key 走请求头，所以它不会出现在任何一条带 URL 的日志里。
+                "X-Subscription-Token": key,
+            },
+            proxies=config.proxy,
+            timeout=(CONNECT_TIMEOUT, READ_TIMEOUT),
+        )
+    except Exception as exc:
+        raise ReferenceImageError(
+            f"brave could not be reached: {type(exc).__name__}"
+        ) from None
+
+    status = int(getattr(response, "status_code", 0) or 0)
+    if status != 200:
+        raise ReferenceImageError(f"brave answered {status}: {_brave_reason(response)}")
+    try:
+        payload = response.json()
+    except Exception:
+        raise ReferenceImageError(
+            "brave answered 200 with something that is not JSON"
+        ) from None
+
+    results = payload.get("results") if isinstance(payload, dict) else None
+    return _first_usable(query, BRAVE, _brave_candidates(results))
+
+
+def _brave_candidates(results: Any) -> "list[tuple[str, str]]":
+    """Brave 的一条结果里，``properties.url`` 是图，``url`` 是登载它的页面。"""
+    out: list[tuple[str, str]] = []
+    if not isinstance(results, list):
+        return out
+    for item in results:
+        if not isinstance(item, dict):
+            continue
+        where = item.get("properties")
+        picture = where.get("url") if isinstance(where, dict) else ""
+        out.append((str(picture or ""), str(item.get("url") or "")))
+    return out
+
+
+def _brave_reason(response: Any) -> str:
+    """Brave 的错误体里那句人话。"""
+    try:
+        body = response.json()
+    except Exception:
+        return "no reason given"
+    error = body.get("error") if isinstance(body, dict) else None
+    if isinstance(error, dict):
+        said = " ".join(
+            part
+            for part in (
+                str(error.get("detail") or "").strip(),
+                str(error.get("code") or "").strip(),
+            )
+            if part
+        )
+        if said:
+            return said
+    return "no reason given"
+
+
+def _first_usable(
+    query: str, provider: str, candidates: "list[tuple[str, str]]"
+) -> Reference:
+    """一条条试下来，返回第一张真能下得来、看得清的照片。
+
+    ``candidates`` 是 ``(图片地址, 登载页面)``，顺序就是搜索引擎给的顺序。两
+    家供应商共用这一段：下载、限大小、限类型、重新编码的规矩必须一样，不然
+    换个供应商就等于换一套安全检查。
+    """
+    refused: list[str] = []
+    tried: set[str] = set()
+    for url, page in candidates:
         # 试过几条就够了。头几条打不开是常事（防盗链、403、已经删了），但
         # 一直试下去会把一次点击拖成半分钟。
         if len(refused) >= MAX_ATTEMPTS:
             break
-        if not isinstance(item, dict):
+        url = str(url or "").strip()
+        if not url.lower().startswith(("http://", "https://")) or url in tried:
             continue
-        url = str(item.get("link") or "").strip()
-        if not url.lower().startswith(("http://", "https://")):
-            continue
-        meta = item.get("image") if isinstance(item.get("image"), dict) else {}
+        tried.add(url)
         try:
             data, width, height = _fetch(url)
         except ReferenceImageError as exc:
@@ -228,14 +357,16 @@ def _google_cse(query: str, app_config: Optional[dict]) -> Reference:
             data=data,
             query=query,
             source_url=url,
-            page_url=str(meta.get("contextLink") or url),
-            provider=GOOGLE_CSE,
+            page_url=str(page or url),
+            provider=provider,
             width=width,
             height=height,
         )
 
+    if not refused:
+        raise ReferenceImageError(f"{provider} found no pictures for {query!r}")
     raise ReferenceImageError(
-        f"google found pictures for {query!r} but none could be used: "
+        f"{provider} found pictures for {query!r} but none could be used: "
         + "; ".join(refused[:MAX_ATTEMPTS])
     )
 
