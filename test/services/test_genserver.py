@@ -158,6 +158,13 @@ def server(monkeypatch):
 
     # 模块级的"显卡丢了"状态不能从一条测试漏到下一条。
     monkeypatch.setattr(srv, "LOST", None)
+    monkeypatch.setattr(srv, "BLOATED", None)
+    # 内存余量也必须是固定的：这台机器此刻 commit 还剩多少，不能决定
+    # 测试过不过。真的量在 TestTheCommitChargeGuard 里单独考。
+    monkeypatch.setattr(srv, "own_commit_mb", lambda: 2 * 1024)
+    monkeypatch.setattr(
+        srv, "machine_commit_mb", lambda: (20 * 1024, 80 * 1024)
+    )
     monkeypatch.setattr(srv, "torch", FakeTorch())
     monkeypatch.setattr(srv, "TORCH_IMPORT_ERROR", None)
     monkeypatch.setattr(srv, "requests", ollama)
@@ -598,6 +605,176 @@ def test_the_errors_that_mean_the_context_is_gone(said):
 )
 def test_the_errors_that_do_not(said):
     assert srv.lost_the_card(RuntimeError(said)) is None
+
+
+# --- the commit charge, which is what actually went wrong ------------------
+#
+# 用户的原话："we cannot have genserver or other server accumulating the space
+# anymore"。当时的样子：working set 0.03 GB，commit charge 61.25 GB，整台机器
+# 78.19/79.92 GB 已提交，然后每一次分配——不管多小——都失败，而报出来的话全在
+# 讲 CUDA。
+
+
+def test_it_can_actually_read_the_numbers():
+    """量不出来的看门狗等于没有看门狗。
+
+    这一条故意不打桩：如果哪天这两个函数在这台机器上返回 None，那么上面所有
+    "超了就拦住"的测试都还会过，而真正的那次事故会再来一遍。
+    """
+    mine = srv.own_commit_mb()
+    assert mine is not None and mine > 0
+    room = srv.machine_commit_mb()
+    assert room is not None
+    used, limit = room
+    assert 0 < used <= limit
+
+
+def test_a_load_is_refused_when_the_machine_has_nothing_left(server, monkeypatch):
+    # 还剩 2 GB，装一个模型要 18 GB。
+    monkeypatch.setattr(srv, "machine_commit_mb", lambda: (78 * 1024, 80 * 1024))
+    response = draw(server)
+    assert response.status_code == 503
+    said = response.json()["error"]
+    # 要说清楚剩多少、要多少、以及该做什么。
+    assert "commit charge" in said
+    assert "78 of 80" in said
+    assert server.painted == []
+
+
+def test_finishing_what_is_already_loaded_needs_less_room(server, monkeypatch):
+    """模型已经在显存里的时候，画一张不需要再来 18 GB。
+
+    不然一台内存紧的机器会卡在"装得下但不许画"上。
+    """
+    draw(server)  # 先把模型装上
+    monkeypatch.setattr(srv, "machine_commit_mb", lambda: (74 * 1024, 80 * 1024))
+    assert draw(server).status_code == 200
+
+
+def test_growing_past_the_ceiling_drops_the_model_first(server, monkeypatch):
+    """先试着还回去：能还回来就继续干活，冷启动比拒绝服务贵。"""
+    dropped = []
+    monkeypatch.setattr(srv.RESIDENT, "unload", lambda: dropped.append(True) or 0.0)
+    monkeypatch.setattr(srv.RESIDENT, "model_id", "zimage-turbo")
+    readings = iter([40 * 1024, 12 * 1024])
+    monkeypatch.setattr(srv, "own_commit_mb", lambda: next(readings))
+
+    srv.watch_own_commit()
+
+    assert dropped == [True]
+    assert srv.BLOATED is None
+
+
+def test_a_leak_it_cannot_give_back_stops_it_taking_work(server, monkeypatch):
+    monkeypatch.setattr(srv.RESIDENT, "unload", lambda: 0.0)
+    monkeypatch.setattr(srv.RESIDENT, "model_id", "zimage-turbo")
+    # 还完之后还是 59 GB：这就是那次事故。
+    monkeypatch.setattr(srv, "own_commit_mb", lambda: 59 * 1024)
+
+    srv.watch_own_commit()
+
+    assert srv.BLOATED is not None
+    assert "59 GB" in srv.BLOATED
+
+    response = draw(server)
+    assert response.status_code == 503
+    said = response.json()["error"].lower()
+    # commit charge 只有进程退出才还得回来，所以只有一个动作有用。
+    assert "start it again" in said
+    assert server.painted == []
+
+
+def test_health_says_it_rather_than_waiting_to_be_asked(server, monkeypatch):
+    monkeypatch.setattr(srv.RESIDENT, "unload", lambda: 0.0)
+    monkeypatch.setattr(srv.RESIDENT, "model_id", "zimage-turbo")
+    monkeypatch.setattr(srv, "own_commit_mb", lambda: 59 * 1024)
+    assert server.get("/health").json()["ok"] is True
+
+    srv.watch_own_commit()
+
+    health = server.get("/health").json()
+    assert health["ok"] is False
+    assert "59 GB" in str(health["bloated"])
+
+
+def test_an_ordinary_size_is_left_alone(server, monkeypatch):
+    dropped = []
+    monkeypatch.setattr(srv.RESIDENT, "unload", lambda: dropped.append(True) or 0.0)
+    monkeypatch.setattr(srv.RESIDENT, "model_id", "zimage-turbo")
+    monkeypatch.setattr(srv, "own_commit_mb", lambda: 14 * 1024)
+
+    srv.watch_own_commit()
+
+    assert dropped == []
+    assert srv.BLOATED is None
+
+
+def test_a_generation_in_flight_is_not_interrupted(server, monkeypatch):
+    """看门狗不能把正在画的那一张掐掉——下一轮再看就是了。"""
+    dropped = []
+    monkeypatch.setattr(srv.RESIDENT, "unload", lambda: dropped.append(True) or 0.0)
+    monkeypatch.setattr(srv.RESIDENT, "model_id", "zimage-turbo")
+    monkeypatch.setattr(srv, "own_commit_mb", lambda: 59 * 1024)
+    monkeypatch.setattr(srv, "BUSY_WAIT_SECONDS", 0.05)
+
+    srv.RESIDENT.lock.acquire()
+    try:
+        srv.watch_own_commit()
+    finally:
+        srv.RESIDENT.lock.release()
+
+    assert dropped == []
+    assert srv.BLOATED is None
+
+
+def test_the_commit_charge_is_in_every_answer(server):
+    """涨没涨，看一眼日志就知道，不用再花一个下午。"""
+    body = draw(server).json()
+    assert body["commitMb"] == 2 * 1024
+    report = server.get("/health").json()["commit"]
+    assert report["ownMb"] == 2 * 1024
+    assert report["ceilingMb"] == srv.MAX_OWN_COMMIT_MB
+    assert report["machineLimitMb"] == 80 * 1024
+
+
+def test_a_failed_generation_hands_back_what_it_can(server, monkeypatch):
+    """失败的那一次正是分配器攥着一堆没人要再读的块的时候。"""
+    install(monkeypatch, FlakyPipe(RuntimeError("something went wrong"), failures=1))
+    emptied_before = srv.torch.cuda.emptied
+
+    assert draw(server).status_code == 500
+
+    assert srv.torch.cuda.emptied > emptied_before
+
+
+def test_giving_back_never_raises_even_when_nothing_works(monkeypatch):
+    """显卡刚掉的时候，下面每一个调用都会抛。"""
+
+    class Angry:
+        def empty_cache(self):
+            raise RuntimeError("CUDA error: unknown error")
+
+        def ipc_collect(self):
+            raise RuntimeError("CUDA error: unknown error")
+
+    monkeypatch.setattr(srv, "torch", type("T", (), {"cuda": Angry()})())
+    srv.give_back_what_we_can()  # 不抛就是通过
+
+
+def test_something_watches_even_with_the_idle_unload_switched_off(monkeypatch):
+    """GEN_IDLE_SECONDS 默认是 0，所以在这之前根本没有后台线程。
+
+    没有线程就没人看着它长大——那次 61 GB 就是这么来的。
+    """
+    monkeypatch.setattr(srv, "IDLE_SECONDS", 0.0)
+    monkeypatch.setattr(srv, "IDLE_CHECK_SECONDS", 3600.0)
+    monkeypatch.setattr(srv, "IDLE_THREAD", None)
+    try:
+        srv.start_idle_worker()
+        assert srv.IDLE_THREAD is not None
+        assert srv.IDLE_THREAD.is_alive()
+    finally:
+        srv.stop_idle_worker()
 
 
 def a_png(width=40, height=10, colour=(200, 40, 40)):

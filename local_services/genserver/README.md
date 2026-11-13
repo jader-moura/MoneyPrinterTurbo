@@ -143,7 +143,10 @@ the repository.
 | `OLLAMA_URL` | `http://127.0.0.1:11434` | Where to ask. |
 | `OLLAMA_UNLOAD_TIMEOUT` | `30` | Seconds to wait for Ollama's VRAM to come back. |
 | `GEN_IDLE_SECONDS` | `0` (off) | Unload the model after this long idle. |
-| `GEN_IDLE_CHECK_SECONDS` | `10` | How often the idle worker looks. |
+| `GEN_IDLE_CHECK_SECONDS` | `10` | How often the idle worker looks, and how often the commit charge is checked. |
+| `GEN_MAX_COMMIT_GB` | `28` | This process is leaking past here: it drops the model, and if that does not help it refuses further work. |
+| `GEN_MIN_FREE_COMMIT_GB` | `4` | Refuse to generate when the machine has less commit charge left. |
+| `GEN_LOAD_COMMIT_GB` | `18` | Extra commit charge a model load is asked for, on top of the above. |
 | `GEN_DEFAULT_MODEL` | `zimage-turbo` | What `/v1/images/generations` loads with no `model`. |
 
 ## config.toml
@@ -258,6 +261,52 @@ worth checking:
    fixed pagefile of 32 GB or more removes that variable. This is a Windows
    setting, not a project one: System Properties -> Advanced -> Performance ->
    Advanced -> Virtual memory.
+
+### 61 GB of commit charge, and every allocation failing
+
+Worth recognising on sight, because none of the errors mention memory. On
+2026-11-13 a redraw failed like this, three times in a row, for two hours:
+
+```
+HTTP 500: OutOfMemoryError: CUDA out of memory. Tried to allocate 40.00 MiB.
+          GPU 0 has a total capacity of 15.90 GiB of which 5.76 GiB is free
+HTTP 500: AcceleratorError: CUDA error: unknown error
+numpy._core._exceptions._ArrayMemoryError: Unable to allocate 15.2 MiB
+```
+
+A 40 MB allocation failing with 5.76 GB of VRAM free is not a GPU problem, and
+the numpy line is the giveaway: that is host memory. The process looked
+harmless in Task Manager — a working set of 0.03 GB — while holding **61.25 GB
+of commit charge**, on a machine whose commit limit is 79.92 GB with 78.19 GB
+already used. Past that point every allocation fails whatever its size, the
+CUDA context is lost, and the resident model cannot be given back, because
+commit charge is only returned when a process ends.
+
+So the number to look at is commit charge, not working set:
+
+```
+GET /health   ->  "commit": {"ownMb": 14230, "ceilingMb": 28672,
+                             "machineUsedMb": 41203, "machineLimitMb": 81840}
+```
+
+and every `/generate` answer carries `commitMb`, so growth shows up in
+`storage/logs/genserver.log` without anyone having to go looking.
+
+What the server does about it now:
+
+| it sees | it answers |
+| --- | --- |
+| the machine has less than `GEN_MIN_FREE_COMMIT_GB` left (plus `GEN_LOAD_COMMIT_GB` when a load is needed) | `503`, naming how much is left and how much was wanted |
+| its own commit charge past `GEN_MAX_COMMIT_GB` | drops the resident model, and carries on if that gave it back |
+| still past it after dropping the model | `503` on everything, and "stop this server and start it again" — `/health` stops saying `ok` |
+| a CUDA error meaning the context is gone | the same, naming the error |
+
+An ordinary out-of-memory is deliberately none of these: refusing all work for
+ever because one picture did not fit would be worse than the error it avoids.
+
+The watcher runs on the idle worker's tick, which is why that thread now
+starts even with `GEN_IDLE_SECONDS=0` — before this there was no background
+thread at all, and nothing was watching the process grow.
 
 ### The reload segfault, and why the idle unload is off
 

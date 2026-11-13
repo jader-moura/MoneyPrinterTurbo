@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import ctypes
 import gc
 import io
 import json
@@ -93,6 +94,33 @@ def unload_ollama_wanted() -> bool:
 
 # Dropping the pipeline after a quiet spell. 0 disables it, which is the
 # default: the reload is expensive and worth paying only on purpose.
+# --- commit charge ---------------------------------------------------------
+#
+# Not working set. The failure that cost an afternoon had a working set of
+# 0.03 GB and 61.25 GB of commit charge, on a machine whose commit limit is
+# 79.92 GB with 78.19 GB already used. Past that point every allocation fails
+# whatever its size, and none of the errors mention memory pressure: a 40 MB
+# CUDA allocation reports "out of memory" with 5.76 GB of VRAM free, the next
+# call reports "unknown error", and numpy cannot get 15 MB for an array. So
+# this is the number to watch, and the only one that would have said what was
+# wrong.
+
+# This process is leaking once it is past here. A resident model with CPU
+# offload accounts for roughly 16 GB, so this leaves room for a redraw's
+# peaks and still catches a runaway long before the machine is in trouble.
+MAX_OWN_COMMIT_MB = int(float(os.environ.get("GEN_MAX_COMMIT_GB", "28")) * 1024)
+
+# Refuse to start work when the machine has less commit left than this.
+MIN_FREE_COMMIT_MB = int(float(os.environ.get("GEN_MIN_FREE_COMMIT_GB", "4")) * 1024)
+
+# What a load needs on top of that. Asked for before loading rather than
+# during: a load that runs out halfway leaves the pieces behind.
+LOAD_COMMIT_MB = int(float(os.environ.get("GEN_LOAD_COMMIT_GB", "18")) * 1024)
+
+# Set once this process is past MAX_OWN_COMMIT_MB and could not give it back.
+# Nothing clears it: only exiting returns commit charge.
+BLOATED: Optional[str] = None
+
 IDLE_SECONDS = float(os.environ.get("GEN_IDLE_SECONDS", "0"))
 IDLE_CHECK_SECONDS = float(os.environ.get("GEN_IDLE_CHECK_SECONDS", "10"))
 
@@ -161,6 +189,210 @@ def remember_if_lost(exc: BaseException) -> None:
         f"[genserver] the CUDA context is gone ({marker}). Every generation "
         "from here on will fail, and the resident model cannot be given back "
         "without restarting this process.",
+        flush=True,
+    )
+
+
+class Leaking(Exception):
+    """This process has taken more memory than it can account for.
+
+    Separate from `Busy` ("ask again in a moment") and from `CardLost` ("the
+    GPU is gone"): the machine is fine and the card is fine, and this process
+    is the problem. Commit charge is only returned when a process exits, so
+    there is nothing to wait for and nothing to free.
+    """
+
+
+class NoRoom(Exception):
+    """The machine has no commit charge left to work with.
+
+    Not this process's fault and not permanent, so it reads as "try again",
+    unlike `Leaking`.
+    """
+
+
+class _MemoryStatusEx(ctypes.Structure):
+    _fields_ = [
+        ("dwLength", ctypes.c_ulong),
+        ("dwMemoryLoad", ctypes.c_ulong),
+        ("ullTotalPhys", ctypes.c_ulonglong),
+        ("ullAvailPhys", ctypes.c_ulonglong),
+        ("ullTotalPageFile", ctypes.c_ulonglong),
+        ("ullAvailPageFile", ctypes.c_ulonglong),
+        ("ullTotalVirtual", ctypes.c_ulonglong),
+        ("ullAvailVirtual", ctypes.c_ulonglong),
+        ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+    ]
+
+
+class _ProcessMemoryCounters(ctypes.Structure):
+    _fields_ = [
+        ("cb", ctypes.c_ulong),
+        ("PageFaultCount", ctypes.c_ulong),
+        ("PeakWorkingSetSize", ctypes.c_size_t),
+        ("WorkingSetSize", ctypes.c_size_t),
+        ("QuotaPeakPagedPoolUsage", ctypes.c_size_t),
+        ("QuotaPagedPoolUsage", ctypes.c_size_t),
+        ("QuotaPeakNonPagedPoolUsage", ctypes.c_size_t),
+        ("QuotaNonPagedPoolUsage", ctypes.c_size_t),
+        ("PagefileUsage", ctypes.c_size_t),
+        ("PeakPagefileUsage", ctypes.c_size_t),
+    ]
+
+
+def own_commit_mb() -> Optional[int]:
+    """This process's commit charge in MB, or None where it cannot be read.
+
+    None means "do not guess": every guard below treats it as "carry on", so
+    an unreadable number never stops the server from working.
+    """
+    if sys.platform != "win32":
+        return _own_commit_posix_mb()
+    counters = _ProcessMemoryCounters()
+    counters.cb = ctypes.sizeof(counters)
+    try:
+        ask = ctypes.windll.psapi.GetProcessMemoryInfo
+        # Declared, not left to ctypes to guess: the current-process
+        # pseudo-handle is (HANDLE)-1, and without argtypes ctypes tries to
+        # fit it into an int and raises "int too long to convert" - which,
+        # swallowed below, would have left this guard silently measuring
+        # nothing at all.
+        ask.argtypes = [
+            ctypes.c_void_p,
+            ctypes.POINTER(_ProcessMemoryCounters),
+            ctypes.c_ulong,
+        ]
+        ask.restype = ctypes.c_int
+        ok = ask(ctypes.c_void_p(-1), ctypes.byref(counters), counters.cb)
+    except Exception:
+        return None
+    if not ok:
+        return None
+    return int(counters.PagefileUsage // MB)
+
+
+def _own_commit_posix_mb() -> Optional[int]:
+    """`VmSize` on Linux: the nearest thing to the same question."""
+    try:
+        with open("/proc/self/status", "r", encoding="utf-8") as handle:
+            for line in handle:
+                if line.startswith("VmSize:"):
+                    return int(int(line.split()[1]) // 1024)
+    except Exception:
+        return None
+    return None
+
+
+def machine_commit_mb() -> "Optional[tuple[int, int]]":
+    """(used, limit) commit charge for the whole machine, in MB."""
+    if sys.platform != "win32":
+        return None
+    status = _MemoryStatusEx()
+    status.dwLength = ctypes.sizeof(status)
+    try:
+        ok = ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status))
+    except Exception:
+        return None
+    if not ok or not status.ullTotalPageFile:
+        return None
+    limit = int(status.ullTotalPageFile // MB)
+    free = int(status.ullAvailPageFile // MB)
+    return limit - free, limit
+
+
+def give_back_what_we_can() -> None:
+    """Best effort, and never raises.
+
+    Called after a failed generation as well as a successful one: a failure is
+    exactly when the allocator is holding blocks nobody will ever read, and a
+    card that has just faulted makes every one of these calls throw.
+    """
+    try:
+        gc.collect()
+    except Exception:
+        pass
+    if torch is None:
+        return
+    for attempt in (
+        lambda: torch.cuda.empty_cache(),
+        lambda: torch.cuda.ipc_collect(),
+    ):
+        try:
+            attempt()
+        except Exception:
+            pass
+
+
+def guard_memory(for_a_load: bool) -> None:
+    """Refuse work the machine cannot pay for, before anything is allocated.
+
+    Three different answers, because they need three different actions:
+    this process is leaking (restart it), the machine is full (close
+    something), or carry on.
+    """
+    if BLOATED is not None:
+        raise Leaking(
+            f"{BLOATED}. Commit charge is only given back when a process ends, "
+            "so there is nothing to wait for: stop this server and start it "
+            "again. Nothing else on the machine has to be touched."
+        )
+    room = machine_commit_mb()
+    if room is None:
+        return
+    used, limit = room
+    free = limit - used
+    wanted = MIN_FREE_COMMIT_MB + (LOAD_COMMIT_MB if for_a_load else 0)
+    if free >= wanted:
+        return
+    raise NoRoom(
+        f"the machine has {free // 1024}.{(free % 1024) * 10 // 1024} GB of "
+        f"commit charge left and this needs about {wanted // 1024} GB"
+        + (" to load the model" if for_a_load else "")
+        + f" ({used // 1024} of {limit // 1024} GB is already committed). "
+        "Close something holding memory, or stop and start this server if it "
+        "is the one holding it."
+    )
+
+
+def watch_own_commit() -> None:
+    """Notice this process growing, give back what can be given, then stop.
+
+    The one thing that must never happen again is this process quietly taking
+    the machine's commit charge until unrelated things start failing. So the
+    growth is capped: one attempt at handing it back, and if that does not
+    work it stops taking work and says to restart it.
+    """
+    global BLOATED
+    if BLOATED is not None:
+        return
+    mine = own_commit_mb()
+    if mine is None or mine <= MAX_OWN_COMMIT_MB:
+        return
+    try:
+        with held("letting go of the model"):
+            if RESIDENT.model_id is not None:
+                RESIDENT.unload()
+    except Busy:
+        # Mid-generation. Next tick.
+        return
+    give_back_what_we_can()
+    after = own_commit_mb() or mine
+    if after <= MAX_OWN_COMMIT_MB:
+        print(
+            f"[genserver] commit charge was {mine // 1024} GB; dropped the "
+            f"model and gave back {(mine - after) // 1024} GB",
+            flush=True,
+        )
+        return
+    BLOATED = (
+        f"this process holds {after // 1024} GB of commit charge, past the "
+        f"{MAX_OWN_COMMIT_MB // 1024} GB ceiling, and dropping the model gave "
+        f"back only {(mine - after) // 1024} GB"
+    )
+    print(
+        f"[genserver] {BLOATED}. Refusing further work: left alone this is "
+        "what makes unrelated allocations fail with messages about CUDA. "
+        "Stop this server and start it again.",
         flush=True,
     )
 
@@ -363,8 +595,11 @@ def health() -> dict:
         # Up is not the same as able to work. A process that has lost the card
         # answers every request and generates nothing, so saying ok here would
         # send the reader looking anywhere but at the real problem.
-        "ok": TORCH_IMPORT_ERROR is None and LOST is None,
+        "ok": TORCH_IMPORT_ERROR is None and LOST is None and BLOATED is None,
         "lost": LOST,
+        "bloated": BLOATED,
+        # So "is it growing?" is one request rather than an afternoon.
+        "commit": commit_report(),
         # The process actually holding the card, so a client can stop a
         # sidecar it did not start. On Windows this is the real interpreter,
         # not the .venv redirector stub that launched it, which is exactly
@@ -388,6 +623,17 @@ def health() -> dict:
             "freeMb": free_mb(),
             "totalMb": total_mb(),
         },
+    }
+
+
+def commit_report() -> dict:
+    """What this process and the machine have committed, in MB."""
+    room = machine_commit_mb()
+    return {
+        "ownMb": own_commit_mb(),
+        "ceilingMb": MAX_OWN_COMMIT_MB,
+        "machineUsedMb": None if room is None else room[0],
+        "machineLimitMb": None if room is None else room[1],
     }
 
 
@@ -501,11 +747,17 @@ def unload_if_idle() -> bool:
 def idle_worker() -> None:
     while not STOP_IDLE.wait(IDLE_CHECK_SECONDS):
         unload_if_idle()
+        watch_own_commit()
 
 
 def start_idle_worker() -> None:
+    """Starts for the idle unload, and also just to watch the commit charge.
+
+    GEN_IDLE_SECONDS is 0 by default, so before this there was no background
+    thread at all and nothing was watching this process grow.
+    """
     global IDLE_THREAD
-    if IDLE_SECONDS <= 0:
+    if IDLE_SECONDS <= 0 and own_commit_mb() is None:
         return
     STOP_IDLE.clear()
     IDLE_THREAD = threading.Thread(target=idle_worker, name="idle-unload", daemon=True)
@@ -596,6 +848,10 @@ def generate(body: dict) -> dict:
             "and start it again."
         )
     model_id = str(body.get("model") or "").strip()
+    # Before the lock and before anything is allocated. Reading `model_id`
+    # unlocked can be a tick out of date, which only ever means asking for
+    # slightly more or less headroom than the load will really need.
+    guard_memory(for_a_load=RESIDENT.model_id != model_id)
     spec = spec_for(model_id)
     prompt = str(body.get("prompt") or "").strip()
     if prompt == "":
@@ -702,6 +958,9 @@ def generate(body: dict) -> dict:
             image.save(buffer, format="PNG")
         except Exception as exc:
             remember_if_lost(exc)
+            # A failed generation is exactly when the allocator is left
+            # holding blocks nobody will read again.
+            give_back_what_we_can()
             raise
         finally:
             RESIDENT.generating = None
@@ -725,6 +984,8 @@ def generate(body: dict) -> dict:
         "peakAllocatedMb": peak,
         "freeMbBefore": before,
         "freeMbAfter": free_mb(),
+        # In every answer, so growth shows up in a log that is already kept.
+        "commitMb": own_commit_mb(),
         "offload": offload_wanted(spec),
         "load": loaded,
         "unloadedOllama": unloaded_ollama,
@@ -924,6 +1185,11 @@ class Handler(BaseHTTPRequestHandler):
             self._send(422, {"error": {"message": str(err), "type": "invalid_request_error"}})
         except KeyError as err:
             self._send(404, {"error": str(err).strip('"')})
+        except Leaking as err:
+            # 503 and the words "start it again": the one action that works.
+            self._send(503, {"error": str(err)})
+        except NoRoom as err:
+            self._send(503, {"error": str(err)})
         except CardLost as err:
             # 503 like Busy: the server is up, the card is not. A 500 here
             # reads as "that request was wrong", and it was not.
