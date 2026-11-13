@@ -946,6 +946,7 @@ voice_name = "kokoro:af_heart"
 # elevenlabs_music_prompt = ""
 # subtitle_enabled = true
 # subtitle_display_mode = "sentence" # "sentence" or "word_by_word"
+# subtitle_max_lines = 2            # Lines on screen at once; longer cues are shown a piece at a time (0 = no limit)
 # subtitle_animation = "none"        # "none" or "pop_spring"
 # font_name = "MicrosoftYaHeiBold.ttc"
 # font_size = 60

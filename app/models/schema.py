@@ -77,6 +77,19 @@ def _get_valid_ui_choice(key: str, allowed_values: tuple[str, ...], default: str
     return configured_value if configured_value in allowed_values else default
 
 
+def _get_valid_ui_int(key: str, default: int, *, minimum: int = 0) -> int:
+    """读取一个整数型 WebUI 配置，写坏了就当没写。
+
+    和 ``_get_valid_ui_choice`` 同一个理由：配置文件里一个手打错的值不该让整
+    个服务起不来。Pydantic 不校验字段默认值，所以这里自己兜住。
+    """
+    try:
+        value = int(config.ui.get(key, default))
+    except (TypeError, ValueError):
+        return default
+    return value if value >= minimum else default
+
+
 _Config = ConfigDict(
     arbitrary_types_allowed=True,
     # Note: ensure your key names match renamed V2 parameters if needed
@@ -231,6 +244,24 @@ class VideoParams(BaseModel):
     subtitle_animation: SubtitleAnimation = _get_valid_ui_choice(
         "subtitle_animation", _SUBTITLE_ANIMATIONS, "none"
     )
+    # 同一时刻屏幕上最多几行字幕。
+    #
+    # 字幕文件里的一条是旁白的一个分句，可以念上六七秒；大字号竖屏里那就是
+    # 四五行一堵字墙，而且整句话从第一个字起就全摊在那儿了。超过这个行数的
+    # 那一条在渲染时被切成几条，按字数分时间；文件本身不动——它同时是每段
+    # 画面停多久的唯一依据。
+    #
+    # 填 0 就是不切，和这个设置出现之前完全一样。
+    #
+    # How many lines of subtitle may be on screen at once. One cue is one
+    # spoken clause, which can run six or seven seconds and fill four or five
+    # lines at a large font size. Longer cues are cut into several on-screen
+    # pieces at render time, sharing the cue's duration by character count.
+    # The file itself is untouched: it is also the only source of per-picture
+    # timing. 0 keeps the old behaviour.
+    subtitle_max_lines: int = Field(
+        default=_get_valid_ui_int("subtitle_max_lines", 2), ge=0, le=20
+    )
     custom_position: float = Field(
         default=config.ui.get("custom_position", 70.0), ge=0, le=100, allow_inf_nan=False
     )
@@ -280,6 +311,10 @@ class SubtitleRequest(BaseModel):
     )
     subtitle_animation: SubtitleAnimation = _get_valid_ui_choice(
         "subtitle_animation", _SUBTITLE_ANIMATIONS, "none"
+    )
+    # 和 VideoParams 同一个意思：一次最多几行。0 是不切。
+    subtitle_max_lines: int = Field(
+        default=_get_valid_ui_int("subtitle_max_lines", 2), ge=0, le=20
     )
     font_name: Optional[str] = "STHeitiMedium.ttc"
     text_fore_color: Optional[str] = "#FFFFFF"

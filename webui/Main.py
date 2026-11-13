@@ -207,6 +207,7 @@ DEFAULT_SUBTITLE_SETTINGS = {
     "subtitle_position": "bottom",
     "subtitle_display_mode": "sentence",
     "subtitle_animation": "none",
+    "subtitle_max_lines": 2,
     "custom_position": 70.0,
     "text_fore_color": "#FFFFFF",
     "font_size": 60,
@@ -1741,6 +1742,12 @@ def _apply_restored_params(params):
     _set_stable_widget_value(
         "subtitle_animation_select", params.get("subtitle_animation") or "none"
     )
+    # 0 是"不限行数"，所以这里不能用 `or`——它会把 0 当成没填。
+    saved_max_lines = params.get("subtitle_max_lines")
+    _set_stable_widget_value(
+        "subtitle_max_lines_select",
+        2 if saved_max_lines is None else int(saved_max_lines),
+    )
     custom_position = min(100.0, max(0.0, float(params.get("custom_position", 70.0))))
     st.session_state["custom_position_input"] = str(custom_position)
     st.session_state["font_color_picker"] = params.get("text_fore_color") or "#FFFFFF"
@@ -2857,6 +2864,9 @@ def reset_subtitle_settings():
     _set_stable_widget_value(
         "subtitle_animation_select", defaults["subtitle_animation"]
     )
+    _set_stable_widget_value(
+        "subtitle_max_lines_select", defaults["subtitle_max_lines"]
+    )
     st.session_state["custom_position_input"] = str(defaults["custom_position"])
     st.session_state["font_color_picker"] = defaults["text_fore_color"]
     st.session_state["font_size_slider"] = defaults["font_size"]
@@ -2879,6 +2889,7 @@ def reset_subtitle_settings():
         "subtitle_position",
         "subtitle_display_mode",
         "subtitle_animation",
+        "subtitle_max_lines",
         "custom_position",
         "text_fore_color",
         "font_size",
@@ -9165,6 +9176,34 @@ def _render_subtitle_settings(panel, params):
             params.subtitle_display_mode = selected_display_mode
             _set_runtime_config(
                 "ui", "subtitle_display_mode", params.subtitle_display_mode
+            )
+
+            # 一次最多几行。一条字幕是旁白的一个分句，念上六七秒的那种在大
+            # 字号竖屏里会铺满四五行——整句话从第一个字起就全摊在那儿了。超过
+            # 这个行数的那条在渲染时被切成几条，按字数分时间。
+            subtitle_max_lines_options = [1, 2, 3, 0]
+            saved_max_lines = config.ui.get(
+                "subtitle_max_lines",
+                DEFAULT_SUBTITLE_SETTINGS["subtitle_max_lines"],
+            )
+            try:
+                saved_max_lines = int(saved_max_lines)
+            except (TypeError, ValueError):
+                saved_max_lines = DEFAULT_SUBTITLE_SETTINGS["subtitle_max_lines"]
+            if saved_max_lines not in subtitle_max_lines_options:
+                subtitle_max_lines_options.insert(0, saved_max_lines)
+            selected_max_lines = stable_selectbox(
+                tr("Lines On Screen"),
+                options=subtitle_max_lines_options,
+                default_value=saved_max_lines,
+                key="subtitle_max_lines_select",
+                format_func=lambda value: tr("No Limit") if not value else str(value),
+                help=tr("Lines On Screen Help"),
+                disabled=subtitle_settings_disabled,
+            )
+            params.subtitle_max_lines = int(selected_max_lines)
+            _set_runtime_config(
+                "ui", "subtitle_max_lines", params.subtitle_max_lines
             )
 
             # Subtitle Animation (None vs Pop Spring)

@@ -79,6 +79,16 @@ def _positive_int(value: str) -> int:
     return parsed
 
 
+def _subtitle_max_lines(value: str) -> int:
+    """同一时刻屏幕上最多几行字幕。0 是不限，和这个选项出现之前一样。"""
+    parsed = int(value)
+    if parsed < 0 or parsed > 20:
+        raise argparse.ArgumentTypeError(
+            f"subtitle-max-lines must be between 0 and 20, got {parsed}"
+        )
+    return parsed
+
+
 def _paragraph_count(value: str) -> int:
     parsed = int(value)
     if parsed < 1 or parsed > 10:
@@ -653,6 +663,16 @@ Batch manifests:
         ),
     )
     subtitle_group.add_argument(
+        "--subtitle-max-lines",
+        type=_subtitle_max_lines,
+        default=None,
+        help=(
+            "how many lines of subtitle may be on screen at once; longer cues "
+            "are shown a piece at a time, 0 for no limit "
+            "(default: [ui].subtitle_max_lines from config.toml; 2)"
+        ),
+    )
+    subtitle_group.add_argument(
         "--subtitle-animation",
         choices=_SUBTITLE_ANIMATION_VALUES,
         default=None,
@@ -1025,6 +1045,7 @@ def build_video_params(args: argparse.Namespace) -> VideoParams:
         "font_name",
         "subtitle_position",
         "subtitle_display_mode",
+        "subtitle_max_lines",
         "subtitle_animation",
         "custom_position",
         "text_fore_color",
@@ -1049,6 +1070,7 @@ def build_video_params(args: argparse.Namespace) -> VideoParams:
         ("image_motion", str, _image_motion),
         ("font_name", str, None),
         ("subtitle_display_mode", str, _subtitle_display_mode),
+        ("subtitle_max_lines", int, _subtitle_max_lines),
         ("subtitle_animation", str, _subtitle_animation),
         ("text_fore_color", str, _hex_color),
         ("font_size", int, _positive_int),

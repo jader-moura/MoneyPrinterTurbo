@@ -44,7 +44,7 @@ from app.models.schema import (
 )
 from app.services import bgm as bgm_service
 from app.services import transition_sound as transition_sound_service
-from app.services.utils import subtitle_shaping, video_effects
+from app.services.utils import subtitle_chunking, subtitle_shaping, video_effects
 from app.utils import file_security, logging_utils, utils
 from app.utils.subtitle_reader import moviepy_subtitles
 
@@ -1931,6 +1931,34 @@ def generate_video(
     # 避免同一视频中逐条字幕在两种字体之间来回切换。
     shaped_font = font_path
 
+    def subtitle_text_max_width(font_size):
+        """字幕换行可用的宽度。切条和画字读的是同一个数，不然量的和画的不是
+        一回事：量出来两行、画出来三行，就还是一屏的字。"""
+        bg_color = resolve_subtitle_background_color()
+        rounded = bool(
+            getattr(params, "rounded_subtitle_background", False) and bg_color
+        )
+        padding_ratio = 0.4 if rounded else 0.6
+        pad_x = int(font_size * padding_ratio) if bg_color else 0
+        return max(1, int(video_width * 0.9) - 2 * pad_x)
+
+    def count_subtitle_lines(text):
+        """这段字画上去会占几行。按真正会用的字体字号去量。"""
+        shaped = subtitle_shaping.needs_shaping(text)
+        clip_font = shaped_font if shaped else font_path
+        clip_fallbacks = (
+            subtitle_shaping.fallback_fonts(shaped_font, font_path) if shaped else []
+        )
+        font_size = int(params.font_size)
+        wrapped, _ = wrap_text(
+            text,
+            max_width=subtitle_text_max_width(font_size),
+            font=clip_font,
+            fontsize=font_size,
+            fallbacks=clip_fallbacks,
+        )
+        return wrapped.count("\n") + 1
+
     def create_text_clip(subtitle_item):
         params.font_size = int(params.font_size)
         params.stroke_width = int(params.stroke_width)
@@ -1952,7 +1980,7 @@ def generate_video(
         # padding 再换行，避免长英文或大字号刚好撑满 90% 视频宽度后，
         # 文字贴到背景框边缘，看起来像被裁切。普通矩形背景和圆角背景
         # 都走这条逻辑；无背景字幕则保持原有最大宽度。
-        text_max_width = max(1, int(max_width) - 2 * pad_x)
+        text_max_width = subtitle_text_max_width(params.font_size)
         wrapped_txt, txt_height = wrap_text(
             phrase,
             max_width=text_max_width,
@@ -2162,6 +2190,24 @@ def generate_video(
             shaped_font = subtitle_shaping.video_font(
                 font_path, (text for _, text in subtitles)
             )
+            # 一次只给看一句话那么多。字幕文件里的一条是旁白的一个分句，念上
+            # 六七秒、在屏幕上铺四五行是常事——那就成了一堵字墙，而且整段话从
+            # 第一个字起就全摊在那里了。超过 subtitle_max_lines 行的那一条在
+            # 这里切成几条，时间按字数摊开。
+            #
+            # 只在这里切，文件一个字节都不动：那个文件同时是每段画面停多久的
+            # 唯一依据（``scene_manifest.narration_segments``），条数一变画面
+            # 就和话对不上了。
+            max_lines = int(getattr(params, "subtitle_max_lines", 0) or 0)
+            before = len(subtitles)
+            subtitles = subtitle_chunking.split_long_cues(
+                subtitles, count_subtitle_lines, max_lines=max_lines
+            )
+            if len(subtitles) != before:
+                logger.info(
+                    f"  ⑥ subtitle lines on screen at once: {max_lines} "
+                    f"({before} cues shown as {len(subtitles)})"
+                )
             sub = clip_stack.enter_context(
                 SubtitlesClip(
                     subtitles=subtitles,
