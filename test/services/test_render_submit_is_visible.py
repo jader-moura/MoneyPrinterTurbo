@@ -154,3 +154,76 @@ class TestTheEditorKeepsWatching:
         end = source.index("function finishRender(task)")
         assert "Your video is ready" not in source[start:end]
         assert "renderPlay.hidden = true" in source[start:end]
+
+
+class TestItAlwaysSaysTheRenderIsDone:
+    """渲完了必须收尾，而且必须说出来。
+
+    两个漏洞让"渲完了"变成"界面毫无反应"：收尾挂在 ``await refresh()`` 后面
+    （刷新一抛，挡板就永远转着），而收尾本身只画那块挡板——挡板被按"隐藏"
+    收起来、或者页面是渲染中途打开的时候，界面上一个字都没有。
+    """
+
+    @staticmethod
+    def _editor_source():
+        from pathlib import Path
+
+        root = Path(__file__).parent.parent.parent
+        return (root / "resource" / "public" / "editor" / "editor.js").read_text(
+            encoding="utf-8"
+        )
+
+    def test_a_failed_reload_does_not_leave_the_overlay_spinning(self):
+        source = self._editor_source()
+        watch = source[
+            source.index("async function watchTask()") : source.index(
+                "function setControlsEnabled("
+            )
+        ]
+        refresh = watch.index("await refresh();")
+        guard = watch.index("try {", watch.index("state.wasBusy = false;"))
+        caught = watch.index("} catch (error) {", refresh)
+        finish = watch.index("finishRender(task);")
+        assert guard < refresh < caught < finish, "收尾必须在刷新的 try/catch 之后"
+
+    def test_finishing_is_announced_even_with_the_overlay_hidden(self):
+        source = self._editor_source()
+        assert "function announceRender(task, reloaded)" in source
+        assert "announceRender(task, reloaded);" in source
+        announce = source[
+            source.index("function announceRender(task, reloaded)") : source.index(
+                "function loseRender(error)"
+            )
+        ]
+        assert "if (ui.renderModal.hidden) say(" in announce
+        assert "Your video is ready." in announce
+
+    def test_a_failed_render_is_not_announced_as_ready(self):
+        source = self._editor_source()
+        announce = source[
+            source.index("function announceRender(task, reloaded)") : source.index(
+                "function loseRender(error)"
+            )
+        ]
+        failed = announce.index("The render failed")
+        ready = announce.index("setTitleNote(\"Video ready\")")
+        assert failed < ready, "失败那条路要在说「好了」之前就返回"
+        assert "return;" in announce[failed:ready]
+
+    def test_the_tab_title_carries_the_news(self):
+        """渲染要好几分钟，用户早就切到别的窗口了。"""
+        source = self._editor_source()
+        assert "const PAGE_TITLE = document.title;" in source
+        assert "function setTitleNote(note)" in source
+        assert "setTitleNote(pct > 0 ? `Rendering ${pct}%` : \"Rendering\");" in source
+        assert 'setTitleNote("Video ready");' in source
+        assert 'setTitleNote("Render failed");' in source
+
+    def test_good_news_does_not_look_like_a_warning(self):
+        from pathlib import Path
+
+        root = Path(__file__).parent.parent.parent
+        css = (root / "resource" / "public" / "editor" / "editor.css").read_text(
+            encoding="utf-8"
+        )
+        assert ".banner.done" in css

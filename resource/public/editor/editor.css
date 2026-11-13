@@ -110,6 +110,8 @@ body {
 }
 .banner.error { background: #4a2626; }
 .banner.warn { background: #4a3c1e; }
+/* 好消息（"片子好了"）得和警告一眼分得开，不然渲染完和渲染出问题长得一样。 */
+.banner.done { background: #20432a; }
 
 /* ---------- 字幕预览 ----------
 

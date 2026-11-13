@@ -336,6 +336,16 @@ async function refresh() {
 const STATUS_RETRIES = 5;
 const STATUS_RETRY_DELAY = 2000;
 
+/** 标签页标题，用来在页面没露脸时说话。
+
+    渲染要好几分钟，用户会切到别的窗口去。横幅和挡板那时候一个也看不见，
+    标签页标题是唯一还看得见的那一行字。 */
+const PAGE_TITLE = document.title;
+
+function setTitleNote(note) {
+  document.title = note ? `${note} · ${PAGE_TITLE}` : PAGE_TITLE;
+}
+
 async function watchTask() {
   if (!state.taskId || state.watching) return;
   state.watching = true;
@@ -366,9 +376,20 @@ async function watchTask() {
         if (state.wasBusy) {
           state.wasBusy = false;
           say("");
-          await refresh();
-          // 刷新之后再收尾：这块挡板上的"去看"按钮要指向刚出来的那条片子。
+          // 先刷新，这样挡板上那个"去看"按钮指向的是刚出来的那条片子。
+          //
+          // 但刷新成不成都必须收尾。以前这里的 ``await refresh()`` 一抛，
+          // 后面的 ``finishRender`` 就永远不会跑：片子已经渲完了，而挡板还
+          // 在转圈，界面上一个字都没有。收尾不能挂在刷新成功这个条件上。
+          let reloaded = true;
+          try {
+            await refresh();
+          } catch (error) {
+            reloaded = false;
+            console.warn("the scenes could not be reloaded", error);
+          }
           finishRender(task);
+          announceRender(task, reloaded);
         }
         break;
       }
@@ -377,6 +398,9 @@ async function watchTask() {
       const pct = Number(task.progress || 0);
       // 挡板开着就把数字喂给它；用户按了"隐藏"的话，还有上面那条提示在。
       updateRender(pct, (task.generation_activity || {}).phase);
+      // 标签页标题也要说：渲染要好几分钟，用户早就切到别的窗口去了，而这是
+      // 唯一一个在页面没露脸时还看得见的地方。
+      setTitleNote(pct > 0 ? `Rendering ${pct}%` : "Rendering");
       say(`This task is rendering (${pct}%). Scene edits are locked until it finishes.`,
         "warn");
       setControlsEnabled(false);
@@ -2736,6 +2760,8 @@ function showRender(stage) {
   ui.renderBar.classList.add("waiting");
   ui.renderPct.textContent = "";
   ui.renderElapsed.textContent = "";
+  // 上一条片子的"好了"不能留在标签页标题上：这一条才刚开始。
+  setTitleNote("Rendering");
   state.renderStarted = Date.now();
 }
 
@@ -2754,6 +2780,39 @@ function updateRender(percent, phase) {
   }
 }
 
+/** 渲染结束了，在横幅和标签页标题上说一声。
+
+    ``finishRender`` 只画那块挡板，而挡板常常是收起来的：用户按过"隐藏"（渲
+    染要好几分钟，他当然会去干别的），或者这个页面是渲染中途打开的、从来没
+    开过挡板。那种时候以前界面上一个字都没有——七分钟过去，什么动静都没有，
+    用户只能自己去翻文件夹看有没有新片子。 */
+function announceRender(task, reloaded) {
+  const failed = task && Number(task.state) === -1;
+  if (failed) {
+    const why = (task && (task.error || task.failed_stage))
+      || "no reason was reported";
+    say(`The render failed: ${why}`, "error");
+    setTitleNote("Render failed");
+    return;
+  }
+  setTitleNote("Video ready");
+  if (!reloaded) {
+    // 片子出来了，只是这个页面没能把场景重新读回来。两件事都要说清楚，
+    // 别让"刷新失败"听起来像"渲染失败"。
+    say("Your video is ready. The scenes could not be reloaded here — "
+      + "reload the page to see them.", "warn");
+    if (!ui.renderModal.hidden) {
+      // 挡板上那句"场景已经重新读好了"这时候是假话。
+      ui.renderNote.textContent = "Your video is ready. The scenes could not "
+        + "be reloaded here — reload the page to see them.";
+    }
+    return;
+  }
+  // 挡板开着的话 ``finishRender`` 已经在上面写了同样的意思，横幅就不用再
+  // 挤一遍；收起来了才靠横幅说。
+  if (ui.renderModal.hidden) say("Your video is ready.", "done");
+}
+
 /** 状态真的查不到了。渲染可能还在跑，所以既不能说"好了"，也不能一直转。
 
     这块挡板上一直转圈是最坏的那种"没反应"：后台在干活，而用户以为点了没用，
@@ -2770,6 +2829,7 @@ function loseRender(error) {
   ui.renderHide.hidden = true;
   ui.renderDone.hidden = false;
   ui.renderPlay.hidden = true;
+  setTitleNote("Render status lost");
   ui.renderTitle.textContent = "Lost track of the render";
   ui.renderNote.textContent = "It was submitted, but this page cannot read its "
     + "status any more. It is probably still running: watch the API window, "
@@ -2809,7 +2869,12 @@ function finishRender(task) {
 }
 
 ui.renderHide.addEventListener("click", () => { ui.renderModal.hidden = true; });
-ui.renderDone.addEventListener("click", () => { ui.renderModal.hidden = true; });
+ui.renderDone.addEventListener("click", () => {
+  ui.renderModal.hidden = true;
+  // 看过了就把标签页标题还原。"隐藏"不还原：那条片子还在渲，标题正是用来
+  // 在页面没露脸时报进度的。
+  setTitleNote("");
+});
 ui.renderPlay.addEventListener("click", () => {
   if (!state.renderedVideo) return;
   // 成片由 /tasks 那个静态挂载直接提供，所以这就是一个能打开的地址。
