@@ -416,6 +416,8 @@ class Resident:
         self.model_id: Optional[str] = None
         self.pipe: Any = None
         self.image_pipe: Any = None
+        # How much commit charge building it cost, the last time it was built.
+        self.image_pipe_grew_mb = 0
         self.loaded_at: float = 0.0
         # Readable without the lock, so /health answers during a generation.
         self.generating: Optional[str] = None
@@ -511,7 +513,40 @@ class Resident:
                 f"diffusers {diffusers.__version__} has no {spec.img2img}. "
                 f"Upgrade it: pip install -U diffusers"
             )
-        self.image_pipe = cls.from_pipe(self.pipe)
+        # Measured, because this is the one step whose cost nobody knew. A
+        # fresh server went to 52 GB of commit charge drawing its first
+        # redraw, and the number that matters is the jump across this line:
+        # `from_pipe` shares the weights, but the hooks, the pinned host
+        # buffers and anything accelerate re-materialises are not free, and
+        # pinned memory is commit charge that cannot be paged out.
+        before = own_commit_mb()
+        built = cls.from_pipe(self.pipe)
+        after = own_commit_mb()
+        if before is not None and after is not None:
+            self.image_pipe_grew_mb = after - before
+            print(
+                f"[genserver] img2img pipeline built: commit charge "
+                f"{before // 1024} GB -> {after // 1024} GB "
+                f"(+{self.image_pipe_grew_mb} MB)",
+                flush=True,
+            )
+            if after > MAX_OWN_COMMIT_MB:
+                # Let go of it in the same breath. Keeping it would leave the
+                # process over the ceiling with a pipeline it is not allowed
+                # to use, and the next request would be refused anyway.
+                del built
+                give_back_what_we_can()
+                now = own_commit_mb() or after
+                raise Leaking(
+                    f"building the img2img pipeline took this process from "
+                    f"{before // 1024} GB to {after // 1024} GB of commit "
+                    f"charge, past the {MAX_OWN_COMMIT_MB // 1024} GB ceiling "
+                    f"({now // 1024} GB after letting go of it again). The "
+                    f"picture was not drawn. Starting from a photograph is "
+                    f"what costs this, so a plain generation may still work; "
+                    f"restart this server either way."
+                )
+        self.image_pipe = built
         return self.image_pipe
 
 
@@ -923,7 +958,12 @@ def generate(body: dict) -> dict:
             unloaded_ollama = unload_ollama()
             loaded = None
             if RESIDENT.model_id != spec.id:
+                # Both sides of the load, so "what does a resident model
+                # cost?" stops being a guess.
+                commit_before_load = own_commit_mb()
                 loaded = RESIDENT.load(spec, offload_wanted(spec))
+                loaded["commitMbBefore"] = commit_before_load
+                loaded["commitMbAfter"] = own_commit_mb()
 
             # Hand back what the last generation cached before starting this
             # one. `maybe_free_model_hooks` returns the modules to the CPU but
@@ -986,6 +1026,7 @@ def generate(body: dict) -> dict:
         "freeMbAfter": free_mb(),
         # In every answer, so growth shows up in a log that is already kept.
         "commitMb": own_commit_mb(),
+        "img2imgCommitMb": RESIDENT.image_pipe_grew_mb if reference is not None else 0,
         "offload": offload_wanted(spec),
         "load": loaded,
         "unloadedOllama": unloaded_ollama,

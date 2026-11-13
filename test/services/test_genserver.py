@@ -957,6 +957,40 @@ def test_it_is_built_from_the_resident_pipeline_not_loaded_again(resident):
     assert isinstance(built, FakeImagePipe)
 
 
+def test_what_building_it_costs_is_measured(resident, monkeypatch):
+    """这一步的代价以前没人量过。
+
+    一台刚起来的服务器画第一张"照着照片重画"就到了 52 GB commit charge，而
+    中间唯一没被量过的就是这一行：``from_pipe`` 共用权重，但钩子、pinned 的
+    主机缓冲、accelerate 可能重新摆出来的东西都不是白来的，而 pinned 内存是
+    还不回去、也换不出去的 commit charge。
+    """
+    monkeypatch.setattr(srv, "torch", FakeTorch())
+    readings = iter([10 * 1024, 11 * 1024])
+    monkeypatch.setattr(srv, "own_commit_mb", lambda: next(readings))
+
+    srv.RESIDENT.starting_from_image(srv.REGISTRY["zimage-turbo"])
+
+    assert srv.RESIDENT.image_pipe_grew_mb == 1024
+    assert srv.RESIDENT.image_pipe is not None
+
+
+def test_a_build_that_eats_the_machine_is_stopped_on_the_spot(resident, monkeypatch):
+    """超了就当场放手，而不是留着一个不准用的管线等下一次请求被拒。"""
+    monkeypatch.setattr(srv, "torch", FakeTorch())
+    readings = iter([10 * 1024, 50 * 1024, 49 * 1024])
+    monkeypatch.setattr(srv, "own_commit_mb", lambda: next(readings))
+
+    with pytest.raises(srv.Leaking) as caught:
+        srv.RESIDENT.starting_from_image(srv.REGISTRY["zimage-turbo"])
+
+    said = str(caught.value)
+    # 两头的数都要在：看到的人要知道是这一步涨上去的。
+    assert "10 GB" in said and "50 GB" in said
+    assert "was not drawn" in said
+    assert srv.RESIDENT.image_pipe is None
+
+
 def test_it_is_built_once_and_then_reused(resident):
     spec = srv.REGISTRY["zimage-turbo"]
     first = srv.RESIDENT.starting_from_image(spec)
