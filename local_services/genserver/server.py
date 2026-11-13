@@ -491,6 +491,21 @@ class Resident:
         the text-to-image pipeline, and carries the CPU-offload hooks across.
         Loading a second pipeline from the repo instead would ask a 16 GB card
         for a second 12 GB transformer and fail.
+
+        **The dtype has to be named.** ``from_pipe`` ends in
+        ``new_pipeline.to(dtype=dtype)``, and with nothing passed that dtype
+        is ``torch.float32``:
+
+            torch_dtype = kwargs.pop("torch_dtype", None)
+            dtype = _resolve_dtype(kwargs.pop("dtype", None), torch_dtype) or torch.float32
+
+        So a bfloat16 transformer gets rebuilt at twice the size, every
+        parameter a new tensor, while the originals stay referenced by the
+        resident pipeline. Measured here: **+29786 MB of commit charge** for
+        one redraw, which took the machine to 79 of 79 GB committed and then
+        surfaced as a 40 MB CUDA allocation failing "out of memory" with
+        5.76 GB of VRAM free, and then as "CUDA error: unknown error". Passing
+        the dtype it was loaded with makes the cast a no-op.
         """
         if not spec.img2img:
             raise ValueError(
@@ -519,8 +534,11 @@ class Resident:
         # `from_pipe` shares the weights, but the hooks, the pinned host
         # buffers and anything accelerate re-materialises are not free, and
         # pinned memory is commit charge that cannot be paged out.
+        # Named, not left to default to float32. See the docstring.
+        dtype = None if torch is None else getattr(torch, spec.dtype, None)
+        same_dtype = {} if dtype is None else {"torch_dtype": dtype}
         before = own_commit_mb()
-        built = cls.from_pipe(self.pipe)
+        built = cls.from_pipe(self.pipe, **same_dtype)
         after = own_commit_mb()
         if before is not None and after is not None:
             self.image_pipe_grew_mb = after - before

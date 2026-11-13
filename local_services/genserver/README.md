@@ -304,6 +304,33 @@ What the server does about it now:
 An ordinary out-of-memory is deliberately none of these: refusing all work for
 ever because one picture did not fit would be worse than the error it avoids.
 
+#### What it turned out to be
+
+Not a leak that built up over an afternoon. One redraw, on a freshly started
+server:
+
+```
+[genserver] img2img pipeline built: commit charge 23 GB -> 52 GB (+29786 MB)
+```
+
+`from_pipe` ends in `new_pipeline.to(dtype=dtype)`, and with no dtype passed
+that is `torch.float32`:
+
+```python
+torch_dtype = kwargs.pop("torch_dtype", None)
+dtype = _resolve_dtype(kwargs.pop("dtype", None), torch_dtype) or torch.float32
+```
+
+The resident pipeline is bfloat16, so the img2img pipeline was casting every
+weight to float32 - twice the size, every parameter a new tensor, while the
+originals stayed referenced by the resident pipeline. Hence +29.8 GB for one
+picture, a machine at 79 of 79 GB committed, and a 40 MB CUDA allocation
+reporting "out of memory" with 5.76 GB of VRAM free. Had it ever succeeded it
+would also have been generating in float32.
+
+The fix is naming the dtype it was loaded with, so the cast is a no-op. The
+measurement stays, because that is the line that found it.
+
 The watcher runs on the idle worker's tick, which is why that thread now
 starts even with `GEN_IDLE_SECONDS=0` — before this there was no background
 thread at all, and nothing was watching the process grow.

@@ -926,13 +926,15 @@ class FakeDiffusers:
 
     def __init__(self, with_class=True):
         self.built_from = []
+        self.built_with = []
         if with_class:
             outer = self
 
             class ZImageImg2ImgPipeline:
                 @staticmethod
-                def from_pipe(pipe):
+                def from_pipe(pipe, **kwargs):
                     outer.built_from.append(pipe)
+                    outer.built_with.append(kwargs)
                     return FakeImagePipe()
 
             self.ZImageImg2ImgPipeline = ZImageImg2ImgPipeline
@@ -989,6 +991,20 @@ def test_a_build_that_eats_the_machine_is_stopped_on_the_spot(resident, monkeypa
     assert "10 GB" in said and "50 GB" in said
     assert "was not drawn" in said
     assert srv.RESIDENT.image_pipe is None
+
+
+def test_it_is_built_in_the_dtype_it_was_loaded_with(resident, monkeypatch):
+    """不说 dtype 的话，diffusers 会把整个模型铸成 float32。
+
+    ``from_pipe`` 最后一行是 ``new_pipeline.to(dtype=dtype)``，而不传的时候
+    那个 dtype 是 ``torch.float32``。于是一个 bfloat16 的 transformer 会按
+    两倍大小重建一遍，每个参数都是新张量，而原来那份还被常驻管线引用着。
+    量到的数字是一次重画 +29786 MB commit charge，接着整台机器 79/79 GB 已
+    提交，然后以"40 MB 分不出来的显存不足（还空着 5.76 GB）"的样子冒出来。
+    """
+    monkeypatch.setattr(srv, "torch", FakeTorch())
+    srv.RESIDENT.starting_from_image(srv.REGISTRY["zimage-turbo"])
+    assert resident.built_with == [{"torch_dtype": FakeTorch.bfloat16}]
 
 
 def test_it_is_built_once_and_then_reused(resident):
