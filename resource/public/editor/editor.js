@@ -523,17 +523,23 @@ function pendingJobs(index) {
   );
 }
 
-/** 把一次重生成排进队列。请求立刻回来，所以按钮不用禁。 */
-async function queueRegeneration(index, keyword, imageStyle) {
+/** 把一次重生成排进队列。请求立刻回来，所以按钮不用禁。
+
+    ``fromPhoto`` 打开的是另一条画法：先去搜一张真实照片，再照着它画这一
+    张。排的是同一个队列——出一张图还是那几分钟，而搜图只多几秒。 */
+async function queueRegeneration(index, keyword, imageStyle, fromPhoto) {
   try {
+    const body = { keyword, image_style: imageStyle };
+    if (fromPhoto) body.from_photo = true;
     const job = await call(
       "POST",
       `${scenePath(index)}/material/queue`,
-      { keyword, image_style: imageStyle }
+      body
     );
+    const how = fromPhoto ? " It will find a photo first." : "";
     say(job && job.position > 1
-      ? `Scene ${index + 1} queued — ${job.position - 1} ahead of it.`
-      : `Scene ${index + 1} queued. Queue another or keep editing.`);
+      ? `Scene ${index + 1} queued — ${job.position - 1} ahead of it.${how}`
+      : `Scene ${index + 1} queued. Queue another or keep editing.${how}`);
     await fetchQueue();
     draw();
     watchQueue();
@@ -602,19 +608,30 @@ function drawQueue() {
     // 别人的编号。
     const at = jobScene(job);
     const where = at === null ? "A deleted scene" : `Scene ${at + 1}`;
+    // 照着照片画的那条路：搜什么词、照片来自哪个网站，都得写在这一行上。
+    // 不写的话用户没法知道那张图是照着什么画的，而这正是他要能回答的问题。
+    const photo = job.from_photo
+      ? ` · photo: ${job.search || "…"}`
+        + (job.reference && job.reference.page_url
+          ? ` (${host(job.reference.page_url)})`
+          : "")
+      : "";
     if (job.state === "running") {
-      label.textContent = `${where}${term} · generating ${fmt(job.elapsed)}`;
+      label.textContent = `${where}${term}${photo} · `
+        + (job.from_photo && !job.reference
+          ? `looking for a photo ${fmt(job.elapsed)}`
+          : `generating ${fmt(job.elapsed)}`);
     } else if (job.state === "queued") {
-      label.textContent = `${where}${term} · waiting`
+      label.textContent = `${where}${term}${photo} · waiting`
         + (job.position > 1 ? ` (${job.position - 1} ahead)` : " (next)");
     } else if (job.state === "done") {
-      label.textContent = `${where}${term} · redrawn in ${fmt(job.elapsed)}`;
+      label.textContent = `${where}${term}${photo} · redrawn in ${fmt(job.elapsed)}`;
     } else {
       // 失败原因是服务端点名过的那一句（哪个源怎么失败的），照原样显示。
       // 只是把换行和连串空格压成一个空格：有些报错自带几行 ##### 分隔线，
       // 照原样塞进这块浮层会把它撑成半屏高。完整那段话在 title 里。
       const reason = String(job.error || "unknown error").replace(/\s+/g, " ").trim();
-      label.textContent = `${where}${term} · failed: ${reason}`;
+      label.textContent = `${where}${term}${photo} · failed: ${reason}`;
       label.title = String(job.error || "");
     }
     row.appendChild(label);
@@ -1819,6 +1836,30 @@ function drawInspector() {
   });
   ui.inspBody.appendChild(regenerate);
 
+  // 第二条画法：先去网上搜一张真实照片，再照着它画。
+  //
+  // 为什么需要它：文生图模型没见过"那架 1952 年的彗星号客机"，它画出来的
+  // 是"一架老飞机"——形状、窗户、年代全是编的。而网上有那架飞机的照片。
+  // 照着照片画，构图和样子对得上，画风仍然是上面那个下拉框里挑的那个。
+  //
+  // 只对生成源出现：库存素材源是去库里搜一个现成文件，没有"照着这张画"
+  // 这回事（接口那边也会拒）。
+  if (isGenerated(scene)) {
+    const fromPhoto = button("Redraw from a photo", "", async () => {
+      await savePromptEdit();
+      queueRegeneration(
+        scene.index,
+        keyword.input.value || null,
+        style ? style.input.value : null,
+        true
+      );
+    });
+    fromPhoto.title = "Search the web for a photograph of this, then draw this "
+      + "scene from it in the chosen style. The search words are written from "
+      + "this scene's narration and prompt.";
+    ui.inspBody.appendChild(fromPhoto);
+  }
+
   // 这一段已经排着了就说出来。不说的话，用户点完看不出任何变化，只会
   // 再点一次——然后同一段画面被重出两遍。
   const mine = pendingJobs(scene.index);
@@ -2022,6 +2063,15 @@ function drawAddForm() {
 
 function scenePath(index) {
   return `/tasks/${encodeURIComponent(state.taskId)}/scenes/${index}`;
+}
+
+/** 一个地址属于哪个网站。照片来自哪里要说出来，但整条 URL 占满一行。 */
+function host(url) {
+  try {
+    return new URL(String(url)).hostname.replace(/^www\./, "");
+  } catch {
+    return String(url || "");
+  }
 }
 
 /** 这一段的画面是生成出来的，还是从素材库取回来的。

@@ -45,7 +45,8 @@ from app.models.schema import (
     VideoParams,
     VideoTransitionMode,
 )
-from app.services import llm, material, scene_manifest, task_artifacts, timeline
+from app.services import llm, material, reference_image, scene_manifest
+from app.services import task_artifacts, timeline
 from app.services import bgm, transition_sound, voice
 from app.utils import subtitle_reader, subtitle_writer
 from app.services import state as sm
@@ -239,6 +240,51 @@ def check_regenerate(
     }
 
 
+def find_reference_photo(
+    task_id: str,
+    index: Any,
+    *,
+    search: str = "",
+    keyword: str | None = None,
+) -> Any:
+    """给这一段找一张真实照片，当重画的底子。
+
+    两步，而且两步都可能失败得很具体：先让模型把这一段压成几个可搜的词
+    （提示词本身带着画风，拿它去搜图搜回来的是别人画的漫画），再去搜一张
+    能用的照片。``search`` 给了就跳过第一步——用户自己知道要搜什么的时候，
+    没有理由再让模型猜一遍。
+
+    返回 ``reference_image.Reference``。失败一律是 ``SceneError``：这两件事
+    的失败都是用户能看懂、也能处理的（配置缺一项、搜不到东西、下不下来），
+    所以原文照传。
+    """
+    manifest = scene_manifest.load(task_id)
+    scenes = manifest["scenes"]
+    position = _scene_at(scenes, index)
+    scene = scenes[position]
+    term = str(
+        keyword if keyword is not None else scene.get("keyword") or ""
+    ).strip()
+
+    wanted = " ".join(str(search or "").split())
+    if not wanted:
+        spoken = narration_for_scenes(task_id, manifest)
+        line = ""
+        if 0 <= position < len(spoken):
+            line = " ".join(str(spoken[position] or "").split())
+        params = load_params(task_id)
+        subject = str(getattr(params, "video_subject", "") or "").strip()
+        try:
+            wanted = llm.image_search_query(subject, line, term)
+        except llm.TermGenerationError as exc:
+            raise SceneError(str(exc)) from exc
+
+    try:
+        return reference_image.search(wanted)
+    except reference_image.ReferenceImageError as exc:
+        raise SceneError(str(exc)) from exc
+
+
 def regenerate_material(
     task_id: str,
     index: Any,
@@ -246,6 +292,7 @@ def regenerate_material(
     keyword: str | None = None,
     image_style: str | None = None,
     expect_scene: str | None = None,
+    reference: Any = None,
 ) -> dict:
     """重新取这一个场景的素材。
 
@@ -296,6 +343,7 @@ def regenerate_material(
         term,
         what=f"scene {position}",
         image_style=style,
+        reference=reference,
     )
 
     # 重新读一遍清单：刚才那几分钟里用户完全可能改过别的场景，拿出图之前
@@ -313,6 +361,12 @@ def regenerate_material(
         scene["kind"] = scene_manifest.material_kind(new_path)
         scene["source"] = source
         scene["keyword"] = term
+        # 这一张是照着哪张照片画的，或者不再是了。记的是**现在这张图**怎么
+        # 来的，所以普通重生成要把旧的那条抹掉——留着它就是说谎。
+        if reference is not None:
+            scene["reference"] = reference.payload()
+        else:
+            scene.pop("reference", None)
         # 用户亲手重生成过的结果，不应该被后续批量操作再覆盖掉。
         scene["locked"] = True
         scene_manifest.save_scenes(task_id, scenes)
@@ -349,6 +403,7 @@ def _produce_material(
     what: str,
     advice: str = "replace this scene with your own file instead",
     image_style: str | None = None,
+    reference: Any = None,
 ) -> tuple[str, str]:
     """按关键词取一份素材，返回 ``(文件路径, 素材源)``。
 
@@ -372,9 +427,21 @@ def _produce_material(
 
     clip_duration = int(getattr(params, "video_clip_duration", 5) or 5)
     prompt_template = _image_prompt_template(params, image_style)
+    starting_from = {}
+    if reference is not None:
+        starting_from = {
+            "reference_image": reference.b64,
+            "reference_strength": reference_image.strength(),
+        }
     logger.info(
         f"generating {what} of task {task_id} "
         f"from source {source!r} with keyword {term!r}"
+        + (
+            f", starting from a {reference.width}x{reference.height} photo "
+            f"found with {reference.query!r}"
+            if reference is not None
+            else ""
+        )
     )
     try:
         produced = material.download_videos(
@@ -393,6 +460,8 @@ def _produce_material(
             image_motion=getattr(params, "image_motion", None) or "zoom",
             # 画风跟着任务走（或者跟着用户这次挑的走），不跟着全局配置走。
             image_prompt_template=prompt_template,
+            # 照着一张真实照片重画这一张。没有底图时这两项不出现在请求里。
+            **starting_from,
         )
     except Exception as exc:
         # 供应商失败必须点名是谁失败了，不能静默换源，也不能留下半条清单。

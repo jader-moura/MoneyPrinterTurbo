@@ -826,7 +826,14 @@ def queue_scene_material(
         task_id,
         request_id,
         lambda: scene_regen_queue.enqueue(
-            task_id, index, keyword=body.keyword, image_style=body.image_style
+            task_id,
+            index,
+            keyword=body.keyword,
+            image_style=body.image_style,
+            # 照着一张真实照片重画。排进队列里而不是同步做：搜图加出图是
+            # 分钟级的，而队列那边本来就一张一张地画、一张一张地报进度。
+            from_photo=bool(body.from_photo),
+            search=str(body.search or ""),
         ),
     )
     return utils.get_response(200, job)
@@ -848,8 +855,24 @@ def regenerate_scene_material(
     _handle(
         task_id,
         request_id,
+        # 同步那条也认 ``from_photo``：两条路由共用同一个请求体，字段的意思
+        # 必须是同一个，否则"body 完全一样"就是假话。搜图在出图之前，搜不到
+        # 就不出图。
         lambda: scene_editor.regenerate_material(
-            task_id, index, keyword=body.keyword, image_style=body.image_style
+            task_id,
+            index,
+            keyword=body.keyword,
+            image_style=body.image_style,
+            reference=(
+                scene_editor.find_reference_photo(
+                    task_id,
+                    index,
+                    search=str(body.search or ""),
+                    keyword=body.keyword,
+                )
+                if body.from_photo
+                else None
+            ),
         ),
     )
     return utils.get_response(200, _scene_payload(task_id, index))

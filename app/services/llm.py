@@ -1965,6 +1965,91 @@ def improve_image_prompt(
     return improved
 
 
+# 搜图的词最多几个。多出来的词只会让搜索引擎找不到东西："a de Havilland
+# Comet airliner standing on a wet 1952 runway at dawn" 一条结果都没有，
+# "de Havilland Comet 1952" 有几百张。
+MAX_SEARCH_QUERY_WORDS = 8
+
+
+def image_search_query(
+    subject: str,
+    line: str,
+    keyword: str = "",
+    *,
+    app_config=None,
+) -> str:
+    """这一段该拿什么词去搜一张真实照片。
+
+    为什么不直接拿提示词去搜
+    ------------------------
+    提示词是写给出图模型的，长、带画风："…, comic book art, bold ink
+    outlines, halftone shading, saturated colour"。把它交给图片搜索，搜回来
+    的是别人画的漫画，不是那架飞机的照片——而底图要的恰恰是"那东西真实
+    长什么样"。
+
+    所以这里让模型把一段话压成两三个可搜的词：具体的名字、地点、年代，
+    画风和镜头词一个不留。
+
+    The prompt is written for an image model and carries the style words with
+    it; handing that to an image search returns other people's comic art
+    instead of a photograph of the aeroplane. This asks the model for the few
+    literal, searchable words instead - names, places, periods, no style.
+
+    搜不出词来就抛 ``TermGenerationError``：拿一句空话去搜等于随机挑一张图
+    当底子，那比不用底图更坏。
+    """
+    spoken = " ".join(str(line or "").split())
+    prompt_now = " ".join(str(keyword or "").split())
+    topic = " ".join(str(subject or "").split())
+    if not (spoken or prompt_now or topic):
+        raise TermGenerationError(
+            "there is nothing to search from: this scene has no narration and "
+            "no prompt yet"
+        )
+
+    request = f"""You write image-search queries.
+
+Below is one line of narration from a video, the picture prompt written for
+it, and the video's subject. Give me the few words I should type into an
+image search to find a REAL PHOTOGRAPH of what this picture should show.
+
+## Rules
+1. Return JSON: an array with exactly one string. No other text.
+2. Two to {MAX_SEARCH_QUERY_WORDS} words. Shorter is better.
+3. Name the thing, the place, the person or the period as concretely as the
+   material allows: "de Havilland Comet 1952", "Kola Superdeep Borehole".
+4. No style, medium or camera words. Not "comic", "illustration", "painting",
+   "cinematic", "35mm", "close-up", "dramatic lighting".
+5. No quotes, no punctuation, no boolean operators, no site: filters.
+6. English, whatever language the narration is in: image search finds more
+   with English keywords, and the picture is the same in every language.
+7. If the line is abstract and names nothing searchable, give the most
+   concrete noun phrase it implies rather than an adjective.
+
+## Video subject
+{topic or "(not given)"}
+
+## This line of narration
+{spoken or "(none)"}
+
+## The picture prompt written for it
+{prompt_now or "(none)"}
+""".strip()
+
+    written = _request_terms(request, app_config)
+    query = next((item.strip() for item in written if item.strip()), "")
+    # 模型偶尔会把整句话还回来，截断比整句去搜好：搜索引擎对长句的召回很差。
+    words = query.replace('"', " ").replace("'", " ").split()
+    query = " ".join(words[:MAX_SEARCH_QUERY_WORDS]).strip(" ,.;:-")
+    if not query:
+        raise TermGenerationError(
+            "the model wrote no search query for this picture; type one yourself "
+            "or draw the picture without a photo"
+        )
+    logger.info(f"image search query: {query!r}")
+    return query
+
+
 # =============================================================================
 # Social publishing metadata
 #

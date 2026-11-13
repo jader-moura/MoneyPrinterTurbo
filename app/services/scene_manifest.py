@@ -359,6 +359,29 @@ def _normalise_scene(raw: Any, index: int) -> dict:
     # 盖掉用户自己写的字，所以改过的那一段要标出来，重算时跳过它。
     if record.get("narration_edited"):
         scene["narration_edited"] = True
+    # 这一张是照着哪张照片画的。同样"有才带"：绝大多数画面不是照着照片画
+    # 的，无条件补一个空壳会让每条老记录都长出一个键。
+    #
+    # 为什么要记下来：用户过几天再打开这条片子，看到的只是一张图，没法知道
+    # 它是凭空画的还是照着网上某张照片画的、照的是哪一张。用在成片里的东西
+    # 来自哪里，是他要能回答的问题（而这正是不把照片本身留下的理由：留一个
+    # 地址就够回答，留文件等于在任务目录里堆别人的图）。
+    reference = record.get("reference")
+    if isinstance(reference, Mapping):
+        kept = {
+            key: str(reference.get(key) or "")
+            for key in ("query", "provider", "source_url", "page_url")
+            if str(reference.get(key) or "").strip()
+        }
+        for key in ("width", "height"):
+            try:
+                value = int(reference.get(key) or 0)
+            except (TypeError, ValueError):
+                continue
+            if value > 0:
+                kept[key] = value
+        if kept:
+            scene["reference"] = kept
     # 时间线字段只在用户真的设置过之后才出现，所以这里按"有才带"处理：
     # 这个函数同时跑在读和写两条路上，无条件补默认值会让每条老记录都长出
     # 两个新键,而无条件丢掉则会让拖好的入点存不进去。

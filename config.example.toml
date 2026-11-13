@@ -261,6 +261,48 @@ openai_image_size = ""
 # prompts — style has to go here.
 openai_image_prompt_template = "{term}, candid cinematic photograph, natural light, documentary style, 35mm film, highly detailed, sharp focus"
 
+# ---------------------------------------------------------------------------
+# "Redraw from a photo": find a real photograph, then draw the scene from it
+# ---------------------------------------------------------------------------
+#
+# A text-to-image model has never seen *that* aeroplane, so it paints "an old
+# airliner" with invented windows and the wrong decade. The web has a photo of
+# it. The button in the timeline editor searches for one, then redraws the
+# scene from it: composition, proportions and period follow the photograph
+# while the style still follows openai_image_prompt_template.
+#
+# Needs an image source that can start from a picture. The local genserver can
+# (Z-Image-Turbo img2img); nothing else in this file can, and asking for it
+# with another source is refused rather than silently ignored.
+#
+# reference_image_provider: only "google_cse" today. An unknown value is an
+# error, never a quiet fall back to another search engine.
+# reference_image_provider = "google_cse"
+#
+# Google Programmable Search, which is the Custom Search JSON API:
+#   key:       https://developers.google.com/custom-search/v1/introduction
+#   engine id: https://programmablesearchengine.google.com/ - create an engine,
+#              switch "Image search" on, and set it to search the whole web
+# Free tier is 100 queries a day, one query per click of the button.
+# google_search_api_key = ""
+# google_search_engine_id = ""
+#
+# How far the redraw may move from the photograph. 1.0 ignores it entirely,
+# 0.75 keeps the composition and repaints everything else, 0.3 hands back
+# nearly the same picture. The step count is scaled to match, so a low
+# strength is not a faster image.
+# reference_image_strength = 0.75
+#
+# Google SafeSearch: "active" or "off".
+# reference_image_safe = "active"
+#
+# The photograph itself is never kept: it goes to the image model and is
+# dropped. What is recorded on the scene is the query, the page it was found
+# on and the size - enough to answer "where did this come from" without
+# keeping somebody else's picture in the task folder. Whether a redraw of a
+# copyrighted photograph is yours to publish is not a question this file can
+# answer for you.
+
 # Optional TwelveLabs integration for semantic material ranking and video QA.
 # Install the optional dependency with: uv sync --extra twelvelabs
 # Create an API key at https://playground.twelvelabs.io/

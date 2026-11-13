@@ -1824,6 +1824,8 @@ def generate_images_openai(
     video_aspect: VideoAspect = VideoAspect.portrait,
     save_dir: str = "",
     prompt_template: str = "",
+    reference_image: str = "",
+    reference_strength: float | None = None,
 ) -> List[MaterialInfo]:
     """
     用 OpenAI 兼容文生图接口为一个脚本关键词生成一张图片并保存到本地。
@@ -1832,6 +1834,18 @@ def generate_images_openai(
     原生时长，``duration`` 记录目标片段时长（秒），供按需下载流程核算
     是否已经凑够配音时长。API 返回的实际尺寸可能与请求不一致，这里以
     图片真实尺寸写入 rendition，不依赖请求参数。
+
+    ``reference_image`` 是一张底图（base64），有它的时候这次出图是"照着这张
+    重画"：构图、比例、年代跟着照片走，画风仍然跟着提示词走。``reference_
+    strength`` 是能改多少（1 等于完全不看它）。两个都不传时这个函数和以前
+    完全一样——一个多余的字段都不会出现在请求里，所以不支持底图的服务端
+    看到的东西没有任何变化。
+
+    ``reference_image`` is a starting picture, as base64: with one, this is a
+    redraw of that photograph rather than a fresh picture, keeping its
+    composition while the style still follows the prompt. Without one, not a
+    single extra field appears in the request, so an endpoint that cannot do
+    this sees exactly what it saw before.
     """
     aspect = VideoAspect(video_aspect)
     clip_duration = max(int(minimum_duration), 1)
@@ -1843,9 +1857,20 @@ def generate_images_openai(
         "n": 1,
         "size": image_size,
     }
+    starting_from = str(reference_image or "").strip()
+    if starting_from:
+        payload["image"] = starting_from
+        if reference_strength is not None:
+            payload["strength"] = float(reference_strength)
     logger.info(
         f"generating image via openai-compatible endpoint: model={model}, "
         f"term={search_term!r}, size={image_size}"
+        + (
+            f", from a reference photo ({len(starting_from) // 1024} KB, "
+            f"strength={reference_strength})"
+            if starting_from
+            else ""
+        )
     )
     generation_progress.submitting("openai_image")
     image_bytes, failure_detail = _request_openai_image(endpoint, payload)
@@ -2294,6 +2319,8 @@ def _download_videos_openai_image_on_demand(
     codex_image_context=None,
     prompt_template: str = "",
     continue_unfinished: bool = False,
+    reference_image: str = "",
+    reference_strength: float | None = None,
 ) -> List[str]:
     """
     按脚本片段顺序逐张生成 OpenAI 兼容文生图素材，凑够所需总时长立即停止。
@@ -2369,6 +2396,18 @@ def _download_videos_openai_image_on_demand(
     # 器的调用方看到的签名和以前完全一样。
     if prompt_template and provider != "codex_image":
         generation_options["prompt_template"] = prompt_template
+    # 底图同理：只有 OpenAI 兼容那条路认它。给了底图却用着不认它的源时要
+    # 说出来，不能默默画一张没有底图的图——用户按的那个按钮叫"照这张重画"。
+    starting_from = str(reference_image or "").strip()
+    if starting_from:
+        if provider != "openai_image":
+            raise ValueError(
+                f"video source {provider!r} cannot draw from a reference photo; "
+                f"only openai_image can"
+            )
+        generation_options["reference_image"] = starting_from
+        if reference_strength is not None:
+            generation_options["reference_strength"] = float(reference_strength)
     if provider == "codex_image":
         try:
             codex_image_context = (
@@ -2794,6 +2833,8 @@ def download_videos(
     codex_image_context=None,
     image_prompt_template: str = "",
     continue_unfinished: bool = False,
+    reference_image: str = "",
+    reference_strength: float | None = None,
 ) -> List[str]:
     """
     搜索并下载覆盖配音时长所需的素材，返回本地文件路径。
@@ -2808,6 +2849,11 @@ def download_videos(
     ``progress_callback`` 可选：库存素材（Pexels、Pixabay、Coverr）每下完一个
     文件就以 0~1 的完成比例调用一次，供任务层推进进度条。按需生成的付费
     素材源不报告下载进度。
+
+    ``reference_image``/``reference_strength`` 只对 OpenAI 兼容的文生图源有
+    意义：照着一张真实照片重画这一张（见 ``generate_images_openai``）。它是
+    编辑器里"照一张照片重画"那个按钮的那一半，所以只会在一次只出一张图的
+    调用里出现——铺满整条旁白的那一趟没有"哪一张的底图"这回事。
     """
     provider = "pexels"
     remote_search_videos = search_videos_pexels
@@ -2924,7 +2970,17 @@ def download_videos(
             image_motion=image_motion,
             prompt_template=str(image_prompt_template or ""),
             continue_unfinished=continue_unfinished,
+            reference_image=str(reference_image or ""),
+            reference_strength=reference_strength,
             **image_options,
+        )
+
+    if str(reference_image or "").strip():
+        # 库存素材源是去库里搜一个现成文件，没有"照着这张重画"这回事。默默
+        # 忽略底图会让用户以为那个按钮没用——而其实是源不对。
+        raise ValueError(
+            f"video source {source!r} cannot draw from a reference photo; "
+            f"only openai_image can"
         )
 
     if match_script_order:

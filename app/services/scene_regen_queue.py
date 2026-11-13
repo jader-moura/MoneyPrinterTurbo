@@ -79,6 +79,9 @@ class _Job:
         "enqueued_at",
         "started_at",
         "finished_at",
+        "from_photo",
+        "search",
+        "reference",
     )
 
     def __init__(
@@ -89,6 +92,8 @@ class _Job:
         image_style: Optional[str],
         anchor: str,
         material: str = "",
+        from_photo: bool = False,
+        search: str = "",
     ) -> None:
         self.id = uuid.uuid4().hex[:12]
         self.task_id = task_id
@@ -109,6 +114,13 @@ class _Job:
         self.enqueued_at = time.time()
         self.started_at = 0.0
         self.finished_at = 0.0
+        # 这一张要先去找一张真实照片当底子。搜什么由模型写，除非 ``search``
+        # 已经写好了。
+        self.from_photo = bool(from_photo)
+        self.search = str(search or "")
+        # 真的找到的那一张（``reference_image.Reference.payload()``）。找到之后
+        # 才有，界面拿它显示"搜的是什么词、照片来自哪个网站"。
+        self.reference: Optional[dict] = None
 
     def payload(self, position: int = 0) -> dict:
         now = time.time()
@@ -138,6 +150,11 @@ class _Job:
             "position": position,
             "elapsed": round(max(elapsed, 0.0), 2),
             "waited": round(max((self.started_at or now) - self.enqueued_at, 0.0), 2),
+            # 照着照片画的那条路：界面要能显示"在搜什么"和"照的是哪张"。
+            # 搜图加下载只要几秒，但那几秒里界面上得有话说。
+            "from_photo": self.from_photo,
+            "search": self.search,
+            "reference": self.reference,
         }
 
 
@@ -170,6 +187,8 @@ def enqueue(
     *,
     keyword: Optional[str] = None,
     image_style: Optional[str] = None,
+    from_photo: bool = False,
+    search: str = "",
 ) -> dict:
     """把一次重生成排进队列，立刻返回。
 
@@ -192,6 +211,8 @@ def enqueue(
         image_style=image_style,
         anchor=plan["scene_id"],
         material=plan["material"],
+        from_photo=from_photo,
+        search=search,
     )
     with _LOCK:
         _QUEUE.append(job)
@@ -428,12 +449,26 @@ def _work() -> None:
 def _run(job: _Job) -> None:
     global _RUNNING
     try:
+        reference = None
+        if job.from_photo:
+            # 找照片放在出图之前，而且在同一个活里：找不到就不该出图——凭空
+            # 画一张交给用户，而他按的按钮是"照一张照片画"。
+            #
+            # 找到的那一张记在活上，界面马上就能显示"搜的是什么、来自哪里"，
+            # 不用等三分钟的出图结束。
+            reference = scene_editor.find_reference_photo(
+                job.task_id, job.index, search=job.search, keyword=job.keyword
+            )
+            job.reference = reference.payload()
+            if not job.search:
+                job.search = reference.query
         scene = scene_editor.regenerate_material(
             job.task_id,
             job.index,
             keyword=job.keyword,
             image_style=job.image_style,
             expect_scene=job.anchor,
+            reference=reference,
         )
     except SceneError as exc:
         # 场景层的错误本来就是给人看的（哪个源失败了、下标越界多少），

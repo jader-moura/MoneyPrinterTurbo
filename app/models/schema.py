@@ -747,10 +747,26 @@ class SceneRegenerateRequest(BaseModel):
     ``image_style`` 给了就只给这一张换个画风（预设 id 见
     ``app/models/image_style.py``）。不给就沿用任务自己记下的风格,也就是
     出片时真正用的那个。
+
+    ``from_photo`` 打开的是另一条画法：先去网上搜一张真实照片，再照着它画
+    这一张。构图、比例、年代跟着照片走，画风仍然跟着提示词走——文生图模型
+    没见过"那架 1952 年的彗星号客机"，而网上有它的照片。默认关着，所以老
+    调用方的行为一个字都没变。
+
+    ``search`` 是搜图用的词。留空就让模型从这一段的旁白和提示词里写一个
+    （提示词本身带着画风，直接拿去搜图会搜回别人画的漫画）。只在
+    ``from_photo`` 打开时有意义。
+
+    ``from_photo`` turns on the other way of drawing: find a real photograph
+    first, then redraw it in the chosen style. Default off, so existing
+    callers behave exactly as before. ``search`` overrides the query the model
+    would have written.
     """
 
     keyword: Optional[str] = None
     image_style: Optional[str] = None
+    from_photo: bool = False
+    search: Optional[str] = Field(default="", max_length=200)
 
 
 class ScenePromptSuggestRequest(BaseModel):
