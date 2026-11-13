@@ -44,6 +44,7 @@ import base64
 import gc
 import io
 import json
+import math
 import os
 import random
 import sys
@@ -123,6 +124,7 @@ class Resident:
         self.lock = threading.Lock()
         self.model_id: Optional[str] = None
         self.pipe: Any = None
+        self.image_pipe: Any = None
         self.loaded_at: float = 0.0
         # Readable without the lock, so /health answers during a generation.
         self.generating: Optional[str] = None
@@ -130,6 +132,10 @@ class Resident:
     def unload(self) -> float:
         """Drops whatever is resident and returns the free VRAM in MB after."""
         self.pipe = None
+        # The img2img pipeline holds the same transformer, text encoder and
+        # VAE. Left behind it would keep all three alive after the unload and
+        # the next load would find the card still full.
+        self.image_pipe = None
         self.model_id = None
         self.loaded_at = 0.0
         gc.collect()
@@ -174,6 +180,7 @@ class Resident:
             pipe.to("cuda")
 
         self.pipe = pipe
+        self.image_pipe = None
         self.model_id = spec.id
         self.loaded_at = time.time()
         return {
@@ -183,6 +190,38 @@ class Resident:
             "freeMbAfter": free_mb(),
             "offload": offload,
         }
+
+    def starting_from_image(self, spec: ModelSpec) -> Any:
+        """The img2img pipeline over the weights that are already resident.
+
+        ``from_pipe`` shares the transformer, the text encoder and the VAE with
+        the text-to-image pipeline, and carries the CPU-offload hooks across.
+        Loading a second pipeline from the repo instead would ask a 16 GB card
+        for a second 12 GB transformer and fail.
+        """
+        if not spec.img2img:
+            raise ValueError(
+                f"{spec.id} cannot start from a picture: the registry declares no "
+                f"img2img pipeline for it."
+            )
+        if self.model_id != spec.id or self.pipe is None:
+            raise RuntimeError(
+                f"{spec.id} is not resident, so there is nothing to build an "
+                f"img2img pipeline from."
+            )
+        if self.image_pipe is not None:
+            return self.image_pipe
+
+        import diffusers
+
+        cls = getattr(diffusers, spec.img2img, None)
+        if cls is None:
+            raise RuntimeError(
+                f"diffusers {diffusers.__version__} has no {spec.img2img}. "
+                f"Upgrade it: pip install -U diffusers"
+            )
+        self.image_pipe = cls.from_pipe(self.pipe)
+        return self.image_pipe
 
 
 RESIDENT = Resident()
@@ -416,6 +455,75 @@ def stop_idle_worker() -> None:
         IDLE_THREAD.join(timeout=5)
 
 
+# A starting picture arrives as base64 in a JSON body. Big enough for a 4K
+# photograph, small enough that a mistyped field cannot make this process hold
+# a gigabyte: a 16 MB JPEG is already far more picture than 1536x864 can use.
+MAX_REFERENCE_MB = 16
+
+# How far a picture is allowed to move from the one it started from, when the
+# caller names no strength. 0.75 redraws nearly everything and keeps the
+# composition — which is the point of starting from a photograph of the real
+# thing, rather than copying it.
+DEFAULT_STRENGTH = 0.75
+
+
+def decode_reference(value: Any) -> Any:
+    """A starting picture, from base64 (with or without a data: prefix).
+
+    Decoded with Pillow here rather than handed to diffusers as bytes, both to
+    refuse something that is not an image at all and to re-encode it: what
+    comes back has no EXIF, no colour profile and no animation, whatever
+    arrived.
+    """
+    from PIL import Image, UnidentifiedImageError
+
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("image must be a base64 string.")
+    payload = value.strip()
+    if payload.startswith("data:"):
+        _, _, payload = payload.partition(",")
+    try:
+        raw = base64.b64decode(payload, validate=True)
+    except Exception as err:
+        raise ValueError(f"image is not valid base64: {err}") from None
+    if not raw:
+        raise ValueError("image is empty.")
+    if len(raw) > MAX_REFERENCE_MB * MB:
+        raise ValueError(
+            f"image is {len(raw) // MB} MB; the limit is {MAX_REFERENCE_MB} MB."
+        )
+    try:
+        with Image.open(io.BytesIO(raw)) as opened:
+            opened.load()
+            return opened.convert("RGB")
+    except UnidentifiedImageError:
+        raise ValueError("image is not a picture this server can read.") from None
+    except Exception as err:
+        raise ValueError(f"image could not be read: {err}") from None
+
+
+def fit_reference(image: Any, width: int, height: int) -> Any:
+    """The starting picture at exactly WIDTHxHEIGHT, by cover-crop.
+
+    Letterboxing would hand the model black bars to denoise, and they come back
+    as black bars. Squashing bends faces. Cover keeps the proportions and loses
+    the edges, which is what a reference picture is for.
+    """
+    from PIL import Image
+
+    if image.width == width and image.height == height:
+        return image
+    scale = max(width / image.width, height / image.height)
+    grown = image.resize(
+        (max(width, int(image.width * scale + 0.5)),
+         max(height, int(image.height * scale + 0.5))),
+        Image.LANCZOS,
+    )
+    left = (grown.width - width) // 2
+    top = (grown.height - height) // 2
+    return grown.crop((left, top, left + width, top + height))
+
+
 def generate(body: dict) -> dict:
     model_id = str(body.get("model") or "").strip()
     spec = spec_for(model_id)
@@ -436,6 +544,34 @@ def generate(body: dict) -> dict:
     )
     steps = int(body.get("steps") or spec.steps)
     guidance = float(body["guidance"]) if body.get("guidance") is not None else spec.guidance
+
+    # Starting from a picture. Absent, every line below is a no-op and this is
+    # the same text-to-image call it always was.
+    reference = body.get("image")
+    strength = None
+    if reference is not None:
+        # Refused before anything is decoded: a 16 MB picture is not worth
+        # reading to find out the entry could never have used it.
+        if not spec.img2img:
+            raise ValueError(
+                f"{spec.id} cannot start from a picture: the registry declares no "
+                f"img2img pipeline for it."
+            )
+        strength = body.get("strength")
+        strength = DEFAULT_STRENGTH if strength is None else float(strength)
+        if not 0.0 < strength <= 1.0:
+            raise ValueError(
+                f"strength must be above 0 and at most 1, not {strength}. "
+                "1 ignores the picture; 0 would never leave it."
+            )
+        reference = fit_reference(decode_reference(reference), width, height)
+        if body.get("steps") is None:
+            # img2img joins the schedule partway down: diffusers runs about
+            # ``steps * strength`` of them. The registry's count is what the
+            # distilled model needs *in total*, so scale up to land back on it.
+            # Capped at twice, because strength 0.1 would otherwise ask for 90
+            # steps and fifteen minutes.
+            steps = min(int(math.ceil(spec.steps / strength)), spec.steps * 2)
     seed = body.get("seed")
     # Always a real number on the way out: a picture whose seed was implicit
     # cannot be made again, and the cache key needs it.
@@ -481,7 +617,14 @@ def generate(body: dict) -> dict:
             }
             if negative is not None:
                 kwargs["negative_prompt"] = negative
-            image = RESIDENT.pipe(**kwargs).images[0]
+            pipe = RESIDENT.pipe
+            if reference is not None:
+                # Built from the resident pipeline, not loaded again: same
+                # weights, same offload hooks, no second 12 GB.
+                pipe = RESIDENT.starting_from_image(spec)
+                kwargs["image"] = reference
+                kwargs["strength"] = strength
+            image = pipe(**kwargs).images[0]
             seconds = round(time.monotonic() - started, 2)
             peak = int(torch.cuda.max_memory_allocated() // MB)
 
@@ -502,6 +645,9 @@ def generate(body: dict) -> dict:
         "steps": steps,
         "guidance": guidance,
         "seed": seed,
+        # So a caller (and a log) can tell a redraw from a fresh picture.
+        "fromImage": reference is not None,
+        "strength": strength,
         "seconds": seconds,
         "peakAllocatedMb": peak,
         "freeMbBefore": before,
@@ -609,6 +755,19 @@ def openai_images(body: dict) -> dict:
 
     width, height = openai_size(body.get("size"), spec)
 
+    # An extension to the OpenAI shape, not a translation of it: `image` and
+    # `strength` are what OpenAI puts behind a multipart `/v1/images/edits`,
+    # and a client that never sends them sees no difference at all. They ride
+    # on this route so that a caller which already speaks it — the
+    # `openai_image` source in MoneyPrinterTurbo — needs no second client,
+    # no multipart encoder and no second base url.
+    reference = body.get("image")
+    if reference is not None and not spec.img2img:
+        raise BadRequestBody(
+            f"{spec.id} cannot start from a picture: the registry declares no "
+            f"img2img pipeline for it."
+        )
+
     data = []
     for index in range(count):
         # A seed per image, so `n > 1` is n different pictures rather than n
@@ -616,14 +775,17 @@ def openai_images(body: dict) -> dict:
         seed = body.get("seed")
         if seed is not None:
             seed = int(seed) + index
-        result = generate(
-            {
-                "model": spec.id,
-                "prompt": prompt,
-                "size": f"{width}x{height}",
-                "seed": seed,
-            }
-        )
+        request: dict[str, Any] = {
+            "model": spec.id,
+            "prompt": prompt,
+            "size": f"{width}x{height}",
+            "seed": seed,
+        }
+        if reference is not None:
+            request["image"] = reference
+            if body.get("strength") is not None:
+                request["strength"] = body.get("strength")
+        result = generate(request)
         data.append({"b64_json": result["pngBase64"], "revised_prompt": prompt})
 
     return {

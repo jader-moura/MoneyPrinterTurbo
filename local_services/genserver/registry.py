@@ -61,6 +61,18 @@ class ModelSpec:
     license: str
     """Carried into the credit. Z-Image-Turbo is Apache-2.0."""
 
+    img2img: str = ""
+    """A `diffusers` class that starts from a picture, resolved like `pipeline`.
+
+    Empty means this entry cannot: `/generate` then refuses an `image` and says
+    which entry refused it, rather than ignoring the picture and handing back
+    something that merely looks wrong.
+
+    Z-Image has one over the very same weights, `ZImageImg2ImgPipeline`, and it
+    is built with `from_pipe`. Starting from a picture therefore costs no second
+    load and no second 12 GB on a card that holds exactly one model.
+    """
+
     offload: bool = False
     """Load with `enable_model_cpu_offload()` rather than straight onto the card.
 
@@ -105,6 +117,15 @@ ZIMAGE_TURBO = ModelSpec(
     # model card, which is what spec 30 exists to do.
     vram_floor_mb=13000,
     license="Apache-2.0",
+    # Verified against the diffusers in the interpreter that runs this server
+    # (0.37.0.dev0): `ZImageImg2ImgPipeline.__call__` takes `prompt`, `image`
+    # and `strength` over `Tongyi-MAI/Z-Image-Turbo`'s own weights.
+    #
+    # Z-Image-Edit, which would take an instruction ("make her smile") instead
+    # of a strength, is still unreleased, and this build has no inpaint class.
+    # So what is declared here is the one thing that actually works today:
+    # redraw a picture, keeping its composition.
+    img2img="ZImageImg2ImgPipeline",
     # Measured on an RTX 5060 Ti, 16283 MiB usable:
     #
     #   straight onto the card  15988 MiB resident, 86 SECONDS PER STEP

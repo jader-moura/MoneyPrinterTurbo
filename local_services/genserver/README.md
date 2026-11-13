@@ -21,6 +21,34 @@ POST /generate   {"model", "prompt", "size"|"width"/"height", "seed", ...}  ->  
 POST /unload
 ```
 
+Both generate routes also take a **starting picture**:
+
+```
+"image":    base64 of a PNG/JPEG (a data: URL is fine), up to 16 MB
+"strength": 0 < s <= 1, default 0.75 — how far the result may move from it
+```
+
+`image` on `/v1/images/generations` is an extension, not OpenAI's shape: OpenAI puts this
+behind a multipart `/v1/images/edits`, and carrying the two fields here means a client that
+already speaks this route — MoneyPrinterTurbo's `openai_image` source — needs no second
+client, no multipart encoder and no second base url. A client that never sends them sees
+no difference whatsoever.
+
+The picture is cover-cropped to the size being painted (letterboxing would hand the model
+black bars to denoise, and they come back as black bars), re-encoded without EXIF, and
+refused with a 400 if it is not a picture. `strength` is how much noise is added before
+denoising: at `1.0` the picture is ignored, at `0.75` the composition survives and
+everything else is repainted, at `0.3` you get the same picture again in a slightly
+different hand. Because img2img joins the schedule partway down, the step count is scaled
+up so the distilled model still gets its nine — `strength: 0.75` runs 12 steps — and an
+explicit `steps` is left alone.
+
+Which entries can do it is declared, not assumed: `img2img` in `registry.py` names the
+`diffusers` class, and an entry with none answers 400 (or 422 on the `/v1` route) instead
+of ignoring the picture. Z-Image-Turbo's is `ZImageImg2ImgPipeline`, over the same weights,
+built with `from_pipe` — so starting from a picture costs no second load and no second
+12 GB on a card that holds exactly one model.
+
 The `/v1` pair is a translation and nothing more. One model is resident at a time, one
 lock guards the card, and both route families go through the same `generate`.
 
