@@ -279,8 +279,20 @@ def find_reference_photo(
         except llm.TermGenerationError as exc:
             raise SceneError(str(exc)) from exc
 
+    # 别的段落已经在用的照片不要再拿一次：公开授权的库很小，同一个题目很
+    # 容易一连几段都拿到同一张。
+    used = []
+    for other_at, other in enumerate(scenes):
+        if other_at == position:
+            continue
+        recorded = other.get("reference")
+        if isinstance(recorded, dict):
+            source = str(recorded.get("source_url") or "").strip()
+            if source:
+                used.append(source)
+
     try:
-        return reference_image.search(wanted)
+        return reference_image.search(wanted, avoid=used)
     except reference_image.ReferenceImageError as exc:
         raise SceneError(str(exc)) from exc
 

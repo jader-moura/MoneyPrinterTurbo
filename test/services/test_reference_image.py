@@ -56,9 +56,11 @@ class FakeResponse:
 class FakeRequests:
     """按 URL 回答：搜索一条，下载一条。记下每次调用的参数。"""
 
-    def __init__(self, search=None, downloads=None):
+    def __init__(self, search=None, downloads=None, by_query=None):
         self.search = search
         self.downloads = downloads or {}
+        # 按搜的词回答，用来考"搜不到就把词改宽一点"那条路。
+        self.by_query = by_query or {}
         self.calls = []
 
     def get(self, url, **kwargs):
@@ -70,6 +72,11 @@ class FakeRequests:
                 reference_image.OPENVERSE_ENDPOINT,
             )
         ):
+            if self.by_query:
+                asked = (kwargs.get("params") or {}).get("q")
+                found = self.by_query.get(asked)
+                # 没列出来的词就是"一张都没有"。三家的空答案都是这个形状。
+                return found or FakeResponse(payload={"results": [], "items": []})
             if isinstance(self.search, Exception):
                 raise self.search
             return self.search
@@ -161,7 +168,10 @@ def web(monkeypatch):
 class TestItNeedsToBeConfigured:
     def test_it_names_both_missing_settings(self):
         with pytest.raises(reference_image.ReferenceImageError) as caught:
-            reference_image.search("comet airliner", app_config={})
+            reference_image.search(
+                "comet airliner",
+                app_config={"reference_image_provider": "google_cse"},
+            )
         message = str(caught.value)
         assert "google_search_api_key" in message
         assert "google_search_engine_id" in message
@@ -171,7 +181,11 @@ class TestItNeedsToBeConfigured:
     def test_it_names_the_one_that_is_missing(self):
         with pytest.raises(reference_image.ReferenceImageError) as caught:
             reference_image.search(
-                "comet", app_config={"google_search_api_key": "k"}
+                "comet",
+                app_config={
+                    "reference_image_provider": "google_cse",
+                    "google_search_api_key": "k",
+                },
             )
         assert "google_search_engine_id" in str(caught.value)
         assert "google_search_api_key" not in str(caught.value)
@@ -189,8 +203,22 @@ class TestItNeedsToBeConfigured:
     def test_the_google_one_mentions_the_other_way_to_search(self):
         """Google 那套要先建搜索引擎，不是每个人都愿意。"""
         with pytest.raises(reference_image.ReferenceImageError) as caught:
-            reference_image.search("comet", app_config={})
+            reference_image.search(
+                "comet", app_config={"reference_image_provider": "google_cse"}
+            )
         assert "brave" in str(caught.value)
+
+    def test_the_one_that_needs_no_setting_up_is_the_default(self, web):
+        """装好就能用的那个才配当默认：另外两个一个要钱、一个不收新用户。"""
+        url = "https://live.static.example/comet_b.jpg"
+        fake = web(
+            FakeRequests(
+                search=openverse_found(openverse_hit(url)), downloads=photo_at(url)
+            )
+        )
+        # 一行配置都没有。
+        assert reference_image.search("comet", app_config={}).provider == "openverse"
+        assert fake.calls[0][0].startswith(reference_image.OPENVERSE_ENDPOINT)
 
     def test_brave_names_the_setting_it_needs(self):
         with pytest.raises(reference_image.ReferenceImageError) as caught:
@@ -643,6 +671,174 @@ class TestOpenverseNeedsNothing:
         with pytest.raises(reference_image.ReferenceImageError) as caught:
             reference_image.search("comet", app_config=OPENVERSE_CONFIG)
         assert "none could be used" in str(caught.value)
+
+
+class TestWhenTheFirstTryFindsNothing:
+    """模型写的词是给出图用的，常常具体到"1954 年那次水槽试验"。
+
+    全网搜得到，公开授权的那一小片搜不到——所以搜不到就把词往宽里改一次。
+    改的是词，不是供应商。
+    """
+
+    @pytest.mark.parametrize(
+        "query,expected",
+        [
+            ("comet", ["comet"]),
+            ("de havilland comet", ["de havilland comet", "de havilland"]),
+            (
+                "cracked metal plate 1954",
+                ["cracked metal plate 1954", "cracked metal plate", "cracked metal"],
+            ),
+        ],
+    )
+    def test_each_try_is_wider_than_the_last(self, query, expected):
+        assert reference_image._widening(query)[: len(expected)] == expected
+
+    def test_a_year_is_the_first_thing_to_go(self):
+        """「1954 年的彗星号残骸」搜不到，「彗星号残骸」搜得到。"""
+        assert (
+            reference_image._widening("Comet fuselage 1954")[1] == "Comet fuselage"
+        )
+
+    def test_it_widens_until_something_comes_back(self, web):
+        url = "https://live.static.example/comet_b.jpg"
+        fake = web(
+            FakeRequests(
+                by_query={"de Havilland Comet": openverse_found(openverse_hit(url))},
+                downloads=photo_at(url),
+            )
+        )
+        found = reference_image.search(
+            "de Havilland Comet fuselage 1954", app_config=OPENVERSE_CONFIG
+        )
+        assert found.source_url == url
+        asked = [(call[1].get("params") or {}).get("q") for call in fake.calls[:3]]
+        assert asked[0] == "de Havilland Comet fuselage 1954"
+        assert asked[-1] == "de Havilland Comet"
+
+    def test_it_does_not_widen_forever(self, web):
+        fake = web(FakeRequests(by_query={"nothing here": None}))
+        with pytest.raises(reference_image.NothingFound):
+            reference_image.search(
+                "De Havilland Comet 1954 square window crack corner",
+                app_config=OPENVERSE_CONFIG,
+            )
+        assert len(fake.calls) == reference_image.BROADEN_TRIES
+
+    def test_the_error_still_names_what_was_asked_for(self, web):
+        """看到的人要知道"它最后搜的不是我要的东西"。"""
+        web(FakeRequests(by_query={"never asked for this": None}))
+        with pytest.raises(reference_image.ReferenceImageError) as caught:
+            reference_image.search(
+                "De Havilland Comet water tank 1954", app_config=OPENVERSE_CONFIG
+            )
+        assert "De Havilland Comet water tank 1954" in str(caught.value)
+
+    def test_a_missing_setting_is_not_something_widening_can_fix(self, web):
+        """配置缺一项，换个词搜十遍还是缺那一项。"""
+        fake = web(FakeRequests())
+        with pytest.raises(reference_image.ReferenceImageError) as caught:
+            reference_image.search(
+                "de Havilland Comet fuselage 1954",
+                app_config={"reference_image_provider": "brave"},
+            )
+        assert not isinstance(caught.value, reference_image.NothingFound)
+        assert fake.calls == []
+
+
+class TestTheSamePhotoTwiceIsObvious:
+    """一条片子里同一张照片重画四遍，看的人一眼就看出来了。
+
+    公开授权的库很小，一个题目常常只有一两张照片，所以这不是边角情况——
+    在真任务 652aa5c5 上，五段里有四段拿到了同一张 Flickr 照片。
+    """
+
+    def test_a_photo_another_scene_uses_is_passed_over(self, web):
+        taken = "https://live.static.example/taken.jpg"
+        free = "https://live.static.example/free.jpg"
+        web(
+            FakeRequests(
+                search=openverse_found(openverse_hit(taken), openverse_hit(free)),
+                downloads={**photo_at(taken), **photo_at(free)},
+            )
+        )
+        found = reference_image.search(
+            "comet", app_config=OPENVERSE_CONFIG, avoid=[taken]
+        )
+        assert found.source_url == free
+
+    def test_the_one_it_skipped_is_never_downloaded(self, web):
+        taken = "https://live.static.example/taken.jpg"
+        free = "https://live.static.example/free.jpg"
+        fake = web(
+            FakeRequests(
+                search=openverse_found(openverse_hit(taken), openverse_hit(free)),
+                downloads={**photo_at(taken), **photo_at(free)},
+            )
+        )
+        reference_image.search("comet", app_config=OPENVERSE_CONFIG, avoid=[taken])
+        assert taken not in [call[0] for call in fake.calls]
+
+    def test_everything_taken_says_so_in_those_words(self, web):
+        taken = "https://live.static.example/taken.jpg"
+        web(
+            FakeRequests(
+                search=openverse_found(openverse_hit(taken)),
+                downloads=photo_at(taken),
+            )
+        )
+        with pytest.raises(reference_image.ReferenceImageError) as caught:
+            reference_image.search("comet", app_config=OPENVERSE_CONFIG, avoid=[taken])
+        assert "already used by another scene" in str(caught.value)
+
+    def test_nothing_to_avoid_changes_nothing(self, web):
+        url = "https://live.static.example/comet_b.jpg"
+        web(
+            FakeRequests(
+                search=openverse_found(openverse_hit(url)), downloads=photo_at(url)
+            )
+        )
+        for empty in ((), [], None, [""]):
+            assert (
+                reference_image.search(
+                    "comet", app_config=OPENVERSE_CONFIG, avoid=empty
+                ).source_url
+                == url
+            )
+
+    def test_the_editor_hands_over_what_the_other_scenes_are_using(self, monkeypatch):
+        """这件事要在真的找图之前发生，所以由 scene_editor 收集。"""
+        from app.services import scene_editor
+
+        monkeypatch.setattr(
+            scene_editor.scene_manifest,
+            "load",
+            lambda task_id: {
+                "scenes": [
+                    {
+                        "material": "a.png",
+                        "reference": {"source_url": "https://pics/one.jpg"},
+                    },
+                    {"material": "b.png", "keyword": "this one"},
+                    {
+                        "material": "c.png",
+                        "reference": {"source_url": "https://pics/three.jpg"},
+                    },
+                ]
+            },
+        )
+        seen = {}
+
+        def capture(query, *, app_config=None, avoid=()):
+            seen["query"] = query
+            seen["avoid"] = list(avoid)
+            raise reference_image.ReferenceImageError("stop here")
+
+        monkeypatch.setattr(scene_editor.reference_image, "search", capture)
+        with pytest.raises(scene_editor.SceneError):
+            scene_editor.find_reference_photo("a-task", 1, search="comet")
+        assert seen["query"] == "comet"
+        assert seen["avoid"] == ["https://pics/one.jpg", "https://pics/three.jpg"]
 
 
 class TestHowFarItMayMove:

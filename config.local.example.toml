@@ -321,19 +321,24 @@ openai_image_prompt_template = "{term}, candid cinematic photograph, natural lig
 # (Z-Image-Turbo img2img); nothing else in this file can, and asking for it
 # with another source is refused rather than silently ignored.
 #
-# reference_image_provider: "google_cse" (the default), "brave" or
-# "openverse". An unknown value is an error, never a quiet fall back to
+# reference_image_provider: "openverse" (the default), "brave" or
+# "google_cse". An unknown value is an error, never a quiet fall back to
 # another search engine.
 #
-# "openverse" is the one that costs nothing and asks for nothing: no key, no
-# account, no card. It searches openly licensed pictures (Creative Commons and
-# public domain, from Flickr, Wikimedia, museums and the like) and keeps the
-# licence and the photographer on the scene, which is the only one of the three
-# that can answer "am I allowed to publish this". By default it asks for
-# pictures that may be used commercially and modified - which is what a redraw
-# inside a published video is. The catch is coverage: it is far smaller than a
-# web search, so a very specific subject can come back with nothing at all.
-# reference_image_provider = "google_cse"
+# "openverse" is the default because it is the only one that works with no
+# setting up at all: no key, no account, no card. It searches openly licensed
+# pictures (Creative Commons and public domain, from Flickr, Wikimedia, museums
+# and the like) and keeps the licence and the photographer on the scene, which
+# is the only one of the three that can answer "am I allowed to publish this".
+# By default it asks for pictures that may be used commercially and modified -
+# which is what a redraw inside a published video is. The catch is coverage: it
+# is far smaller than a web search. Measured on a real 20-scene video about the
+# de Havilland Comet, it found a usable photograph for 5 scenes. When a query
+# finds nothing it is widened (the year goes first, then the trailing words)
+# and a photograph another scene already uses is passed over, so what comes
+# back is at least a different picture. For a video about aviation history,
+# "brave" will find far more; for rivers, coffee or cities this is plenty.
+# reference_image_provider = "openverse"
 #
 # Google Programmable Search, which is the Custom Search JSON API:
 #   key:       https://developers.google.com/custom-search/v1/introduction

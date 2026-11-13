@@ -40,6 +40,7 @@
 
 import base64
 import io
+import re
 import time
 from dataclasses import dataclass
 from typing import Any, NamedTuple, Optional
@@ -64,10 +65,20 @@ OPENVERSE_LICENCES = "commercial,modification"
 
 # 它的网关偶尔自己超时。这几个状态码值得再试一次，别的不值得。
 OPENVERSE_HICCUPS = (502, 503, 504)
-OPENVERSE_TRIES = 2
+# 在真任务 652aa5c5 上跑了两遍，二十段里有五段是栽在这个 504 上的，不是栽在
+# "库里没有"上。多试一次、等久一点，比把这一下点击浪费掉划算。
+OPENVERSE_TRIES = 3
 OPENVERSE_RETRY_DELAY = 1.5
 
 PROVIDERS = (GOOGLE_CSE, BRAVE, OPENVERSE)
+
+# 默认那个要是"装好就能用"的那个。Google 已经不接新用户，Brave 要先留一张
+# 信用卡，只有 Openverse 什么都不要。
+DEFAULT_PROVIDER = OPENVERSE
+
+# 一个词都搜不到的时候，往宽里再搜几次。模型写的词是给"这一段画什么"用的，
+# 常常具体到"1954 年那次水槽试验"——全网搜得到，公开授权的那一小片搜不到。
+BROADEN_TRIES = 3
 
 # 一张底图最多多大。和 genserver 的 ``MAX_REFERENCE_MB`` 对齐：它那边会拒，
 # 这边先别下。
@@ -91,6 +102,14 @@ USER_AGENT = "MoneyPrinterTurbo"
 
 class ReferenceImageError(Exception):
     """找不到能用的底图。文案是给人看的：点名供应商和当时搜的词。"""
+
+
+class NothingFound(ReferenceImageError):
+    """搜是搜了，但没有一张能用的。
+
+    和"配置缺一项""它答了 500"分开：只有这一种值得换个说法再搜一次，别的
+    再搜几遍也是一样的结果。
+    """
 
 
 @dataclass(frozen=True)
@@ -173,13 +192,27 @@ def strength(app_config: Optional[dict] = None) -> float:
     return value
 
 
-def search(query: str, *, app_config: Optional[dict] = None) -> Reference:
-    """搜一张照片回来。搜不到、下不来、解不开都抛 ``ReferenceImageError``。"""
+def search(
+    query: str,
+    *,
+    app_config: Optional[dict] = None,
+    avoid: "Any" = (),
+) -> Reference:
+    """搜一张照片回来。搜不到、下不来、解不开都抛 ``ReferenceImageError``。
+
+    ``avoid`` 是这个任务里别的段落已经用过的图片地址。一条片子里同一张照片
+    重画四遍，看的人一眼就看出来了，所以用过的直接跳过去。
+
+    搜不到就把词往宽里改一次再搜（扔掉年份、只留前几个词）。改的是词，不是
+    供应商——换供应商那件事永远不会自己发生。
+    """
     wanted = " ".join(str(query or "").split())
     if not wanted:
         raise ReferenceImageError("there is nothing to search for: the query is empty")
 
-    provider = str(_setting(app_config, "reference_image_provider", GOOGLE_CSE)).strip()
+    provider = str(
+        _setting(app_config, "reference_image_provider", DEFAULT_PROVIDER)
+    ).strip()
     finder = {GOOGLE_CSE: _google_cse, BRAVE: _brave, OPENVERSE: _openverse}.get(
         provider
     )
@@ -190,7 +223,46 @@ def search(query: str, *, app_config: Optional[dict] = None) -> Reference:
             "the ones it knows are "
             + " and ".join(repr(name) for name in PROVIDERS)
         )
-    return finder(wanted, app_config)
+
+    skip = {
+        str(one).strip() for one in (avoid or ()) if str(one or "").strip()
+    }
+    tried: list[str] = []
+    last: Optional[NothingFound] = None
+    for attempt in _widening(wanted)[:BROADEN_TRIES]:
+        tried.append(attempt)
+        try:
+            return finder(attempt, app_config, skip)
+        except NothingFound as exc:
+            last = exc
+            logger.info(
+                f"{provider} found nothing for {attempt!r}; widening the search"
+            )
+    if last is None:  # pragma: no cover - _widening 至少给一个词
+        raise ReferenceImageError(f"{provider} found nothing for {wanted!r}")
+    if len(tried) == 1:
+        raise last
+    # 报错里要留着一开始搜的那个词：看到的人才知道"它搜的根本不是我要的"。
+    raise NothingFound(f"{last} (the search started as {tried[0]!r})")
+
+
+def _widening(query: str) -> "list[str]":
+    """同一个意思，一次比一次宽。
+
+    ``'De Havilland Comet 1954 square window crack corner'`` 变成
+    ``['...corner', 'De Havilland Comet square window crack corner',
+    'De Havilland Comet']``。
+    """
+    words = query.split()
+    plain = [word for word in words if not re.fullmatch(r"(19|20)\d\d", word)]
+    out = [query]
+    for shape in (plain, plain[:3], plain[:2]):
+        if not shape:
+            continue
+        candidate = " ".join(shape)
+        if candidate.lower() not in {one.lower() for one in out}:
+            out.append(candidate)
+    return out
 
 
 def _safe_on(app_config: Optional[dict]) -> bool:
@@ -199,7 +271,9 @@ def _safe_on(app_config: Optional[dict]) -> bool:
     return value not in ("off", "none", "false", "0", "no")
 
 
-def _google_cse(query: str, app_config: Optional[dict]) -> Reference:
+def _google_cse(
+    query: str, app_config: Optional[dict], skip: "set[str]" = frozenset()
+) -> Reference:
     key = str(_setting(app_config, "google_search_api_key", "")).strip()
     engine = str(_setting(app_config, "google_search_engine_id", "")).strip()
     missing = [
@@ -262,7 +336,7 @@ def _google_cse(query: str, app_config: Optional[dict]) -> Reference:
         ) from None
 
     items = payload.get("items") if isinstance(payload, dict) else None
-    return _first_usable(query, GOOGLE_CSE, _google_candidates(items))
+    return _first_usable(query, GOOGLE_CSE, _google_candidates(items), skip)
 
 
 def _google_candidates(items: Any) -> "list[_Candidate]":
@@ -279,7 +353,9 @@ def _google_candidates(items: Any) -> "list[_Candidate]":
     return out
 
 
-def _openverse(query: str, app_config: Optional[dict]) -> Reference:
+def _openverse(
+    query: str, app_config: Optional[dict], skip: "set[str]" = frozenset()
+) -> Reference:
     """没有 key 这一步。不配置任何东西也能用，这是选它的全部理由。"""
     params = {
         "q": query,
@@ -308,11 +384,12 @@ def _openverse(query: str, app_config: Optional[dict]) -> Reference:
     # 家——换一家等于换一批结果，那件事永远不会自己发生。
     for attempt in range(OPENVERSE_TRIES):
         if attempt:
+            waited = OPENVERSE_RETRY_DELAY * attempt
             logger.warning(
-                f"openverse answered {status}; trying once more in "
-                f"{OPENVERSE_RETRY_DELAY}s"
+                f"openverse answered {status}; trying again in {waited}s "
+                f"({attempt + 1} of {OPENVERSE_TRIES})"
             )
-            time.sleep(OPENVERSE_RETRY_DELAY)
+            time.sleep(waited)
         try:
             response = requests.get(
                 OPENVERSE_ENDPOINT,
@@ -330,9 +407,9 @@ def _openverse(query: str, app_config: Optional[dict]) -> Reference:
             break
     else:
         raise ReferenceImageError(
-            f"openverse answered {status} twice. That is their gateway having a "
-            "bad moment rather than anything wrong here; pressing the button "
-            "again usually works."
+            f"openverse answered {status} {OPENVERSE_TRIES} times running. That "
+            "is their gateway having a bad moment rather than anything wrong "
+            "here; pressing the button again usually works."
         )
 
     if status == 429:
@@ -352,12 +429,12 @@ def _openverse(query: str, app_config: Optional[dict]) -> Reference:
 
     results = payload.get("results") if isinstance(payload, dict) else None
     if not isinstance(results, list) or not results:
-        raise ReferenceImageError(
+        raise NothingFound(
             f"openverse found no pictures for {query!r}. It only holds openly "
             "licensed pictures, so it is far smaller than a web search and a "
             "very specific subject may simply not be in it."
         )
-    return _first_usable(query, OPENVERSE, _openverse_candidates(results))
+    return _first_usable(query, OPENVERSE, _openverse_candidates(results), skip)
 
 
 def _openverse_candidates(results: Any) -> "list[_Candidate]":
@@ -403,7 +480,9 @@ def _openverse_licence(item: dict) -> str:
     return f"{label} {version}".strip()
 
 
-def _brave(query: str, app_config: Optional[dict]) -> Reference:
+def _brave(
+    query: str, app_config: Optional[dict], skip: "set[str]" = frozenset()
+) -> Reference:
     key = str(_setting(app_config, "brave_search_api_key", "")).strip()
     if not key:
         raise ReferenceImageError(
@@ -450,7 +529,7 @@ def _brave(query: str, app_config: Optional[dict]) -> Reference:
         ) from None
 
     results = payload.get("results") if isinstance(payload, dict) else None
-    return _first_usable(query, BRAVE, _brave_candidates(results))
+    return _first_usable(query, BRAVE, _brave_candidates(results), skip)
 
 
 def _brave_candidates(results: Any) -> "list[_Candidate]":
@@ -489,7 +568,10 @@ def _brave_reason(response: Any) -> str:
 
 
 def _first_usable(
-    query: str, provider: str, candidates: "list[_Candidate]"
+    query: str,
+    provider: str,
+    candidates: "list[_Candidate]",
+    skip: "set[str]" = frozenset(),
 ) -> Reference:
     """一条条试下来，返回第一张真能下得来、看得清的照片。
 
@@ -499,6 +581,7 @@ def _first_usable(
     """
     refused: list[str] = []
     tried: set[str] = set()
+    already = 0
     for url, page, licence, creator in candidates:
         # 试过几条就够了。头几条打不开是常事（防盗链、403、已经删了），但
         # 一直试下去会把一次点击拖成半分钟。
@@ -508,6 +591,10 @@ def _first_usable(
         if not url.lower().startswith(("http://", "https://")) or url in tried:
             continue
         tried.add(url)
+        if url in skip:
+            # 这一张别的段落已经在用了。同一张照片重画两遍，看的人会发现。
+            already += 1
+            continue
         try:
             data, width, height = _fetch(url)
         except ReferenceImageError as exc:
@@ -530,8 +617,13 @@ def _first_usable(
         )
 
     if not refused:
-        raise ReferenceImageError(f"{provider} found no pictures for {query!r}")
-    raise ReferenceImageError(
+        if already:
+            raise NothingFound(
+                f"{provider} found {already} picture(s) for {query!r} but every "
+                "one of them is already used by another scene in this video"
+            )
+        raise NothingFound(f"{provider} found no pictures for {query!r}")
+    raise NothingFound(
         f"{provider} found pictures for {query!r} but none could be used: "
         + "; ".join(refused[:MAX_ATTEMPTS])
     )
