@@ -330,16 +330,34 @@ async function refresh() {
     一句"任务还在运行"——而他根本不知道有东西在跑。渲染期间确实不能改:
     渲染器正在读那几个素材文件,边读边换会得到一条谁也复现不了的片子。
     所以这里把那个状态显示出来,而不是等用户撞上去才告诉他。 */
+/* 状态查不到时再试几次，一共约 10 秒。
+   一次查不到不代表没在跑：接口可能刚重启，也可能提交完的那一瞬间状态还没
+   落下去。但一直查不到就得说出来，不能装作还在转。 */
+const STATUS_RETRIES = 5;
+const STATUS_RETRY_DELAY = 2000;
+
 async function watchTask() {
   if (!state.taskId || state.watching) return;
   state.watching = true;
+  let misses = 0;
   try {
     for (;;) {
       let task;
       try {
         task = await call("GET", `/tasks/${encodeURIComponent(state.taskId)}`);
-      } catch {
-        break; // 查不到状态不该让编辑器停摆
+        misses = 0;
+      } catch (error) {
+        // 以前这里一个失败就不看了，于是挡板永远停在"正在提交"——而片子在
+        // 后台照样渲完，用户什么都看不到（实测 7 分 19 秒全程一个转圈）。
+        misses += 1;
+        if (misses < STATUS_RETRIES) {
+          await new Promise((resolve) => setTimeout(resolve, STATUS_RETRY_DELAY));
+          continue;
+        }
+        // 只有在确实有一次提交或者看到过它在跑的时候才抱怨。打开页面时查不到
+        // 状态是常事（重启过接口的旧任务就查不到），那种时候闷着退出就好。
+        if (state.wasBusy) loseRender(error);
+        break;
       }
       // 4 = processing（见 app/models/const.py）
       const busy = task && Number(task.state) === 4;
@@ -2734,6 +2752,29 @@ function updateRender(percent, phase) {
     const seconds = (Date.now() - state.renderStarted) / 1000;
     ui.renderElapsed.textContent = `${fmt(seconds)} so far`;
   }
+}
+
+/** 状态真的查不到了。渲染可能还在跑，所以既不能说"好了"，也不能一直转。
+
+    这块挡板上一直转圈是最坏的那种"没反应"：后台在干活，而用户以为点了没用，
+    于是再点一次，于是同一条片子渲两遍。 */
+function loseRender(error) {
+  const why = (error && (error.message || error)) || "no reason given";
+  say(
+    `Cannot read the render status (${why}). The render may still be running — `
+    + "look at the window the API is running in, then reload this page.",
+    "warn"
+  );
+  if (ui.renderModal.hidden) return;
+  ui.renderBar.classList.remove("waiting");
+  ui.renderHide.hidden = true;
+  ui.renderDone.hidden = false;
+  ui.renderPlay.hidden = true;
+  ui.renderTitle.textContent = "Lost track of the render";
+  ui.renderNote.textContent = "It was submitted, but this page cannot read its "
+    + "status any more. It is probably still running: watch the API window, "
+    + "then reload this page to pick it up again.";
+  ui.renderPct.textContent = "";
 }
 
 /** 渲染结束：成了就给一个"去看"的按钮，败了就把原因留在这块挡板上。 */

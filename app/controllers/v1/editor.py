@@ -1107,6 +1107,20 @@ def _scene_payload(task_id: str, index: int) -> dict:
     )
 
 
+def _restore_state(task_id: str, snapshot: dict | None) -> None:
+    """调度器没接住时把任务状态放回原样。
+
+    放不回去的话这条任务会永远显示"在跑"：编辑器会一直锁着控件等一个根本
+    没有在跑的渲染。重启过接口、状态里本来就没有这条任务时就把它删掉，和
+    ``create_task`` 回滚的做法一致。
+    """
+    if not snapshot:
+        sm.state.delete_task(task_id)
+        return
+    fields = {key: value for key, value in snapshot.items() if key != "task_id"}
+    sm.state.update_task(task_id, **fields)
+
+
 def _submit(
     task_id: str, request_id: str, params, *, stop_at: str, start_from: str
 ) -> dict:
@@ -1115,7 +1129,19 @@ def _submit(
     复用 ``task_manager`` 而不是直接起线程，是为了让审片触发的渲染和
     ``POST /videos`` 共用同一个并发上限：两条路径都会占满 GPU，各自计数
     等于没有上限。
+
+    为什么要先把"在跑"写进状态里
+    ----------------------------
+    编辑器提交完立刻就去查任务状态（``watchTask``），而那一刻流水线线程往往
+    还没开始写状态——重启过接口的话状态里更是连这条任务都没有。查到的就是
+    404，编辑器那边一个查不到就不再跟着看了：渲染照样跑完，挡板却一直停在
+    "正在提交"。实测 11:25:45 提交、11:33:04 渲完，用户全程只看到一个转圈。
+
+    一次性生成那条路（``create_task``）本来就是先写状态再入队，这里补上同一
+    个顺序。交不出去时把状态放回原样，不留一个永远"在跑"的任务。
     """
+    before = sm.state.get_task(task_id)
+    sm.state.update_task(task_id)
     try:
         task_manager.add_task(
             tm.start,
@@ -1126,9 +1152,13 @@ def _submit(
         )
     except TaskQueueFullError as exc:
         logger.warning(f"reject resumed task because queue is full: {task_id}")
+        _restore_state(task_id, before)
         raise HttpException(
             task_id=task_id, status_code=429, message=f"{request_id}: {exc}"
         ) from exc
+    except Exception:
+        _restore_state(task_id, before)
+        raise
     logger.success(
         f"task resumed: task_id={task_id}, start_from={start_from}, stop_at={stop_at}"
     )
