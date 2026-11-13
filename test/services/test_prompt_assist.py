@@ -333,19 +333,21 @@ class TestTheTimelineEditorHasItToo:
 
     def test_it_calls_the_prompt_route(self):
         source = self._editor_source()
-        assert '`${scenePath(scene.index)}/prompt`' in source
+        # 下标在等模型的那几十秒里会变（插一段、删一段），所以发请求前按身份
+        # 重算一次，而不是用接管时记下的那个。
+        assert "`${scenePath(at)}/prompt`" in source
         assert "drawPromptAssist(scene, keyword.input)" in source
 
     def test_what_the_model_writes_goes_into_the_prompt_box(self):
         """存和重出读的都是那个框，所以写到别处等于写了个寂寞。"""
         source = self._editor_source()
-        assert "input.value = written;" in source
+        assert "live.input.value = written;" in source
 
     def test_there_is_a_way_back(self):
         """一下子换掉一整条，被顶掉的可能是用户写了很久的那条。"""
         source = self._editor_source()
         assert 'button("Undo"' in source
-        assert "state_.undo = input.value;" in source
+        assert 'assistState(id).undo = String(scene.keyword || "");' in source
 
     def test_saving_and_redrawing_by_hand_are_untouched(self):
         source = self._editor_source()
@@ -359,3 +361,67 @@ class TestTheTimelineEditorHasItToo:
 
         paths = {route.path for route in editor_routes.router.routes}
         assert "/api/v1/tasks/{task_id}/scenes/{index}/prompt" in paths
+
+
+class TestWritingKeepsGoingWhenYouLookElsewhere:
+    """写一条要等模型几十秒，这中间用户会去改别的段落。
+
+    等的时候换一段，整个 inspector 会被重画：那个输入框和那一小块都被摘下来
+    换成新的。所以"写"这件事不能活在那一块的闭包里——第一版就是这样，于是换
+    一段等于把刚等了半分钟的那一条扔掉，而且扔得无声无息。
+    """
+
+    @staticmethod
+    def _editor_source() -> str:
+        from pathlib import Path
+
+        root = Path(__file__).parent.parent.parent
+        return (root / "resource" / "public" / "editor" / "editor.js").read_text(
+            encoding="utf-8"
+        )
+
+    def test_the_writing_is_started_outside_that_little_block(self):
+        source = self._editor_source()
+        assert "function startPromptWrite(id, direction, current)" in source
+        assert "startPromptWrite(id, direction.input.value, input.value);" in source
+
+    def test_it_does_not_wait_for_the_model_inside_the_click(self):
+        """点击处理函数里一 ``await`` 就把结果绑死在这一块上了。"""
+        source = self._editor_source()
+        start = source.index('button("Write the prompt"')
+        end = source.index("const row", start)
+        assert "await" not in source[start:end]
+
+    def test_what_it_writes_is_saved_without_that_box(self):
+        """框已经不在了也要存下去，不然写好的那一条只活在内存里。"""
+        source = self._editor_source()
+        assert "async function applyWrittenPrompt(id, written)" in source
+        assert 'await call("PUT", scenePath(at), { keyword: written });' in source
+
+    def test_each_scene_keeps_its_own_progress(self):
+        """换回来时那句小字、撤销内容、"正在写"都得还在。"""
+        source = self._editor_source()
+        assert "const promptAssists = new Map();" in source
+        assert "function assistState(id)" in source
+        assert "const state_ = assistState(id);" in source
+
+    def test_the_same_scene_is_not_written_twice_at_once(self):
+        source = self._editor_source()
+        assert "const promptWrites = new Set();" in source
+        assert "if (promptWrites.has(id)) return;" in source
+
+    def test_finishing_while_you_are_elsewhere_is_said_out_loud(self):
+        """那一小块不在屏上，所以写完、写崩了都要在横幅上说一声。"""
+        source = self._editor_source()
+        assert "function announcePromptWrite(id, error)" in source
+        assert "announcePromptWrite(id, null);" in source
+        assert "announcePromptWrite(id, assist.note);" in source
+
+    def test_landing_it_does_not_redraw_the_whole_screen(self):
+        """别处正在打字的框会被整屏重画连光标一起换掉。"""
+        source = self._editor_source()
+        assert "function relabelClip(at)" in source
+        landed = source.index("async function applyWrittenPrompt")
+        end = source.index("function announcePromptWrite", landed)
+        assert "draw()" not in source[landed:end]
+        assert "relabelClip(at);" in source[landed:end]

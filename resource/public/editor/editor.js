@@ -1377,12 +1377,35 @@ const PROMPT_SAVE_DELAY = 600;
     可以去拖动画面；下标一旦不再指向同一段，这一笔就存到别人头上了。 */
 let promptEdit = null;
 
-/** "用 AI 写这条提示词"那一小块的状态：``{ id, open, direction, undo, note }``。
+/** "用 AI 写这条提示词"那一小块的状态，按段落身份一段一份：
+    ``id -> { id, open, direction, undo, note, kind, show }``。
 
     留在模块级而不是闭包里，因为整个 inspector 会被重画（存完一次、队列
-    轮询回来一次），闭包里的东西活不过那一次重画。真正要活下来的是
-    ``undo``：模型写歪的时候，用户得能把刚被顶掉的那条拿回来。 */
-let promptAssist = null;
+    轮询回来一次），闭包里的东西活不过那一次重画。按身份分开存是因为写一条
+    要等模型几十秒，这中间用户会去改别的段落——回来时这一段的撤销内容、那
+    句小字、还有"正在写"都得还在。
+
+    ``show`` 是这一段那一小块此刻挂在屏上的那个重画函数。面板重画之后它会
+    被换成新的那个，旧的那个自己认得出来（见 ``drawPromptAssist``）。 */
+const promptAssists = new Map();
+
+function assistState(id) {
+  let found = promptAssists.get(id);
+  if (!found) {
+    found = {
+      id, open: false, direction: "", undo: null, note: "", kind: "", show: null,
+    };
+    promptAssists.set(id, found);
+  }
+  return found;
+}
+
+/** 正在写的是哪几段（一段同时只写一条）。
+
+    写这件事和界面脱钩：点下去之后换段、面板重画、整屏重画都不打断它，写完
+    自己落回 ``state`` 并存到服务端。以前这一步挂在那个输入框的闭包上，框一
+    被摘掉（换段就会）写回去的字就没了去处，等的那几十秒等于白等。 */
+const promptWrites = new Set();
 
 /** 输入框下面那一行小字：``{ id, text, kind }``，``null`` 是不说话。
 
@@ -1454,16 +1477,24 @@ async function savePromptEdit(edit) {
   // 不能重画整屏（会把框连光标一起换掉），所以只把那一行的前半截换了。
   // 不换的话时间线上会一直写着旧词，看上去就是"根本没存下"。
   if (document.activeElement === target.input) {
-    const label = ui.videoTrack.querySelector(
-      `.clip[data-index="${at}"] .clip-text`
-    );
-    if (label && scene) {
-      label.textContent = `${at + 1}. ${value || scene.material || ""}`
-        + (label.dataset.suffix || "");
-    }
+    relabelClip(at);
   } else {
     draw();
   }
+}
+
+/** 时间线上每一段写的就是它的提示词，存完要跟着变。
+
+    只换这一行的字，不整屏重画：重画会把正在打字的框连光标一起换掉。不换的
+    话时间线上会一直写着旧词，看上去就是"根本没存下"。 */
+function relabelClip(at) {
+  const scene = (state.scenes || [])[at];
+  const label = ui.videoTrack.querySelector(
+    `.clip[data-index="${at}"] .clip-text`
+  );
+  if (!label || !scene) return;
+  label.textContent = `${at + 1}. ${scene.keyword || scene.material || ""}`
+    + (label.dataset.suffix || "");
 }
 
 /** 接管一个提示词框。换到别的场景时先把上一笔存掉（不等它）。 */
@@ -1485,6 +1516,90 @@ function trackPromptEdits(scene, input) {
   input.addEventListener("change", () => savePromptEdit(edit));
 }
 
+/** 把写好的那一条落下去：撤销留底、框里换字、存到服务端、时间线改字。
+
+    一件都不靠那个输入框还在不在。这一步以前是交给框里的自动保存接着做的，
+    而框在换段时就被摘掉了，于是写好的那条谁也看不见、哪儿也没存。 */
+async function applyWrittenPrompt(id, written) {
+  const at = sceneIndexById(id);
+  const scene = (state.scenes || [])[at];
+  if (!scene) throw new Error("that scene is no longer in the timeline");
+  assistState(id).undo = String(scene.keyword || "");
+  // 框还在屏上就连框里的字一起换掉，不然用户看着旧词、存下去的是新词。同时
+  // 把"已存"记成新的，免得那边的自动保存再把同一句存第二遍。
+  const live = promptEdit && promptEdit.id === id ? promptEdit : null;
+  if (live) {
+    clearTimeout(live.timer);
+    live.input.value = written;
+    live.saved = written;
+  }
+  setPromptStatus(id, "Saving…");
+  try {
+    await call("PUT", scenePath(at), { keyword: written });
+  } catch (error) {
+    // 没存上就要说，而且框还在的话要让自动保存还能再试一次。
+    if (live) live.saved = null;
+    setPromptStatus(id, `Not saved: ${error.message || error}`, "warn");
+    throw error;
+  }
+  scene.keyword = written;
+  setPromptStatus(id, "Saved");
+  promptStatusTimer = setTimeout(() => {
+    if (promptStatus && promptStatus.id === id && promptStatus.text === "Saved") {
+      setPromptStatus(id, "");
+    }
+  }, 2500);
+  relabelClip(at);
+}
+
+/** 人已经看着别处时，写完了、写崩了都得有个地方说一声——那一小块不在屏上。 */
+function announcePromptWrite(id, error) {
+  const at = sceneIndexById(id);
+  if (at >= 0 && at === state.selected) return;
+  const where = at >= 0
+    ? `scene ${at + 1}`
+    : "a scene that is no longer in the timeline";
+  if (error) say(`The prompt for ${where} was not written: ${error}`, "error");
+  else say(`The prompt for ${where} is written.`);
+}
+
+/** 去写这一段的提示词。中途换段、面板重画都不打断，写完自己落下去。
+
+    每次重新按身份算下标：等模型的这几十秒里用户可能在前面插了一段。 */
+function startPromptWrite(id, direction, current) {
+  if (promptWrites.has(id)) return;
+  promptWrites.add(id);
+  const assist = assistState(id);
+  assist.note = "Writing the prompt… you can go on to another scene while "
+    + "it writes; it finishes on its own.";
+  assist.kind = "";
+  (async () => {
+    try {
+      const at = sceneIndexById(id);
+      if (at < 0) throw new Error("that scene is no longer in the timeline");
+      const data = await call("POST", `${scenePath(at)}/prompt`, {
+        direction,
+        current,
+      });
+      const written = String((data && data.prompt) || "").trim();
+      if (!written) throw new Error("the model returned no prompt");
+      await applyWrittenPrompt(id, written);
+      assist.note = "Written into the box above. Read it, change what you "
+        + "like, then redraw the picture.";
+      assist.kind = "";
+      announcePromptWrite(id, null);
+    } catch (error) {
+      // 服务端的错误文案是点名的（哪个供应商、缺哪一行配置），照原样显示。
+      assist.note = String(error.message || error);
+      assist.kind = "warn";
+      announcePromptWrite(id, assist.note);
+    } finally {
+      promptWrites.delete(id);
+      if (assist.show) assist.show();
+    }
+  })();
+}
+
 /** "用 AI 写这条提示词"那一小块。
 
     为什么写出来的直接填回上面那个框
@@ -1500,11 +1615,9 @@ function trackPromptEdits(scene, input) {
     自己写才是主路，这是旁边那条。 */
 function drawPromptAssist(scene, input) {
   const id = scene.id || materialKey(scene.material);
-  if (!promptAssist || promptAssist.id !== id) {
-    // 换了一段就从头开始：上一段的撤销内容按到这一段上就是张冠李戴。
-    promptAssist = { id, open: false, direction: "", undo: null, note: "", kind: "" };
-  }
-  const state_ = promptAssist;
+  // 一段一份，按身份取：上一段的撤销内容按到这一段上就是张冠李戴，而换回来
+  // 时这一段写到哪儿了又得还在。
+  const state_ = assistState(id);
 
   const box = document.createElement("details");
   box.className = "drawer prompt-assist";
@@ -1521,7 +1634,9 @@ function drawPromptAssist(scene, input) {
     "Say in a few words what this picture should show, or what to change "
     + "about it. The model writes the whole prompt into the box above, "
     + "keeping the people, the period and the setting of the rest of the "
-    + "video. The picture itself does not change until you redraw it.";
+    + "video. The picture itself does not change until you redraw it. "
+    + "Writing takes a while, so you can move to another scene while it "
+    + "writes — it finishes on its own.";
   box.appendChild(hint);
 
   const direction = field("What it should show", "input", state_.direction);
@@ -1533,7 +1648,7 @@ function drawPromptAssist(scene, input) {
 
   const note = document.createElement("p");
   const undo = button("Undo", "small", async () => {
-    if (state_.undo === null) return;
+    if (state_.undo === null || promptWrites.has(id)) return;
     input.value = state_.undo;
     state_.undo = null;
     state_.note = "Put back the prompt that was there before.";
@@ -1543,48 +1658,38 @@ function drawPromptAssist(scene, input) {
     show();
   });
 
+  // 这一小块现在的样子全部从 ``state_`` 和"正在写哪几段"里读出来，所以写的
+  // 过程中换段再换回来，看到的还是同一个进度。
+  //
+  // 面板一重画就会有新的一块，旧的那个 ``show`` 指向的节点已经被摘下来了：
+  // 认出自己不是当家的那个（``state_.show`` 已经换人）就什么都不做，免得把
+  // "写好了"写到一块早就不在屏上的 DOM 上。
   function show() {
+    if (state_.show !== show) return;
+    const busy = promptWrites.has(id);
+    write.disabled = busy;
+    write.textContent = busy ? "Writing…" : "Write the prompt";
+    undo.disabled = busy;
     note.className = "hint" + (state_.kind ? " " + state_.kind : "");
     note.textContent = state_.note;
     undo.hidden = state_.undo === null;
   }
 
-  const write = button("Write the prompt", "small", async () => {
-    if (write.disabled) return;
-    write.disabled = true;
-    state_.note = "Writing the prompt…";
-    state_.kind = "";
+  // 点下去只是**开始写**：请求交给 ``startPromptWrite`` 带着这一段的身份自
+  // 己跑完，用户接着去改别的段落都不打断它。以前这件事在这个闭包里等结果，
+  // 换一段就把框和闭包一起换掉了，写好的那条无处可落。
+  const write = button("Write the prompt", "small", () => {
+    if (promptWrites.has(id)) return;
+    startPromptWrite(id, direction.input.value, input.value);
     show();
-    try {
-      const data = await call("POST", `${scenePath(scene.index)}/prompt`, {
-        direction: direction.input.value,
-        current: input.value,
-      });
-      const written = String((data && data.prompt) || "").trim();
-      if (!written) throw new Error("the model returned no prompt");
-      state_.undo = input.value;
-      input.value = written;
-      state_.note = "Written into the box above. Read it, change what you "
-        + "like, then redraw the picture.";
-      state_.kind = "";
-      // 焦点先落回提示词框：``savePromptEdit`` 看见框在手里就只改时间线上
-      // 那一行的字，不整屏重画——重画会把这一小块连同刚写好的字一起换掉。
-      input.focus();
-      await savePromptEdit();
-    } catch (error) {
-      // 服务端的错误文案是点名的（哪个供应商、缺哪一行配置），照原样显示。
-      state_.note = String(error.message || error);
-      state_.kind = "warn";
-    } finally {
-      write.disabled = false;
-      show();
-    }
   });
 
   const row = document.createElement("div");
   row.className = "row";
   row.append(write, undo);
   box.append(row, note);
+  // 从这一刻起这一块才是这一段当家的那一块（上面那个 ``show`` 的规矩）。
+  state_.show = show;
   show();
   return box;
 }
