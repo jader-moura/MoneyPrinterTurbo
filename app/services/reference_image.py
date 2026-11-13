@@ -23,6 +23,11 @@
     Brave 的图片搜索 API，一把 key 就够，不用建引擎。代价是它没有"只要照片"
     这个开关——剪贴画和插画也可能回来，只能靠底下那几道尺寸和类型的检查挡。
 
+``openverse``
+    不要 key，也不要信用卡。它只收录公开授权（CC / 公共领域）的图片，所以
+    有两个后果：一是**能**筛"只要照片"，二是库比全网搜索小得多——冷门的具体
+    对象可能根本没有。搜回来的那条还带着许可证和作者，一并记在场景上。
+
 配置不全时点名缺哪一项，**不会**悄悄换成别的供应商：换一个供应商等于换一批
 搜索结果，用户按下那个按钮时以为搜的是他配的那个。
 
@@ -35,8 +40,9 @@
 
 import base64
 import io
+import time
 from dataclasses import dataclass
-from typing import Any, Optional
+from typing import Any, NamedTuple, Optional
 
 import requests
 from loguru import logger
@@ -49,7 +55,19 @@ GOOGLE_CSE_ENDPOINT = "https://www.googleapis.com/customsearch/v1"
 BRAVE = "brave"
 BRAVE_ENDPOINT = "https://api.search.brave.com/res/v1/images/search"
 
-PROVIDERS = (GOOGLE_CSE, BRAVE)
+OPENVERSE = "openverse"
+OPENVERSE_ENDPOINT = "https://api.openverse.org/v1/images/"
+
+# 默认只要"商用 + 可改"的那些：这张照片是拿去当底子重画，然后放进一条要发
+# 出去的视频里的。想要全部就把 openverse_license_type 设成空。
+OPENVERSE_LICENCES = "commercial,modification"
+
+# 它的网关偶尔自己超时。这几个状态码值得再试一次，别的不值得。
+OPENVERSE_HICCUPS = (502, 503, 504)
+OPENVERSE_TRIES = 2
+OPENVERSE_RETRY_DELAY = 1.5
+
+PROVIDERS = (GOOGLE_CSE, BRAVE, OPENVERSE)
 
 # 一张底图最多多大。和 genserver 的 ``MAX_REFERENCE_MB`` 对齐：它那边会拒，
 # 这边先别下。
@@ -93,6 +111,12 @@ class Reference:
     width: int
     height: int
 
+    licence: str = ""
+    """许可证，比如 ``CC BY 2.0``。只有说得出的供应商才有，其余是空的。"""
+
+    creator: str = ""
+    """作者。要署名的时候用得上。"""
+
     @property
     def b64(self) -> str:
         return base64.b64encode(self.data).decode("ascii")
@@ -106,7 +130,19 @@ class Reference:
             "page_url": self.page_url,
             "width": self.width,
             "height": self.height,
+            # 说不出的就不写，别在每条记录上留两个空字段。
+            "license": self.licence,
+            "creator": self.creator,
         }
+
+
+class _Candidate(NamedTuple):
+    """一条搜索结果里，这个模块用得上的那几项。"""
+
+    url: str
+    page_url: str = ""
+    licence: str = ""
+    creator: str = ""
 
 
 def _setting(app_config: Optional[dict], key: str, default: Any = "") -> Any:
@@ -144,7 +180,9 @@ def search(query: str, *, app_config: Optional[dict] = None) -> Reference:
         raise ReferenceImageError("there is nothing to search for: the query is empty")
 
     provider = str(_setting(app_config, "reference_image_provider", GOOGLE_CSE)).strip()
-    finder = {GOOGLE_CSE: _google_cse, BRAVE: _brave}.get(provider)
+    finder = {GOOGLE_CSE: _google_cse, BRAVE: _brave, OPENVERSE: _openverse}.get(
+        provider
+    )
     if finder is None:
         # 不认识的供应商不能退回默认那个：用户以为搜的是他写的那个。
         raise ReferenceImageError(
@@ -179,9 +217,9 @@ def _google_cse(query: str, app_config: Optional[dict]) -> Reference:
             + " in [app] of config.toml. The key comes from "
             "https://developers.google.com/custom-search/v1/introduction and the "
             "engine id from https://programmablesearchengine.google.com/ "
-            "(switch image search on for it). Brave is the other way to search: "
-            'set reference_image_provider = "brave" and brave_search_api_key, '
-            "which needs no engine to be built first."
+            "(switch image search on for it). The other two ways to search: "
+            'reference_image_provider = "openverse" needs nothing at all, and '
+            '"brave" needs brave_search_api_key and no engine.'
         )
 
     params = {
@@ -227,16 +265,142 @@ def _google_cse(query: str, app_config: Optional[dict]) -> Reference:
     return _first_usable(query, GOOGLE_CSE, _google_candidates(items))
 
 
-def _google_candidates(items: Any) -> "list[tuple[str, str]]":
-    out: list[tuple[str, str]] = []
+def _google_candidates(items: Any) -> "list[_Candidate]":
+    out: list[_Candidate] = []
     if not isinstance(items, list):
         return out
     for item in items:
         if not isinstance(item, dict):
             continue
         meta = item.get("image") if isinstance(item.get("image"), dict) else {}
-        out.append((str(item.get("link") or ""), str(meta.get("contextLink") or "")))
+        out.append(
+            _Candidate(str(item.get("link") or ""), str(meta.get("contextLink") or ""))
+        )
     return out
+
+
+def _openverse(query: str, app_config: Optional[dict]) -> Reference:
+    """没有 key 这一步。不配置任何东西也能用，这是选它的全部理由。"""
+    params = {
+        "q": query,
+        "page_size": SEARCH_COUNT,
+        # 只要照片。Openverse 里混着插画、扫描件和博物馆藏品的翻拍。
+        "category": "photograph",
+        # ``mature=true`` 是"把成人内容也放进来"，不是"只要成人内容"。
+        "mature": "false" if _safe_on(app_config) else "true",
+    }
+    licences = str(
+        _setting(app_config, "openverse_license_type", OPENVERSE_LICENCES)
+    ).strip()
+    if licences:
+        params["license_type"] = licences
+
+    headers = {"User-Agent": USER_AGENT, "Accept": "application/json"}
+    # 匿名也能用，只是额度低。拿过 token 的就带上。
+    token = str(_setting(app_config, "openverse_api_token", "")).strip()
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
+
+    logger.info(f"searching openverse for a reference photo: query={query!r}")
+    response = None
+    status = 0
+    # 它自己的网关时不时会 504。再试一次是对同一个供应商再试一次，不是换一
+    # 家——换一家等于换一批结果，那件事永远不会自己发生。
+    for attempt in range(OPENVERSE_TRIES):
+        if attempt:
+            logger.warning(
+                f"openverse answered {status}; trying once more in "
+                f"{OPENVERSE_RETRY_DELAY}s"
+            )
+            time.sleep(OPENVERSE_RETRY_DELAY)
+        try:
+            response = requests.get(
+                OPENVERSE_ENDPOINT,
+                params=params,
+                headers=headers,
+                proxies=config.proxy,
+                timeout=(CONNECT_TIMEOUT, READ_TIMEOUT),
+            )
+        except Exception as exc:
+            raise ReferenceImageError(
+                f"openverse could not be reached: {type(exc).__name__}"
+            ) from None
+        status = int(getattr(response, "status_code", 0) or 0)
+        if status not in OPENVERSE_HICCUPS:
+            break
+    else:
+        raise ReferenceImageError(
+            f"openverse answered {status} twice. That is their gateway having a "
+            "bad moment rather than anything wrong here; pressing the button "
+            "again usually works."
+        )
+
+    if status == 429:
+        raise ReferenceImageError(
+            "openverse is rate limiting this machine. Without a token it allows "
+            "only a few searches a minute; set openverse_api_token in [app] for "
+            "a higher limit, or wait a minute."
+        )
+    if status != 200:
+        raise ReferenceImageError(f"openverse answered {status}")
+    try:
+        payload = response.json()
+    except Exception:
+        raise ReferenceImageError(
+            "openverse answered 200 with something that is not JSON"
+        ) from None
+
+    results = payload.get("results") if isinstance(payload, dict) else None
+    if not isinstance(results, list) or not results:
+        raise ReferenceImageError(
+            f"openverse found no pictures for {query!r}. It only holds openly "
+            "licensed pictures, so it is far smaller than a web search and a "
+            "very specific subject may simply not be in it."
+        )
+    return _first_usable(query, OPENVERSE, _openverse_candidates(results))
+
+
+def _openverse_candidates(results: Any) -> "list[_Candidate]":
+    """``url`` 是图，``foreign_landing_url`` 是登载它的页面。
+
+    尺寸是搜索结果里就带着的，所以太小的那几条在下载之前就能扔掉。
+    """
+    out: list[_Candidate] = []
+    if not isinstance(results, list):
+        return out
+    for item in results:
+        if not isinstance(item, dict):
+            continue
+        try:
+            long_edge = max(int(item.get("width") or 0), int(item.get("height") or 0))
+        except (TypeError, ValueError):
+            long_edge = 0
+        if 0 < long_edge < MIN_LONG_EDGE:
+            continue
+        out.append(
+            _Candidate(
+                str(item.get("url") or ""),
+                str(item.get("foreign_landing_url") or ""),
+                _openverse_licence(item),
+                str(item.get("creator") or "").strip(),
+            )
+        )
+    return out
+
+
+def _openverse_licence(item: dict) -> str:
+    """``by`` + ``2.0`` 读作 ``CC BY 2.0``。"""
+    name = str(item.get("license") or "").strip().lower()
+    if not name:
+        return ""
+    version = str(item.get("license_version") or "").strip()
+    if name == "pdm":
+        label = "Public Domain Mark"
+    elif name == "cc0":
+        label = "CC0"
+    else:
+        label = "CC " + name.upper()
+    return f"{label} {version}".strip()
 
 
 def _brave(query: str, app_config: Optional[dict]) -> Reference:
@@ -289,9 +453,9 @@ def _brave(query: str, app_config: Optional[dict]) -> Reference:
     return _first_usable(query, BRAVE, _brave_candidates(results))
 
 
-def _brave_candidates(results: Any) -> "list[tuple[str, str]]":
+def _brave_candidates(results: Any) -> "list[_Candidate]":
     """Brave 的一条结果里，``properties.url`` 是图，``url`` 是登载它的页面。"""
-    out: list[tuple[str, str]] = []
+    out: list[_Candidate] = []
     if not isinstance(results, list):
         return out
     for item in results:
@@ -299,7 +463,7 @@ def _brave_candidates(results: Any) -> "list[tuple[str, str]]":
             continue
         where = item.get("properties")
         picture = where.get("url") if isinstance(where, dict) else ""
-        out.append((str(picture or ""), str(item.get("url") or "")))
+        out.append(_Candidate(str(picture or ""), str(item.get("url") or "")))
     return out
 
 
@@ -325,7 +489,7 @@ def _brave_reason(response: Any) -> str:
 
 
 def _first_usable(
-    query: str, provider: str, candidates: "list[tuple[str, str]]"
+    query: str, provider: str, candidates: "list[_Candidate]"
 ) -> Reference:
     """一条条试下来，返回第一张真能下得来、看得清的照片。
 
@@ -335,7 +499,7 @@ def _first_usable(
     """
     refused: list[str] = []
     tried: set[str] = set()
-    for url, page in candidates:
+    for url, page, licence, creator in candidates:
         # 试过几条就够了。头几条打不开是常事（防盗链、403、已经删了），但
         # 一直试下去会把一次点击拖成半分钟。
         if len(refused) >= MAX_ATTEMPTS:
@@ -361,6 +525,8 @@ def _first_usable(
             provider=provider,
             width=width,
             height=height,
+            licence=licence,
+            creator=creator,
         )
 
     if not refused:

@@ -370,7 +370,14 @@ def _normalise_scene(raw: Any, index: int) -> dict:
     if isinstance(reference, Mapping):
         kept = {
             key: str(reference.get(key) or "")
-            for key in ("query", "provider", "source_url", "page_url")
+            for key in (
+                "query",
+                "provider",
+                "source_url",
+                "page_url",
+                "license",
+                "creator",
+            )
             if str(reference.get(key) or "").strip()
         }
         for key in ("width", "height"):

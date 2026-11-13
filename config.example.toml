@@ -275,8 +275,18 @@ openai_image_prompt_template = "{term}, candid cinematic photograph, natural lig
 # (Z-Image-Turbo img2img); nothing else in this file can, and asking for it
 # with another source is refused rather than silently ignored.
 #
-# reference_image_provider: "google_cse" (the default) or "brave". An unknown
-# value is an error, never a quiet fall back to another search engine.
+# reference_image_provider: "google_cse" (the default), "brave" or
+# "openverse". An unknown value is an error, never a quiet fall back to
+# another search engine.
+#
+# "openverse" is the one that costs nothing and asks for nothing: no key, no
+# account, no card. It searches openly licensed pictures (Creative Commons and
+# public domain, from Flickr, Wikimedia, museums and the like) and keeps the
+# licence and the photographer on the scene, which is the only one of the three
+# that can answer "am I allowed to publish this". By default it asks for
+# pictures that may be used commercially and modified - which is what a redraw
+# inside a published video is. The catch is coverage: it is far smaller than a
+# web search, so a very specific subject can come back with nothing at all.
 # reference_image_provider = "google_cse"
 #
 # Google Programmable Search, which is the Custom Search JSON API:
@@ -295,6 +305,16 @@ openai_image_prompt_template = "{term}, candid cinematic photograph, natural lig
 # type checks still apply, so the picture is usable - just less certainly a
 # photograph.
 # brave_search_api_key = ""
+#
+# Openverse needs none of this. These two are optional:
+#   openverse_license_type: which licences to accept. The default
+#     "commercial,modification" is the safe pair for a video you publish.
+#     Set it to "" to search everything, attribution-only material included.
+#   openverse_api_token: anonymous searching is rate limited to a few a
+#     minute; a free token from https://api.openverse.org/v1/auth_tokens/register/
+#     raises that. Nothing else changes.
+# openverse_license_type = "commercial,modification"
+# openverse_api_token = ""
 #
 # How far the redraw may move from the photograph. 1.0 ignores it entirely,
 # 0.75 keeps the composition and repaints everything else, 0.3 hands back

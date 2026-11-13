@@ -63,8 +63,12 @@ class FakeRequests:
 
     def get(self, url, **kwargs):
         self.calls.append((url, kwargs))
-        if url.startswith(reference_image.GOOGLE_CSE_ENDPOINT) or url.startswith(
-            reference_image.BRAVE_ENDPOINT
+        if url.startswith(
+            (
+                reference_image.GOOGLE_CSE_ENDPOINT,
+                reference_image.BRAVE_ENDPOINT,
+                reference_image.OPENVERSE_ENDPOINT,
+            )
         ):
             if isinstance(self.search, Exception):
                 raise self.search
@@ -114,6 +118,35 @@ BRAVE_CONFIG = {
 }
 
 
+def openverse_hit(
+    url,
+    *,
+    page="https://flickr.example/photos/1",
+    width=1600,
+    height=1200,
+    licence="by",
+    version="2.0",
+    creator="A Photographer",
+):
+    return {
+        "url": url,
+        "foreign_landing_url": page,
+        "width": width,
+        "height": height,
+        "license": licence,
+        "license_version": version,
+        "creator": creator,
+    }
+
+
+def openverse_found(*items):
+    return FakeResponse(payload={"result_count": len(items), "results": list(items)})
+
+
+# 这就是重点：一把 key 都没有。
+OPENVERSE_CONFIG = {"reference_image_provider": "openverse"}
+
+
 @pytest.fixture
 def web(monkeypatch):
     """requests 换成假的，并给一份够用的配置。"""
@@ -149,8 +182,9 @@ class TestItNeedsToBeConfigured:
             reference_image.search("comet", app_config={**CONFIG, "reference_image_provider": "bing"})
         assert "bing" in str(caught.value)
         assert "google_cse" in str(caught.value)
-        # 认识哪几个要全说出来，不然用户不知道还有第二条路。
+        # 认识哪几个要全说出来，不然用户不知道还有别的路。
         assert "brave" in str(caught.value)
+        assert "openverse" in str(caught.value)
 
     def test_the_google_one_mentions_the_other_way_to_search(self):
         """Google 那套要先建搜索引擎，不是每个人都愿意。"""
@@ -445,6 +479,172 @@ class TestBraveFindsThemToo:
         assert "OSError" in str(caught.value)
 
 
+class TestOpenverseNeedsNothing:
+    """不要 key、不要账号、不要信用卡：配不起别的那两家时还剩这一条路。"""
+
+    def test_it_searches_with_no_configuration_at_all(self, web):
+        url = "https://live.static.example/comet_b.jpg"
+        fake = web(
+            FakeRequests(
+                search=openverse_found(openverse_hit(url)), downloads=photo_at(url)
+            )
+        )
+        reference = reference_image.search("comet 1952", app_config=OPENVERSE_CONFIG)
+        assert reference.provider == "openverse"
+        assert reference.source_url == url
+        assert reference.page_url == "https://flickr.example/photos/1"
+        # 没有 key，就没有任何一处会漏 key 的地方。
+        assert "Authorization" not in fake.calls[0][1]["headers"]
+
+    def test_the_licence_and_the_photographer_are_recorded(self, web):
+        """这三家里只有这一家答得上"我能不能发出去"。"""
+        url = "https://live.static.example/comet_b.jpg"
+        web(
+            FakeRequests(
+                search=openverse_found(openverse_hit(url)), downloads=photo_at(url)
+            )
+        )
+        reference = reference_image.search("comet", app_config=OPENVERSE_CONFIG)
+        assert reference.licence == "CC BY 2.0"
+        assert reference.creator == "A Photographer"
+        payload = reference.payload()
+        assert payload["license"] == "CC BY 2.0"
+        assert payload["creator"] == "A Photographer"
+
+    def test_public_domain_reads_as_public_domain(self, web):
+        url = "https://live.static.example/comet_b.jpg"
+        web(
+            FakeRequests(
+                search=openverse_found(
+                    openverse_hit(url, licence="cc0", version="1.0", creator="")
+                ),
+                downloads=photo_at(url),
+            )
+        )
+        reference = reference_image.search("comet", app_config=OPENVERSE_CONFIG)
+        assert reference.licence == "CC0 1.0"
+
+    def test_it_asks_for_photographs_it_may_redraw_and_publish(self, web):
+        url = "https://live.static.example/comet_b.jpg"
+        fake = web(
+            FakeRequests(
+                search=openverse_found(openverse_hit(url)), downloads=photo_at(url)
+            )
+        )
+        reference_image.search("comet", app_config=OPENVERSE_CONFIG)
+        params = fake.calls[0][1]["params"]
+        assert params["category"] == "photograph"
+        assert params["license_type"] == "commercial,modification"
+        # mature=true 是"把成人内容也放进来"，所以 SafeSearch 开着就是 false。
+        assert params["mature"] == "false"
+
+    def test_the_licence_filter_can_be_turned_off(self, web):
+        url = "https://live.static.example/comet_b.jpg"
+        fake = web(
+            FakeRequests(
+                search=openverse_found(openverse_hit(url)), downloads=photo_at(url)
+            )
+        )
+        reference_image.search(
+            "comet", app_config={**OPENVERSE_CONFIG, "openverse_license_type": ""}
+        )
+        assert "license_type" not in fake.calls[0][1]["params"]
+
+    def test_a_token_is_sent_when_there_is_one(self, web):
+        url = "https://live.static.example/comet_b.jpg"
+        fake = web(
+            FakeRequests(
+                search=openverse_found(openverse_hit(url)), downloads=photo_at(url)
+            )
+        )
+        reference_image.search(
+            "comet", app_config={**OPENVERSE_CONFIG, "openverse_api_token": "a-token"}
+        )
+        assert fake.calls[0][1]["headers"]["Authorization"] == "Bearer a-token"
+
+    def test_a_picture_it_already_says_is_too_small_is_never_downloaded(self, web):
+        """尺寸搜索结果里就有，不用先下回来再量。"""
+        tiny = "https://live.static.example/thumb.jpg"
+        good = "https://live.static.example/comet_b.jpg"
+        fake = web(
+            FakeRequests(
+                search=openverse_found(
+                    openverse_hit(tiny, width=320, height=240),
+                    openverse_hit(good),
+                ),
+                downloads=photo_at(good),
+            )
+        )
+        assert (
+            reference_image.search("comet", app_config=OPENVERSE_CONFIG).source_url
+            == good
+        )
+        assert [call[0] for call in fake.calls[1:]] == [good]
+
+    def test_nothing_found_explains_that_the_catalogue_is_small(self, web):
+        """这是它真正的代价，错误里要说出来，不然像是坏了。"""
+        web(FakeRequests(search=openverse_found()))
+        with pytest.raises(reference_image.ReferenceImageError) as caught:
+            reference_image.search("de havilland comet", app_config=OPENVERSE_CONFIG)
+        message = str(caught.value)
+        assert "de havilland comet" in message
+        assert "licensed" in message
+
+    def test_a_gateway_hiccup_is_tried_once_more(self, monkeypatch, web):
+        """504 是它自己的网关在打嗝，不该把用户那一下点击浪费掉。"""
+        monkeypatch.setattr(reference_image.time, "sleep", lambda _: None)
+        url = "https://live.static.example/comet_b.jpg"
+
+        class FlakyOnce(FakeRequests):
+            def get(self, address, **kwargs):
+                if address.startswith(reference_image.OPENVERSE_ENDPOINT) and not self.calls:
+                    self.calls.append((address, kwargs))
+                    return FakeResponse(status=504, payload={})
+                return super().get(address, **kwargs)
+
+        web(
+            FlakyOnce(
+                search=openverse_found(openverse_hit(url)), downloads=photo_at(url)
+            )
+        )
+        assert (
+            reference_image.search("comet", app_config=OPENVERSE_CONFIG).source_url
+            == url
+        )
+
+    def test_it_does_not_keep_trying_forever(self, monkeypatch, web):
+        monkeypatch.setattr(reference_image.time, "sleep", lambda _: None)
+        fake = web(FakeRequests(search=FakeResponse(status=504, payload={})))
+        with pytest.raises(reference_image.ReferenceImageError) as caught:
+            reference_image.search("comet", app_config=OPENVERSE_CONFIG)
+        assert len(fake.calls) == reference_image.OPENVERSE_TRIES
+        assert "504" in str(caught.value)
+
+    def test_being_rate_limited_says_what_to_do_about_it(self, web):
+        web(FakeRequests(search=FakeResponse(status=429, payload={})))
+        with pytest.raises(reference_image.ReferenceImageError) as caught:
+            reference_image.search("comet", app_config=OPENVERSE_CONFIG)
+        assert "openverse_api_token" in str(caught.value)
+
+    def test_the_same_checks_apply_as_everywhere_else(self, web):
+        """换搜索引擎不能换掉下载那套检查。"""
+        lying = "https://live.static.example/not-a-photo.html"
+        web(
+            FakeRequests(
+                search=openverse_found(openverse_hit(lying)),
+                downloads={
+                    lying: FakeResponse(
+                        body=b"<html>nope</html>",
+                        headers={"Content-Type": "text/html"},
+                    )
+                },
+            )
+        )
+        with pytest.raises(reference_image.ReferenceImageError) as caught:
+            reference_image.search("comet", app_config=OPENVERSE_CONFIG)
+        assert "none could be used" in str(caught.value)
+
+
 class TestHowFarItMayMove:
     def test_the_default_keeps_the_composition(self):
         assert reference_image.strength({}) == 0.75
@@ -583,6 +783,48 @@ class TestWhatIsRecordedOnTheScene:
         assert scene["reference"]["query"] == "comet 1952"
         assert scene["reference"]["page_url"] == "https://example.org/page"
         assert scene["reference"]["width"] == 1200
+
+    def test_the_licence_survives_a_save_too(self):
+        """要署名的话，几天后还得找得到署谁。"""
+        from app.services import scene_manifest
+
+        scene = scene_manifest._normalise_scene(
+            {
+                "material": "a.mp4",
+                "reference": {
+                    "query": "comet 1952",
+                    "provider": "openverse",
+                    "source_url": "https://pics.example.org/c.jpg",
+                    "page_url": "https://example.org/page",
+                    "license": "CC BY 2.0",
+                    "creator": "A Photographer",
+                },
+            },
+            0,
+        )
+        assert scene["reference"]["license"] == "CC BY 2.0"
+        assert scene["reference"]["creator"] == "A Photographer"
+
+    def test_a_source_that_cannot_say_grows_no_empty_keys(self):
+        """Google 和 Brave 说不出许可证，那就一个字都不要留。"""
+        from app.services import scene_manifest
+
+        scene = scene_manifest._normalise_scene(
+            {
+                "material": "a.mp4",
+                "reference": {
+                    "query": "comet",
+                    "provider": "google_cse",
+                    "source_url": "https://pics.example.org/c.jpg",
+                    "page_url": "https://example.org/page",
+                    "license": "",
+                    "creator": "",
+                },
+            },
+            0,
+        )
+        assert "license" not in scene["reference"]
+        assert "creator" not in scene["reference"]
 
     def test_a_scene_drawn_the_ordinary_way_grows_no_new_key(self):
         from app.services import scene_manifest
