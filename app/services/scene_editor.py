@@ -2041,6 +2041,7 @@ def update_timing(
     task_id: str,
     index: int,
     *,
+    render: bool = False,
     trim_start=None,
     duration=None,
     reset: bool = False,
@@ -2077,35 +2078,44 @@ def update_timing(
         except (TypeError, ValueError):
             needed_source = None
 
-    # 图片素材的源片段是生成时按固定时长烘好的，要停更久必须按新时长重渲。
-    # 这里就地重渲并把场景指向新文件，用户才能真的把一张图拉长。
+    # 拖一张图拖得比烘出来的片段长，这里**不重渲**（``render`` 为假时），
+    # 只把数字记下来。
     #
-    # 判断依据是"有没有原图可以重渲"，**不是**"后缀像不像视频"。生成的图片
-    # 在时间线上是一段 ``.zoom-*.mp4``（推拉镜头烘在里面），按后缀它就是
-    # 视频，于是这一段永远停不过烘出来时的长度——而那个长度是出片时按
-    # ``max_clip_duration`` 定的。出片时该守那个上限；用户在编辑器里亲手
-    # 拖一段画面的时候不该，他要停多久就是多久。
+    # 为什么：重渲是一次 ffmpeg，几秒起步。挂在拖拽上就是每拖一次卡几秒，
+    # 连着拖几次还会有两次重渲同时在跑、互相盖掉对方的输出——真的发生过，
+    # 场景被指到一个还没写完的文件上，整个编辑器就打不开了。剪辑软件也不
+    # 是这么做的：拖的时候只改数字，真正出片的时候才渲。
     #
-    # ``ensure_image_length`` 找不到原图就原样返回（网上下的视频就是这种），
-    # 所以真·视频走这条路只是多查一次文件名，结果仍旧由下面的
-    # ``normalise_timing`` 夹回素材长度，并且照样报 ``clamped``。
-    if (
-        needed_source is not None
-        and needed_source > source_duration - float(requested_start or 0.0) + 1e-6
-    ):
-        extended = timeline.ensure_image_length(
-            task_id, material, float(requested_start or 0.0) + needed_source
-        )
-        if extended != material:
-            _point_scene_at(task_id, index, extended)
-            material = extended
-            source_duration = timeline.probe_duration(material)
+    # 而且本来就不需要：``build_edit_list`` 在出片时自己会把图片按需要的
+    # 长度重渲一遍（它那边的判断一直是对的——"不是视频，或者原图还在"）。
+    # 所以这里放行、记下来就够了，剩下的交给出片那一步。
+    #
+    # 放行的只有"重渲得出来"的那些。网上下回来的视频没有原图，拉不过自己
+    # 的长度是物理，照旧夹回去并报 ``clamped``。
+    # ``render=True`` 是另一回事：那不是拖拽，是"按旁白铺满"这种一次性的
+    # 批量动作，本来就慢，而且它要的是**现在就**拿到正确长度的素材。
+    may_exceed = False
+    if render:
+        if (
+            needed_source is not None
+            and needed_source > source_duration - float(requested_start or 0.0) + 1e-6
+        ):
+            extended = timeline.ensure_image_length(
+                task_id, material, float(requested_start or 0.0) + needed_source
+            )
+            if extended != material:
+                _point_scene_at(task_id, index, extended)
+                material = extended
+                source_duration = timeline.probe_duration(material)
+    else:
+        may_exceed = timeline.source_image_for(task_id, material) is not None
 
     timing = timeline.normalise_timing(
         source_duration=source_duration,
         trim_start=requested_start,
         duration=requested_duration,
         clip_speed=speed,
+        may_exceed_source=may_exceed,
     )
     # 只把写清单那一下圈进锁里。上面的 ``ensure_image_length`` 可能要重渲一
     # 段画面，拿着锁去做它没必要。
@@ -2169,7 +2179,11 @@ def fit_to_narration(task_id: str) -> dict:
 
     factor = target / total
     for index, held in enumerate(current):
-        update_timing(task_id, index, duration=round(held * factor, 3))
+        # 这条路要的是"现在就把素材渲成对的长度"：它是用户点一下
+        # 的批量动作，不是拖拽。拖拽那条路只记数字。
+        update_timing(
+            task_id, index, duration=round(held * factor, 3), render=True
+        )
 
     logger.info(
         f"fitted {len(scenes)} scenes to {target:.2f}s of narration "
@@ -2184,7 +2198,12 @@ def _point_scene_at(task_id: str, index: int, material_path: str) -> None:
         scenes = scene_manifest.load(task_id)["scenes"]
         if not 0 <= index < len(scenes):
             return
-        scenes[index]["material"] = scene_manifest.relative_media_path(
+        # 绝对路径，和 ``record_prepared_artifacts`` 写进来的那些一致。
+        # **不要**用 ``relative_media_path``：那个函数算的是 ``/stream`` 用
+        # 的 URL 路径（相对于任务根目录，带任务 id 前缀），而清单里的路径是
+        # 由 ``resolve_material`` 读的，它在任务自己的目录里找——于是那种写
+        # 法永远找不到，一拖长就把这一段弄坏。
+        scenes[index]["material"] = scene_manifest.resolve_material(
             task_id, material_path
         )
         scenes[index]["kind"] = scene_manifest.material_kind(material_path)

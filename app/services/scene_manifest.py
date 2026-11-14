@@ -484,6 +484,17 @@ def _resolve_within(
     if not candidate:
         raise SceneError(f"no {label} recorded")
 
+    # ``task_id/name`` 也认。那是 ``relative_media_path`` 为 ``/stream`` 的
+    # URL 算的形状（相对于任务根目录），而这里是相对于任务**自己**的目录；
+    # 有一条写清单的路走错了函数，于是清单里留下了这种前缀。多认一种写法比
+    # 让那些场景永远打不开好，而且只剥掉这一个任务自己的前缀，跨任务的路径
+    # 照旧拒绝。
+    for base_dir in directories:
+        marker = os.path.basename(str(base_dir or "").rstrip("/\\"))
+        if marker and candidate.replace("\\", "/").startswith(f"{marker}/"):
+            candidate = candidate.replace("\\", "/")[len(marker) + 1 :]
+            break
+
     for base_dir in directories:
         if not base_dir:
             continue

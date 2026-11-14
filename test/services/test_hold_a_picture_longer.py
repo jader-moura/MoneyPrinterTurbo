@@ -64,61 +64,77 @@ def a_task(task_root, material="shot.zoom-abc123.mp4"):
 
 
 class TestAPictureBakedAtFiveSecondsCanStillBeHeldLonger:
-    def test_it_re_renders_instead_of_clamping(self, task_root, idle_task):
-        """这就是那个限制：后缀是 .mp4，所以重渲那条路从来没走到过。"""
+    """拖长一张图是**记一个数**，不是跑一次 ffmpeg。
+
+    第一版是在这里就地重渲的，那是错的：一次重渲几秒起步，挂在拖拽上就是
+    每拖一下卡几秒；连着拖几次还会有两次重渲同时在跑，互相盖掉对方的输出，
+    场景被指到一个没写完的文件上，编辑器就打不开了——真的发生过。
+
+    出片那一步（``build_edit_list``）本来就会按需要的长度把图片重渲一遍，
+    所以这里放行就够了。
+    """
+
+    def test_the_longer_hold_is_recorded_and_nothing_is_rendered(
+        self, task_root, idle_task
+    ):
         task_id, material = a_task(task_root)
-        longer = material.replace(".mp4", "-long.mp4")
-        # 清单会把磁盘上不存在的素材丢掉，所以这段"重渲出来的"也要真的在。
-        open(longer, "wb").write(b"a longer clip")
-        lengths = {material: BAKED, longer: 12.0}
-
-        with patch.object(
-            timeline, "probe_duration", side_effect=lambda p: lengths.get(str(p), BAKED)
-        ):
+        with patch.object(timeline, "probe_duration", return_value=BAKED):
             with patch.object(
-                timeline, "ensure_image_length", return_value=longer
-            ) as extend:
-                scene = scene_editor.update_timing(task_id, 0, duration=10.0)
+                timeline, "source_image_for", return_value="a-still.png"
+            ):
+                with patch.object(timeline, "ensure_image_length") as render:
+                    scene = scene_editor.update_timing(task_id, 0, duration=10.0)
 
-        extend.assert_called_once()
-        assert extend.call_args.args[2] == pytest.approx(10.0)
+        render.assert_not_called()
         assert scene["duration"] == pytest.approx(10.0)
         assert not scene.get("clamped")
 
-    def test_the_scene_now_points_at_the_longer_clip(self, task_root, idle_task):
+    def test_the_scene_keeps_pointing_at_the_same_file(self, task_root, idle_task):
+        """没有新文件，所以清单里的素材一个字都不该变。
+
+        第一版在这里改了素材路径，而且用错了函数：``relative_media_path``
+        算的是 ``/stream`` 用的 URL（相对任务根目录，带任务 id 前缀），而
+        清单里的路径由 ``resolve_material`` 读，它在任务自己的目录里找。于
+        是拖长一次就把这一段指到一个解析不出来的地方，之后每次打开都 400。
+        """
         task_id, material = a_task(task_root)
-        longer = material.replace(".mp4", "-long.mp4")
-        # 清单会把磁盘上不存在的素材丢掉，所以这段"重渲出来的"也要真的在。
-        open(longer, "wb").write(b"a longer clip")
-        lengths = {material: BAKED, longer: 12.0}
-
-        with patch.object(
-            timeline, "probe_duration", side_effect=lambda p: lengths.get(str(p), BAKED)
-        ):
-            with patch.object(timeline, "ensure_image_length", return_value=longer):
-                scene_editor.update_timing(task_id, 0, duration=10.0)
-
-        # 清单存的是相对路径，比的是"指向哪个文件"。
-        stored = scene_manifest.load(task_id)["scenes"][0]["material"]
-        assert stored.endswith("shot.zoom-abc123-long.mp4")
-
-    def test_an_in_point_counts_towards_what_is_needed(self, task_root, idle_task):
-        """从第 2 秒开始停 10 秒，要的是 12 秒素材，不是 10 秒。"""
-        task_id, material = a_task(task_root)
-        longer = material.replace(".mp4", "-long.mp4")
-        # 清单会把磁盘上不存在的素材丢掉，所以这段"重渲出来的"也要真的在。
-        open(longer, "wb").write(b"a longer clip")
-        lengths = {material: BAKED, longer: 20.0}
-
-        with patch.object(
-            timeline, "probe_duration", side_effect=lambda p: lengths.get(str(p), BAKED)
-        ):
+        before = scene_manifest.load(task_id)["scenes"][0]["material"]
+        with patch.object(timeline, "probe_duration", return_value=BAKED):
             with patch.object(
-                timeline, "ensure_image_length", return_value=longer
-            ) as extend:
-                scene_editor.update_timing(task_id, 0, trim_start=2.0, duration=10.0)
+                timeline, "source_image_for", return_value="a-still.png"
+            ):
+                scene_editor.update_timing(task_id, 0, duration=10.0)
+        after = scene_manifest.load(task_id)["scenes"][0]["material"]
+        assert after == before
+        # 而且它还要解析得出来，这正是当时坏掉的地方。
+        assert scene_manifest.resolve_material(task_id, after)
 
-        assert extend.call_args.args[2] == pytest.approx(12.0)
+    def test_an_in_point_does_not_eat_into_the_hold(self, task_root, idle_task):
+        task_id, _ = a_task(task_root)
+        with patch.object(timeline, "probe_duration", return_value=BAKED):
+            with patch.object(
+                timeline, "source_image_for", return_value="a-still.png"
+            ):
+                scene = scene_editor.update_timing(
+                    task_id, 0, trim_start=2.0, duration=10.0
+                )
+        assert scene["duration"] == pytest.approx(10.0)
+        assert not scene.get("clamped")
+
+    def test_the_render_is_what_actually_extends_it(self, task_root, idle_task):
+        """放行之后，长出来的那一段由出片那一步渲——这里钉住那一步真的会渲。"""
+        task_id, material = a_task(task_root)
+        scenes = [{"index": 0, "material": material, "duration": 10.0}]
+        with patch.object(timeline, "probe_duration", return_value=BAKED):
+            with patch.object(
+                timeline, "source_image_for", return_value="a-still.png"
+            ):
+                with patch.object(
+                    timeline, "ensure_image_length", return_value="longer.mp4"
+                ) as render:
+                    timeline.build_edit_list(task_id, scenes)
+        render.assert_called_once()
+        assert render.call_args.args[2] == pytest.approx(10.0)
 
 
 class TestTheDragHandleKnowsToo:

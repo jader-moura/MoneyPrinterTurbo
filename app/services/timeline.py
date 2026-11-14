@@ -204,6 +204,7 @@ def normalise_timing(
     trim_start: Any = None,
     duration: Any = None,
     clip_speed: float = 1.0,
+    may_exceed_source: bool = False,
 ) -> dict:
     """把用户拖出来的入点和时长夹进这段素材真实存在的范围。
 
@@ -244,7 +245,7 @@ def normalise_timing(
                 f"got {requested_screen}"
             )
         source_span = requested_screen * speed
-        if source_span > available_source + 1e-6:
+        if source_span > available_source + 1e-6 and not may_exceed_source:
             source_span = available_source
             clamped = True
 
@@ -254,7 +255,12 @@ def normalise_timing(
             f"in-point; at least {MIN_CLIP_DURATION}s is needed"
         )
 
-    end = min(source_duration, start + source_span)
+    # ``may_exceed_source`` 的那些就让出点越过素材长度：这一段会在出片时按
+    # 这个长度重渲，到时候素材自然够长。夹在这里等于把用户刚拖出来的数字又
+    # 改回去，而他并没有做错什么。
+    end = start + source_span if may_exceed_source else min(
+        source_duration, start + source_span
+    )
     return {
         "trim_start": round(start, 3),
         "trim_end": round(end, 3),
