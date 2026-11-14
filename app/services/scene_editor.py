@@ -2072,9 +2072,18 @@ def update_timing(
 
     # 图片素材的源片段是生成时按固定时长烘好的，要停更久必须按新时长重渲。
     # 这里就地重渲并把场景指向新文件，用户才能真的把一张图拉长。
+    #
+    # 判断依据是"有没有原图可以重渲"，**不是**"后缀像不像视频"。生成的图片
+    # 在时间线上是一段 ``.zoom-*.mp4``（推拉镜头烘在里面），按后缀它就是
+    # 视频，于是这一段永远停不过烘出来时的长度——而那个长度是出片时按
+    # ``max_clip_duration`` 定的。出片时该守那个上限；用户在编辑器里亲手
+    # 拖一段画面的时候不该，他要停多久就是多久。
+    #
+    # ``ensure_image_length`` 找不到原图就原样返回（网上下的视频就是这种），
+    # 所以真·视频走这条路只是多查一次文件名，结果仍旧由下面的
+    # ``normalise_timing`` 夹回素材长度，并且照样报 ``clamped``。
     if (
         needed_source is not None
-        and scene_manifest.material_kind(material) != "video"
         and needed_source > source_duration - float(requested_start or 0.0) + 1e-6
     ):
         extended = timeline.ensure_image_length(
