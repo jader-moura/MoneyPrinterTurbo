@@ -57,7 +57,8 @@ const ui = {
   renderTitle: el("render-title"), renderNote: el("render-note"),
   renderBar: el("render-bar"), renderPct: el("render-pct"),
   renderElapsed: el("render-elapsed"), renderHide: el("render-hide"),
-  renderPlay: el("render-play"), renderDone: el("render-done"),
+  renderPlay: el("render-play"), renderReveal: el("render-reveal"),
+  renderDone: el("render-done"),
   effectsToggle: el("effects-toggle"), effectsPanel: el("effects-panel"),
   effectsTransition: el("effects-transition"), effectsMotion: el("effects-motion"),
   effectsApply: el("effects-apply"), effectsOwn: el("effects-own"),
@@ -2978,6 +2979,7 @@ function showRender(stage) {
   ui.renderModal.hidden = false;
   ui.renderBox.classList.remove("failed");
   ui.renderPlay.hidden = true;
+  ui.renderReveal.hidden = true;
   ui.renderDone.hidden = true;
   ui.renderHide.hidden = false;
   ui.renderTitle.textContent = "Rendering your video";
@@ -3056,6 +3058,7 @@ function loseRender(error) {
   ui.renderHide.hidden = true;
   ui.renderDone.hidden = false;
   ui.renderPlay.hidden = true;
+  ui.renderReveal.hidden = true;
   setTitleNote("Render status lost");
   ui.renderTitle.textContent = "Lost track of the render";
   ui.renderNote.textContent = "It was submitted, but this page cannot read its "
@@ -3073,6 +3076,7 @@ function finishRender(task) {
   ui.renderDone.hidden = false;
   // 失败那条路上不能留着"去看成片"：没有成片可看。
   ui.renderPlay.hidden = true;
+  ui.renderReveal.hidden = true;
   ui.renderBox.classList.toggle("failed", !!failed);
   if (failed) {
     ui.renderBar.style.width = "100%";
@@ -3091,6 +3095,7 @@ function finishRender(task) {
   const videos = (task && task.videos) || [];
   if (videos.length) {
     ui.renderPlay.hidden = false;
+    ui.renderReveal.hidden = false;
     state.renderedVideo = String(videos[videos.length - 1]);
   }
 }
@@ -3106,6 +3111,39 @@ ui.renderPlay.addEventListener("click", () => {
   if (!state.renderedVideo) return;
   // 成片由 /tasks 那个静态挂载直接提供，所以这就是一个能打开的地址。
   window.open(state.renderedVideo, "_blank", "noopener");
+});
+
+// 在资源管理器/访达里把成片指出来。
+//
+// 这件事只能由服务端做：网页打不开本机的文件管理器，而这个 API 就跑在同一
+// 台机器上。递过去的是**文件名**，不是路径——能开哪个由服务端在任务目录里
+// 自己解析。
+ui.renderReveal.addEventListener("click", async () => {
+  if (!state.renderedVideo) return;
+  const name = decodeURIComponent(
+    String(state.renderedVideo).split("?")[0].split("/").pop() || ""
+  );
+  ui.renderReveal.disabled = true;
+  try {
+    const answer = await call(
+      "POST", `/tasks/${encodeURIComponent(state.taskId)}/reveal`, { file: name });
+    if (answer && answer.opened) return;
+    // 开不了窗（没桌面、或者这个页面开在另一台机器上）时不报错：把路径摆
+    // 出来，用户自己复制就行，而一句"失败了"帮不上任何忙。
+    const where = String((answer && answer.path) || "");
+    ui.renderNote.textContent = `The video is at ${where}`
+      + (answer && answer.reason ? ` — ${answer.reason}.` : ".");
+    if (where && navigator.clipboard) {
+      try {
+        await navigator.clipboard.writeText(where);
+        ui.renderNote.textContent += " Copied the path.";
+      } catch { /* 没有剪贴板权限就算了，路径已经显示出来了 */ }
+    }
+  } catch (error) {
+    ui.renderNote.textContent = String(error.message || error);
+  } finally {
+    ui.renderReveal.disabled = false;
+  }
 });
 
 /* ---------- 做过的片子 ----------

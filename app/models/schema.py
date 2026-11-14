@@ -847,6 +847,17 @@ class SceneTimingRequest(BaseModel):
     reset: bool = False
 
 
+class RevealRequest(BaseModel):
+    """在文件管理器里指出这条任务的某个文件。
+
+    ``file`` 是**文件名**，不是路径：这个接口能让服务端在桌面上开一个窗口，
+    所以能开哪个由服务端自己在任务目录里解析，不接受调用方递过来的路径。
+    留空就打开任务目录本身。
+    """
+
+    file: Optional[str] = Field(default="", max_length=255)
+
+
 class SceneReorderRequest(BaseModel):
     """``order`` 必须是 0..N-1 的完整排列，不接受部分顺序。"""
 

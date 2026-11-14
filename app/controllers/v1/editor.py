@@ -34,6 +34,7 @@ from app.models.schema import (
     BackgroundMusicRequest,
     BackgroundMusicResponse,
     CutSoundRequest,
+    RevealRequest,
     VideoEffectsRequest,
     SubtitleEditRequest,
     SubtitleStyleRequest,
@@ -63,6 +64,7 @@ from app.controllers.manager.base_manager import TaskQueueFullError
 from app.services import bgm as bgm_service
 from app.services import transition_sound as transition_sound_service
 from app.services import publish_metadata
+from app.services import reveal
 from app.services import scene_editor, scene_manifest, scene_regen_queue
 from app.services import state as sm
 from app.services import task as tm
@@ -981,6 +983,36 @@ def timeline_state(request: Request, task_id: str = Path(..., description="Task 
         lambda: scene_editor.describe(task_id, _endpoint(), with_timing=True),
     )
     return utils.get_response(200, data)
+
+
+@router.post(
+    "/tasks/{task_id}/reveal",
+    summary="Show one of this task's files in the file manager",
+)
+def reveal_file(
+    request: Request,
+    body: RevealRequest,
+    task_id: str = Path(..., description="Task ID"),
+):
+    """把成片在资源管理器/访达里指出来。
+
+    网页自己做不到这件事（也不该做到），但这个 API 和那个文件管理器在同一
+    台机器上。两道闸在 ``reveal`` 里：文件必须是这条任务的，请求必须来自
+    本机。开不了的时候不报错，返回路径让界面显示出来——用户复制一下就行，
+    而一个红字的失败提示帮不上任何忙。
+    """
+    request_id = base.get_task_id(request)
+    _require_task(task_id, request_id)
+    answer = _handle(
+        task_id,
+        request_id,
+        lambda: reveal.reveal(
+            task_id,
+            str(body.file or ""),
+            client=(request.client.host if request.client else None),
+        ),
+    )
+    return utils.get_response(200, answer)
 
 
 @router.post(
