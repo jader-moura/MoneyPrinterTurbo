@@ -190,6 +190,7 @@ class TestQueueingDoesNotBlock:
         ]
         for job in jobs:
             finished(job["id"])
+            drain()
 
         assert generator.most_at_once == 1
         assert generator.calls == ["term-0", "term-1", "term-2", "term-3"]
@@ -510,3 +511,142 @@ class TestOverHttp:
         assert refused.status_code == 400, refused.text
         assert "bauhaus" in refused.text
         assert generator.calls == []
+
+
+def drain():
+    """等到队列真的空了。
+
+    写提示词那种活会**接着**排一个出图的活，所以只等写完是不够的：
+    那个出图的活会在用例的 patch 撤掉之后才跑，于是拿着真的出图器
+    跑，把工作线程占很久，下一个用例就超时了。
+    """
+    wait_until(
+        lambda: not scene_regen_queue.snapshot()["busy"],
+        what="the queue to drain",
+    )
+
+
+class TestWritingAPromptIsAJobToo:
+    """写提示词和出图排同一条队。
+
+    为什么：两件事抢同一块显卡。写词要让 ollama 把 14B 装进显存，而出图那边
+    正占着 10 GB——同时跑轻则两边都慢，重则谁都装不下。这台机器上真的发生过
+    （见 MEMORY.md 里那条"本地服务共用一块 GPU"）。
+
+    写完会**接着**排一个出图的活：写提示词几乎永远是为了换一张图，而那张图
+    同样不能和别的出图撞车。
+    """
+
+    def test_it_lands_in_the_same_queue(self, task_root, idle_task, generator):
+        task_id, _ = _reviewed_task(task_root, "prompt-queued")
+        with patch.object(
+            scene_editor, "suggest_image_prompt", return_value="a new prompt"
+        ):
+            job = scene_regen_queue.enqueue_prompt(task_id, 0, direction="at night")
+            assert job["kind"] == "prompt"
+            finished(job["id"])
+            drain()
+
+    def test_the_words_are_saved_without_the_browser(self, task_root, idle_task, generator):
+        """活跑的时候那个页面可能已经关了，写好的提示词不该跟着没了。"""
+        task_id, _ = _reviewed_task(task_root, "prompt-saved")
+        with patch.object(
+            scene_editor, "suggest_image_prompt", return_value="a new prompt"
+        ):
+            job = scene_regen_queue.enqueue_prompt(task_id, 0)
+            finished(job["id"])
+            drain()
+        saved = scene_manifest.load(task_id)["scenes"][0]["keyword"]
+        assert saved == "a new prompt"
+
+    def test_the_picture_is_queued_after_the_words(self, task_root, idle_task, generator):
+        task_id, _ = _reviewed_task(task_root, "prompt-then-picture")
+        with patch.object(
+            scene_editor, "suggest_image_prompt", return_value="a new prompt"
+        ):
+            job = scene_regen_queue.enqueue_prompt(task_id, 0)
+            finished(job["id"])
+            drain()
+            drawing = wait_until(
+                lambda: next(
+                    (
+                        one
+                        for one in scene_regen_queue.snapshot(task_id)["jobs"]
+                        if one["kind"] == "material"
+                    ),
+                    None,
+                ),
+                what="the picture to be queued after the prompt",
+            )
+            finished(drawing["id"])
+            drain()
+        # 画的是刚写出来的那句话，不是原来那句。
+        assert drawing["keyword"] == "a new prompt"
+
+    def test_the_two_never_run_at_the_same_time(self, task_root, idle_task, generator):
+        """这就是整件事的理由。"""
+        overlapping = []
+        running = {"now": 0}
+
+        def busy_suggest(task_id, index, **kwargs):
+            running["now"] += 1
+            if running["now"] > 1:
+                overlapping.append("prompt")
+            time.sleep(0.3)
+            running["now"] -= 1
+            return "a new prompt"
+
+        def busy_draw(**kwargs):
+            running["now"] += 1
+            if running["now"] > 1:
+                overlapping.append("picture")
+            time.sleep(0.3)
+            running["now"] -= 1
+            raise scene_editor.SceneError("stop here, the timing is the point")
+
+        task_id, _ = _reviewed_task(task_root, "no-overlap")
+        with patch.object(scene_editor, "suggest_image_prompt", busy_suggest):
+            with patch.object(material, "download_videos", busy_draw):
+                first = scene_regen_queue.enqueue_prompt(task_id, 0)
+                second = scene_regen_queue.enqueue_prompt(task_id, 1)
+                finished(first["id"])
+                finished(second["id"])
+                drain()
+        assert overlapping == []
+
+    def test_a_prompt_that_fails_draws_nothing(self, task_root, idle_task, generator):
+        """凭旧提示词出一张图不是用户要的东西。"""
+        task_id, _ = _reviewed_task(task_root, "prompt-failed")
+        with patch.object(
+            scene_editor,
+            "suggest_image_prompt",
+            side_effect=scene_editor.SceneError("the model said nothing"),
+        ):
+            job = scene_regen_queue.enqueue_prompt(task_id, 0)
+            record = finished(job["id"])
+            drain()
+        assert record["state"] == "failed"
+        assert "the model said nothing" in record["error"]
+        assert generator.calls == []
+
+    def test_the_failure_is_in_words_the_user_can_act_on(self, task_root, idle_task, generator):
+        task_id, _ = _reviewed_task(task_root, "prompt-reason")
+        with patch.object(
+            scene_editor,
+            "suggest_image_prompt",
+            side_effect=scene_editor.SceneError(
+                "ollama is not answering on http://127.0.0.1:11434"
+            ),
+        ):
+            job = scene_regen_queue.enqueue_prompt(task_id, 0)
+            record = finished(job["id"])
+            drain()
+        assert "11434" in record["error"]
+
+    def test_drawing_jobs_still_say_they_are_drawing(self, task_root, idle_task, generator):
+        """加了一种活，原来那种的样子不能变。"""
+        task_id, _ = _reviewed_task(task_root, "drawing-unchanged")
+        job = scene_regen_queue.enqueue(task_id, 0, keyword="a comet")
+        record = finished(job["id"])
+        assert record["kind"] == "material"
+        assert record["state"] == "done"

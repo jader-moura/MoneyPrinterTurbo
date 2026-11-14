@@ -1381,7 +1381,9 @@ class TestTheEditorAsksForIt:
 
         from app.services import scene_regen_queue
 
-        source = inspect.getsource(scene_regen_queue._run)
+        # 出图那种活现在在 ``_run_material`` 里：队列里多了一种活
+        # （写提示词），``_run`` 只负责分派。
+        source = inspect.getsource(scene_regen_queue._run_material)
         assert "if job.from_photo:" in source
         assert "find_reference_photo" in source
         # 找照片必须在出图之前：找不到就不该出一张没有底图的图。

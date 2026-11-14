@@ -796,6 +796,44 @@ def suggest_scene_prompt(
 
 
 @router.post(
+    "/tasks/{task_id}/scenes/{index}/prompt/queue",
+    response_model=SceneRegenJobResponse,
+    summary="Queue the model writing this scene's picture prompt",
+)
+def queue_scene_prompt(
+    request: Request,
+    body: ScenePromptSuggestRequest,
+    task_id: str = Path(..., description="Task ID"),
+    index: int = Path(..., ge=0, description="Scene index"),
+):
+    """排队写提示词，而不是当场写。
+
+    为什么排队：写提示词用的是本机那个语言模型，出图用的是本机那块显卡，
+    是同一块。一边在出图、一边让 ollama 把 14B 装进显存，轻则两边都慢，
+    重则谁都装不下——这台机器上两件事同时发生过，代价是整条队列都卡住。
+
+    写完之后这一段的出图会**接着**排进同一条队，所以"写词 → 出图"是两个
+    看得见的活，而不是一次说不清在干什么的等待。
+
+    同步那条路（``POST .../prompt``）一个字没动：它不写盘，调用方自己决定
+    要不要留下来。界面走的是这一条。
+    """
+    request_id = base.get_task_id(request)
+    _require_task(task_id, request_id)
+    job = _handle(
+        task_id,
+        request_id,
+        lambda: scene_regen_queue.enqueue_prompt(
+            task_id,
+            index,
+            direction=str(body.direction or ""),
+            current=str(body.current or ""),
+        ),
+    )
+    return utils.get_response(200, job)
+
+
+@router.post(
     "/tasks/{task_id}/scenes/{index}/material/queue",
     response_model=SceneRegenJobResponse,
     summary="Queue a regeneration of one scene's material",

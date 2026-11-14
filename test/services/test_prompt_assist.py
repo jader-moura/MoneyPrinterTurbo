@@ -312,206 +312,19 @@ class TestWritingItByHandStillWorks:
         assert draft < widget, "草稿要在关键词框创建之前填进 session_state"
 
 
-class TestTheTimelineEditorHasItToo:
-    """用户实际用的是嵌在面板里的时间线编辑器（API 起着的时候）。
+class TestTheTimelineEditorAsksTheQueue:
+    """用户实际用的是嵌在面板里的时间线编辑器。
 
-    ``webui/review.py`` 里那份逐段列表只在 API 连不上时才画，所以光加在那边
-    等于大多数时候都看不见。这里钉的是另一半：编辑器调的是哪条路由、写出来
-    的字填回哪个框，以及手写那条路没被动过。
-    """
+    写提示词现在是**队列里的一个活**，不是这个页面自己发的一次请求。理由是
+    本机这两件事抢同一块显卡：写词要让 ollama 把模型装进显存，出图那边正占
+    着 10 GB。排同一条队就不会撞上。
 
-    SOURCE = "resource/public/editor/editor.js"
-
-    @staticmethod
-    def _editor_source() -> str:
-        from pathlib import Path
-
-        root = Path(__file__).parent.parent.parent
-        return (root / "resource" / "public" / "editor" / "editor.js").read_text(
-            encoding="utf-8"
-        )
-
-    def test_it_calls_the_prompt_route(self):
-        source = self._editor_source()
-        # 下标在等模型的那几十秒里会变（插一段、删一段），所以发请求前按身份
-        # 重算一次，而不是用接管时记下的那个。
-        assert "`${scenePath(at)}/prompt`" in source
-        assert "drawPromptAssist(scene, keyword.input)" in source
-
-    def test_what_the_model_writes_goes_into_the_prompt_box(self):
-        """存和重出读的都是那个框，所以写到别处等于写了个寂寞。"""
-        source = self._editor_source()
-        assert "live.input.value = written;" in source
-
-    def test_there_is_a_way_back(self):
-        """一下子换掉一整条，被顶掉的可能是用户写了很久的那条。"""
-        source = self._editor_source()
-        assert 'button("Undo"' in source
-        assert 'assistState(id).undo = String(scene.keyword || "");' in source
-
-    def test_saving_and_redrawing_by_hand_are_untouched(self):
-        source = self._editor_source()
-        assert '"Save prompt"' in source
-        assert 'call("PUT", scenePath(scene.index), { keyword: keyword.input.value })' in (
-            source
-        )
-
-    def test_the_route_exists_on_the_api(self):
-        from app.controllers.v1 import editor as editor_routes
-
-        paths = {route.path for route in editor_routes.router.routes}
-        assert "/api/v1/tasks/{task_id}/scenes/{index}/prompt" in paths
-
-
-class TestWritingKeepsGoingWhenYouLookElsewhere:
-    """写一条要等模型几十秒，这中间用户会去改别的段落。
-
-    等的时候换一段，整个 inspector 会被重画：那个输入框和那一小块都被摘下来
-    换成新的。所以"写"这件事不能活在那一块的闭包里——第一版就是这样，于是换
-    一段等于把刚等了半分钟的那一条扔掉，而且扔得无声无息。
+    顺带解决了老问题："等的时候换一段"不再需要任何特殊处理——活在服务端，
+    页面关掉再打开都还在。
     """
 
     @staticmethod
-    def _editor_source() -> str:
-        from pathlib import Path
-
-        root = Path(__file__).parent.parent.parent
-        return (root / "resource" / "public" / "editor" / "editor.js").read_text(
-            encoding="utf-8"
-        )
-
-    def test_the_writing_is_started_outside_that_little_block(self):
-        source = self._editor_source()
-        assert "function startPromptWrite(id, direction, current)" in source
-        assert "startPromptWrite(id, direction.input.value, input.value);" in source
-
-    def test_it_does_not_wait_for_the_model_inside_the_click(self):
-        """点击处理函数里一 ``await`` 就把结果绑死在这一块上了。"""
-        source = self._editor_source()
-        start = source.index('button("Write the prompt"')
-        end = source.index("const row", start)
-        assert "await" not in source[start:end]
-
-    def test_what_it_writes_is_saved_without_that_box(self):
-        """框已经不在了也要存下去，不然写好的那一条只活在内存里。"""
-        source = self._editor_source()
-        assert "async function applyWrittenPrompt(id, written)" in source
-        assert 'await call("PUT", scenePath(at), { keyword: written });' in source
-
-    def test_each_scene_keeps_its_own_progress(self):
-        """换回来时那句小字、撤销内容、"正在写"都得还在。"""
-        source = self._editor_source()
-        assert "const promptAssists = new Map();" in source
-        assert "function assistState(id)" in source
-        assert "const state_ = assistState(id);" in source
-
-    def test_the_same_scene_is_not_written_twice_at_once(self):
-        source = self._editor_source()
-        assert "const promptWrites = new Set();" in source
-        assert "if (promptWrites.has(id)) return;" in source
-
-    def test_finishing_while_you_are_elsewhere_is_said_out_loud(self):
-        """那一小块不在屏上，所以写完、写崩了都要在横幅上说一声。"""
-        source = self._editor_source()
-        assert "function announcePromptWrite(id, error)" in source
-        assert "announcePromptWrite(id, null);" in source
-        assert "announcePromptWrite(id, assist.note);" in source
-
-    def test_landing_it_does_not_redraw_the_whole_screen(self):
-        """别处正在打字的框会被整屏重画连光标一起换掉。"""
-        source = self._editor_source()
-        assert "function relabelClip(at)" in source
-        landed = source.index("async function applyWrittenPrompt")
-        end = source.index("function announcePromptWrite", landed)
-        assert "draw()" not in source[landed:end]
-        assert "relabelClip(at);" in source[landed:end]
-
-
-class TestAskingForADifferentIdea:
-    """用户的原话："we have the write the prompt option, but we also should
-    have a button to get a new image prompt suggestion"。
-
-    原来只有一个按钮，而它总是把框里那条一起递过去，所以它做的是"把这句话
-    写好"。想换个**想法**的人得先自己把框清空——那是猜不出来的。
-
-    两个按钮走的是同一条路，差别只有一个：递不递现有那条。
-    """
-
-    @staticmethod
-    def _source() -> str:
-        from pathlib import Path
-
-        root = Path(__file__).resolve().parents[2]
-        return (root / "resource" / "public" / "editor" / "editor.js").read_text(
-            encoding="utf-8"
-        )
-
-    @staticmethod
-    def _drawer(source: str) -> str:
-        start = source.index("function drawPromptAssist(")
-        return source[start : source.index("/* ---------- inspector ----------", start)]
-
-    def test_there_are_two_buttons_now(self):
-        drawer = self._drawer(self._source())
-        assert 'button("Write the prompt"' in drawer
-        assert 'button("Suggest another"' in drawer
-
-    def test_suggesting_does_not_hand_over_the_current_prompt(self):
-        """这就是两者唯一的区别：不给它，它就重新想。"""
-        drawer = self._drawer(self._source())
-        start = drawer.index('button("Suggest another"')
-        assert 'startPromptWrite(id, direction.input.value, "")' in drawer[start:start + 400]
-
-    def test_writing_still_hands_it_over(self):
-        drawer = self._drawer(self._source())
-        start = drawer.index('button("Write the prompt"')
-        assert (
-            "startPromptWrite(id, direction.input.value, input.value)"
-            in drawer[start : start + 400]
-        )
-
-    def test_a_typed_direction_is_honoured_by_both(self):
-        """"再想一个，但要晚上的"——方向两边都该带上。"""
-        drawer = self._drawer(self._source())
-        assert drawer.count("direction.input.value") >= 2
-
-    def test_only_one_can_run_at_a_time(self):
-        """一段一次只写一条，所以两个按钮共用同一个"忙"。"""
-        drawer = self._drawer(self._source())
-        assert "suggest.disabled = busy" in drawer
-
-    def test_which_one_happened_is_said_differently(self):
-        source = self._source()
-        start = source.index("function startPromptWrite(")
-        body = source[start : start + 2000]
-        assert "const fresh = !String(current || \"\").trim()" in body
-        assert "A different idea" in body
-
-    def test_the_signature_did_not_grow_a_flag(self):
-        """哪一种是**看参数**看出来的，不是多传一个布尔。
-
-        这一条和上面那条 ``test_the_writing_is_started_outside_that_little_block``
-        钉的是同一个签名；那条是早就有的，这里写出来是为了说明理由：没把
-        现有提示词递过去，本身就已经是"重新想一条"的意思了。
-        """
-        assert "function startPromptWrite(id, direction, current)" in self._source()
-
-    def test_the_hint_explains_the_difference(self):
-        """两个按钮摆在一起，不说清楚就只能靠猜。"""
-        drawer = self._drawer(self._source())
-        assert "ignores the box" in drawer
-
-
-class TestPromptWritingShowsUpInTheQueue:
-    """用户的原话："The prompt regenerations should come to the
-    regeneration timeline we have in the modal, so I know what is queue"。
-
-    写提示词和重画图片是两种活，但用户问的是同一个问题：现在有什么在
-    跑。原来写提示词只在那一段自己的抽屉里说一句话，换一段就看不见了。
-    """
-
-    @staticmethod
-    def _source() -> str:
+    def _editor() -> str:
         from pathlib import Path
 
         root = Path(__file__).resolve().parents[2]
@@ -520,121 +333,78 @@ class TestPromptWritingShowsUpInTheQueue:
         )
 
     @classmethod
-    def _draw_queue(cls) -> str:
-        source = cls._source()
-        start = source.index("function drawQueue()")
-        opened = source.index("{", start)
-        depth = 0
-        for at in range(opened, len(source)):
-            if source[at] == "{":
-                depth += 1
-            elif source[at] == "}":
-                depth -= 1
-                if depth == 0:
-                    return source[opened : at + 1]
-        raise AssertionError("drawQueue has unbalanced braces")
+    def _writer(cls) -> str:
+        source = cls._editor()
+        start = source.index("async function startPromptWrite(")
+        return source[start : source.index("\n}", start)]
 
-    def test_the_strip_opens_for_a_prompt_even_with_no_picture_jobs(self):
-        """一张图都没在重画的时候，写提示词也得显示出来。"""
-        body = self._draw_queue()
-        assert "!jobs.length && !writing.length" in body
+    def test_it_queues_instead_of_writing_there_and_then(self):
+        assert "/prompt/queue" in self._writer()
 
-    def test_a_row_says_it_is_writing_and_for_how_long(self):
-        body = self._draw_queue()
-        assert "writing a prompt" in body
-        assert "Date.now() - since" in body
+    def test_the_old_direct_route_is_not_what_the_editor_calls(self):
+        """同步那条路还在（别的调用方可以用），但界面不该再走它。"""
+        source = self._editor()
+        assert "`${scenePath(at)}/prompt`" not in source
 
-    def test_the_collapsed_summary_counts_them(self):
-        """折起来的时候那一行是唯一看得见的东西。"""
-        body = self._draw_queue()
-        assert "being written" in body
+    def test_it_sends_both_halves_of_the_ask(self):
+        body = self._writer()
+        assert "{ direction, current }" in body
 
-    def test_a_deleted_scene_does_not_borrow_someone_else_s_number(self):
-        body = self._draw_queue()
-        start = body.index("writing a prompt")
-        assert "A deleted scene" in body[max(0, start - 500) : start]
+    def test_undo_is_captured_before_the_job_is_queued(self):
+        """撤销的底要留在**按下去的那一刻**：那时框里是什么，撤销就还原成什么。
 
-    def test_there_is_no_cancel_button_on_them(self):
-        """请求已经发出去了，撤不回来。给个假的按钮更差。"""
-        body = self._draw_queue()
-        # 写提示词那几条在最后，所以从它们开始到函数末尾都是它们。
-        writing_loop = body[body.index("for (const { id, since } of writing)") :]
-        assert "button(" not in writing_loop
+        活可能几分钟后才跑，那时框里早就不是这句话了。
+        """
+        body = self._writer()
+        assert body.index("assist.undo = String(scene.keyword") < body.index(
+            "/prompt/queue"
+        )
 
-    def test_the_seconds_only_tick_while_something_is_writing(self):
-        """服务端那条轮询不知道这些活，所以这里自己跳；完了就停。"""
-        source = self._source()
-        start = source.index("function watchPromptRows()")
-        body = source[start : start + 600]
-        assert "setInterval(drawQueue, 1000)" in body
-        assert "clearInterval(promptTicker)" in body
+    def test_a_scene_that_is_gone_is_said_so_not_queued(self):
+        body = self._writer()
+        assert "no longer in the timeline" in body
 
-    def test_it_starts_and_stops_with_the_write(self):
-        source = self._source()
-        start = source.index("function startPromptWrite(")
-        body = source[start : start + 2200]
-        assert body.count("watchPromptRows()") == 2
+    def test_the_queue_is_refreshed_so_the_row_shows_up(self):
+        body = self._writer()
+        assert "fetchQueue()" in body
+        assert "watchQueue()" in body
 
 
-class TestWhatHappensWhenTheWordsLand:
-    """用户的原话："when the 'write the prompt' or 'suggest another
-    prompt' finishes would be good if we regenerate the image automatically"。
-
-    写提示词几乎永远是为了换一张图。让用户再点一下"重出一张"只是多
-    一步，而那一步没有第二种答案。
-    """
+class TestTheDrawerReadsTheQueue:
+    """那一小块的状态不再是这个页面自己记的，而是从队列读的。"""
 
     @staticmethod
-    def _body() -> str:
+    def _editor() -> str:
         from pathlib import Path
 
         root = Path(__file__).resolve().parents[2]
-        source = (root / "resource" / "public" / "editor" / "editor.js").read_text(
+        return (root / "resource" / "public" / "editor" / "editor.js").read_text(
             encoding="utf-8"
         )
-        start = source.index("function startPromptWrite(")
-        return source[start : source.index("function drawPromptAssist(", start)]
 
-    def test_the_picture_is_queued_as_soon_as_the_prompt_lands(self):
-        body = self._body()
-        assert "queueRegeneration(" in body
-        # 写进去之后才排，不然排的是旧那条。
-        assert body.index("applyWrittenPrompt(id, written)") < body.index(
-            "queueRegeneration("
-        )
+    def test_the_old_local_set_is_gone(self):
+        """``promptWrites`` 是旧设计的核心，现在不该还有人记这件事。"""
+        assert "promptWrites" not in self._editor()
 
-    def test_it_draws_the_words_that_were_just_written(self):
-        body = self._body()
-        start = body.index("queueRegeneration(")
-        assert "written" in body[start : start + 160]
+    def test_busy_comes_from_the_queue(self):
+        source = self._editor()
+        assert "const busy = !!promptJobFor(id);" in source
 
-    def test_it_keeps_that_scene_s_own_style(self):
-        """漫画片里補出一张油画就是这么来的。"""
-        body = self._body()
-        start = body.index("queueRegeneration(")
-        assert "scene.image_style" in body[start : start + 160]
+    def test_it_looks_for_this_scene_s_prompt_job(self):
+        source = self._editor()
+        start = source.index("function promptJobFor(")
+        body = source[start : start + 500]
+        assert 'job.kind === "prompt"' in body
+        assert "jobScene(job) === at" in body
+        # 排着的和正在写的都算忙。
+        assert '"queued"' in body and '"running"' in body
 
-    def test_it_looks_up_where_the_scene_is_now(self):
-        """写的那几秒里用户完全可能把这一段拖到别处去了。"""
-        body = self._body()
-        start = body.index("queueRegeneration(")
-        before = body[:start]
-        assert before.rindex("sceneIndexById(id)") > before.index(
-            "applyWrittenPrompt(id, written)"
-        )
-
-    def test_a_scene_that_is_gone_queues_nothing(self):
-        body = self._body()
-        assert "if (scene) {" in body
-
-    def test_the_note_says_it_is_redrawing_and_how_to_stop_it(self):
-        """自动发生的事情要说出来，并且要告诉用户怎么反悔。"""
-        body = self._body()
-        assert "Redrawing the picture now" in body
-        assert "cancel it in the queue" in body
+    def test_the_button_says_queued_not_writing(self):
+        """它可能根本还没开始写——前面也许还排着两张图。"""
+        assert '"In the queue…"' in self._editor()
 
 
-class TestWhereThosePromptRowsSit:
+class TestTheQueueRowSaysWhichKindOfWork:
     @staticmethod
     def _draw_queue() -> str:
         from pathlib import Path
@@ -655,10 +425,29 @@ class TestWhereThosePromptRowsSit:
                     return source[opened : at + 1]
         raise AssertionError("drawQueue has unbalanced braces")
 
-    def test_they_come_after_the_pictures_not_before(self):
-        """用户盯这条看的是"我的图画到哪了"。写提示词是顺带发生的事，
-        摆在最上面就是每写一条就把真正在等的那几张往下挤一行。"""
+    def test_a_prompt_job_does_not_say_generating(self):
+        """两种活排同一条队，所以这一行必须分得出来是哪一种。"""
         body = self._draw_queue()
-        assert body.index("for (const job of jobs)") < body.index(
-            "for (const { id, since } of writing)"
-        )
+        assert 'const writingOne = job.kind === "prompt";' in body
+        assert "writing a prompt" in body
+
+    def test_waiting_says_what_it_is_waiting_to_do(self):
+        assert "waiting to write the prompt" in self._draw_queue()
+
+    def test_a_finished_prompt_does_not_claim_a_picture_was_redrawn(self):
+        assert "prompt written in" in self._draw_queue()
+
+    def test_prompt_jobs_are_ordinary_rows(self):
+        """它们现在走和出图一样的那条渲染路径。
+
+        上一版是手写的一段循环，而那段循环被我插错了地方——插进了行的点击
+        回调里，语法没错，所以 node --check 和一条"它在文件里靠后"的断言都
+        没发现。现在没有那段循环了。
+        """
+        body = self._draw_queue()
+        assert "for (const { id, since } of writing)" not in body
+
+    def test_the_summary_counts_the_prompts_too(self):
+        body = self._draw_queue()
+        assert "being written" in body
+        assert 'job.kind === "prompt"' in body

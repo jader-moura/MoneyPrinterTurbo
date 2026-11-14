@@ -63,6 +63,12 @@ CANCELLED = "cancelled"
 _HISTORY_LIMIT = 40
 
 
+# 两种活。``material`` 是一直都有的那种（出一张图），``prompt`` 是让模型
+# 写这一段的提示词。排同一条队、同一个工作线程，所以永远不会同时发生。
+MATERIAL = "material"
+PROMPT = "prompt"
+
+
 class _Job:
     """一次重生成。字段都是普通值，方便直接发给界面。"""
 
@@ -82,6 +88,9 @@ class _Job:
         "from_photo",
         "search",
         "strength",
+        "kind",
+        "direction",
+        "prompt",
         "reference",
     )
 
@@ -96,6 +105,8 @@ class _Job:
         from_photo: bool = False,
         search: str = "",
         strength: Optional[float] = None,
+        kind: str = MATERIAL,
+        direction: str = "",
     ) -> None:
         self.id = uuid.uuid4().hex[:12]
         self.task_id = task_id
@@ -122,6 +133,13 @@ class _Job:
         self.search = str(search or "")
         # 这一张要保留多少照片。None = 用配置里那个。
         self.strength = None if strength is None else float(strength)
+        # 这个活是"写提示词"还是"出图"。两种活排同一条队，因为它们抢同一块
+        # 显卡：写提示词要让 ollama 把模型装进显存，而出图那边 16 GB 已经被
+        # 占着——同时跑就是两边都变慢，或者直接 OOM。
+        self.kind = str(kind or MATERIAL)
+        self.direction = str(direction or "")
+        # 写出来的那句话。出图那种活一直是空的。
+        self.prompt = ""
         # 真的找到的那一张（``reference_image.Reference.payload()``）。找到之后
         # 才有，界面拿它显示"搜的是什么词、照片来自哪个网站"。
         self.reference: Optional[dict] = None
@@ -159,6 +177,9 @@ class _Job:
             "from_photo": self.from_photo,
             "search": self.search,
             "strength": self.strength,
+            "kind": self.kind,
+            "direction": self.direction,
+            "prompt": self.prompt,
             "reference": self.reference,
         }
 
@@ -207,16 +228,11 @@ def enqueue(
     id -- happens here, synchronously, so the caller is told now instead of
     minutes later as if the generator had failed.
     """
-    plan = scene_editor.check_regenerate(
-        task_id, index, keyword=keyword, image_style=image_style
-    )
-    job = _Job(
-        task_id=task_id,
-        index=plan["index"],
-        keyword=plan["keyword"],
+    job = _material_job(
+        task_id,
+        index,
+        keyword=keyword,
         image_style=image_style,
-        anchor=plan["scene_id"],
-        material=plan["material"],
         from_photo=from_photo,
         search=search,
         strength=strength,
@@ -229,6 +245,81 @@ def enqueue(
     logger.info(
         f"queued a regeneration of scene {job.index} of task {task_id} "
         f"with keyword {job.keyword!r} (position {position})"
+    )
+    return job.payload(position)
+
+
+def _material_job(
+    task_id: str,
+    index: Any,
+    *,
+    keyword: Optional[str] = None,
+    image_style: Optional[str] = None,
+    from_photo: bool = False,
+    search: str = "",
+    strength: Optional[float] = None,
+) -> _Job:
+    """一个出图的活，验过的。入队由调用方做——写提示词那条路要把"入队"和
+    "这个活完成了"放进同一次加锁里。"""
+    plan = scene_editor.check_regenerate(
+        task_id, index, keyword=keyword, image_style=image_style
+    )
+    return _Job(
+        task_id=task_id,
+        index=plan["index"],
+        keyword=plan["keyword"],
+        image_style=image_style,
+        anchor=plan["scene_id"],
+        material=plan["material"],
+        from_photo=from_photo,
+        search=search,
+        strength=strength,
+    )
+
+
+def enqueue_prompt(
+    task_id: str,
+    index: Any,
+    *,
+    direction: str = "",
+    current: str = "",
+    image_style: Optional[str] = None,
+) -> dict:
+    """把"写这一段的提示词"排进队列。
+
+    为什么要排队：写提示词是本机那个语言模型干的活，而出图是本机那块显卡
+    干的活——同一块。一边在出图、一边让 ollama 把 14B 装进显存，轻则两边
+    都慢，重则谁都装不下。排成一条就不会撞上。
+
+    写完之后这一段会**接着**排一个出图的活：写提示词几乎永远是为了换一张
+    图，而那张图同样不能和别的出图撞车。两个活分开排，所以队列上看得见
+    "在写词"和"在出图"是两件事，各有各的进度。
+
+    ``current`` 留空就是"重新想一条"，给了就是"把这条写好"——和那两个按钮
+    是同一件事的两头。
+    """
+    # 下标和任务状态先验掉。排得进去再说"这一段不存在"毫无意义。
+    scenes = scene_manifest.load(task_id)["scenes"]
+    position_in_list = scene_editor._scene_at(scenes, index)
+    scene = scenes[position_in_list]
+    job = _Job(
+        task_id=task_id,
+        index=position_in_list,
+        keyword=str(current or ""),
+        image_style=image_style,
+        anchor=scene_manifest.scene_id(scene),
+        material=str(scene.get("material") or ""),
+        kind=PROMPT,
+        direction=str(direction or ""),
+    )
+    with _LOCK:
+        _QUEUE.append(job)
+        position = len(_QUEUE)
+        _ensure_worker()
+        _READY.notify()
+    logger.info(
+        f"queued a prompt for scene {job.index} of task {task_id} "
+        f"(position {position})"
     )
     return job.payload(position)
 
@@ -454,6 +545,77 @@ def _work() -> None:
 
 
 def _run(job: _Job) -> None:
+    if job.kind == PROMPT:
+        _run_prompt(job)
+        return
+    _run_material(job)
+
+
+def _run_prompt(job: _Job) -> None:
+    """写这一段的提示词，存下来，然后把出图排在后面。
+
+    存盘在这里做，不在界面那边：这个活跑的时候那个页面可能已经关了，而写
+    好的提示词不该跟着没了。
+    """
+    global _RUNNING
+    follow_up = None
+    try:
+        written = scene_editor.suggest_image_prompt(
+            job.task_id,
+            job.index,
+            direction=job.direction,
+            current=job.keyword,
+        )
+        scene_editor.update_scene(job.task_id, job.index, keyword=written)
+        job.prompt = written
+        job.keyword = written
+    except SceneError as exc:
+        job.state = FAILED
+        job.error = str(exc)
+        logger.warning(
+            f"queued prompt for scene {job.index} of task {job.task_id} "
+            f"failed: {exc}"
+        )
+    except Exception as exc:  # noqa: BLE001 - 工作线程不能因为一次意外就死掉
+        job.state = FAILED
+        job.error = f"unexpected error: {exc}"
+        logger.exception(
+            f"queued prompt for scene {job.index} of task {job.task_id} "
+            f"hit an unexpected error"
+        )
+    else:
+        job.state = DONE
+        logger.success(
+            f"wrote the prompt for scene {job.index} of task {job.task_id}"
+        )
+        # 写失败了就不排出图：凭旧提示词出一张图不是用户要的东西。
+        try:
+            follow_up = _material_job(
+                job.task_id,
+                job.index,
+                keyword=job.prompt,
+                image_style=job.image_style,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                f"wrote the prompt for scene {job.index} of task {job.task_id} "
+                f"but could not queue the picture: {exc}"
+            )
+    finally:
+        job.finished_at = time.time()
+        # "这个活完事了"和"接着排那张图"在同一次加锁里完成。分开做的话中间
+        # 有一瞬队列是空的而马上又不空——看的人会以为活干完了，而测试里那一
+        # 瞬正好够把下一个用例的队列搅乱。
+        with _LOCK:
+            _RUNNING = None
+            _remember(job)
+            if follow_up is not None:
+                _QUEUE.append(follow_up)
+                _ensure_worker()
+                _READY.notify()
+
+
+def _run_material(job: _Job) -> None:
     global _RUNNING
     try:
         reference = None

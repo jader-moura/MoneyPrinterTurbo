@@ -603,16 +603,9 @@ async function queueRegeneration(index, keyword, imageStyle, fromPhoto, strength
 /** 队列栏。排着的、正在出的、刚结束的都在这里，失败原因照原样显示。 */
 function drawQueue() {
   const jobs = (state.queue.jobs || []).filter((job) => job.state !== "cancelled");
-  // 写提示词和重画图片是两种活，但用户问的是同一个问题："现在有什么在跑"。
-  // 所以它们进同一条。区别在于这几条只属于这一页：写提示词是这个浏览器发
-  // 出去的请求，不像队列里的活那样存在服务端、换个标签页也看得见。
-  const writing = [...promptWrites].map((id) => ({
-    id,
-    since: assistState(id).startedAt || Date.now(),
-  }));
   ui.queue.innerHTML = "";
-  ui.queue.hidden = !jobs.length && !writing.length;
-  if (!jobs.length && !writing.length) return;
+  ui.queue.hidden = !jobs.length;
+  if (!jobs.length) return;
 
   const running = state.queue.running;
   const waiting = state.queue.waiting || 0;
@@ -624,6 +617,11 @@ function drawQueue() {
   title.className = "queue-title";
   // 收起来之后这一行是唯一还看得见的东西，所以失败的条数要写在这里——
   // 否则一张图出错了而面板是收着的，用户永远不会知道。
+  // 写提示词的活现在也在 jobs 里，所以这里数的是同一份数据。
+  const writing = jobs.filter(
+    (job) => job.kind === "prompt"
+      && (job.state === "queued" || job.state === "running")
+  );
   const writingNote = writing.length
     ? `${writing.length} prompt${writing.length === 1 ? "" : "s"} being written`
     : "";
@@ -683,16 +681,25 @@ function drawQueue() {
         // 得出来哪一张是怎么来的。
         + keptLabel(job.strength)
       : "";
+    // 写提示词那种活说的是另一件事。两种活排同一条队（它们抢同一块显卡），
+    // 所以这一行要分得出来是哪一种，否则"正在出图"会盖在一个根本没在出图
+    // 的活上。
+    const writingOne = job.kind === "prompt";
     if (job.state === "running") {
       label.textContent = `${where}${term}${photo} · `
-        + (job.from_photo && !job.reference
-          ? `looking for a photo ${fmt(job.elapsed)}`
-          : `generating ${fmt(job.elapsed)}`);
+        + (writingOne
+          ? `writing a prompt ${fmt(job.elapsed)}`
+          : job.from_photo && !job.reference
+            ? `looking for a photo ${fmt(job.elapsed)}`
+            : `generating ${fmt(job.elapsed)}`);
     } else if (job.state === "queued") {
-      label.textContent = `${where}${term}${photo} · waiting`
+      label.textContent = `${where}${term}${photo} · `
+        + (writingOne ? "waiting to write the prompt" : "waiting")
         + (job.position > 1 ? ` (${job.position - 1} ahead)` : " (next)");
     } else if (job.state === "done") {
-      label.textContent = `${where}${term}${photo} · redrawn in ${fmt(job.elapsed)}`;
+      label.textContent = writingOne
+        ? `${where} · prompt written in ${fmt(job.elapsed)}`
+        : `${where}${term}${photo} · redrawn in ${fmt(job.elapsed)}`;
     } else {
       // 失败原因是服务端点名过的那一句（哪个源怎么失败的），照原样显示。
       // 只是把换行和连串空格压成一个空格：有些报错自带几行 ##### 分隔线，
@@ -722,27 +729,6 @@ function drawQueue() {
       savePromptEdit();
       // 跳到它**现在**在的那一段，不是排队时那一段。
       if (at === null || !state.scenes[at]) return;
-  // 写提示词的那几条排在最后：它们是顺带发生的事，而用户盯着这条看的是
-  // "我的图画到哪了"。把它们放在最上面，就等于每写一条提示词都把真正在等
-  // 的那几张往下挤一行。
-  for (const { id, since } of writing) {
-    const row = document.createElement("div");
-    row.className = "queue-row running";
-    const label = document.createElement("span");
-    label.className = "queue-label";
-    const at = sceneIndexById(id);
-    // 那一段可能已经被删掉了，而这条请求还在路上。
-    const where = at < 0 ? "A deleted scene" : `Scene ${at + 1}`;
-    label.textContent =
-      `${where} · writing a prompt ${fmt((Date.now() - since) / 1000)}`;
-    // 不给撤销按钮：请求已经发出去了，撤不回来。给一个假的只会让用户看着
-    // 它继续跑——和正在出图的那一张同样的道理。
-    label.title = "The model is writing this scene's prompt. It finishes on "
-      + "its own, and only this browser tab is doing it.";
-    row.appendChild(label);
-    ui.queue.appendChild(row);
-  }
-
       state.selected = at;
       draw();
     });
@@ -1547,24 +1533,22 @@ function assistState(id) {
   return found;
 }
 
-/** 正在写的是哪几段（一段同时只写一条）。
+/** 这一段有没有在排队写提示词（排着的和正在写的都算）。
 
-    写这件事和界面脱钩：点下去之后换段、面板重画、整屏重画都不打断它，写完
-    自己落回 ``state`` 并存到服务端。以前这一步挂在那个输入框的闭包上，框一
-    被摘掉（换段就会）写回去的字就没了去处，等的那几十秒等于白等。 */
-const promptWrites = new Set();
+    写这件事现在是服务端队列里的一个活。写提示词要让 ollama 把模型装进
+    显存，而出图那边正占着同一块显卡——两件事排同一条队才不会撞上，这也是
+    它从这个页面搬到服务端去的全部理由。
 
-// 只在真的有东西在写的时候跑。队列那边的轮询只看服务端的活，写提示词是
-// 这一页自己发出去的请求，服务端不知道，所以得自己让这一行跳秒。
-let promptTicker = 0;
-function watchPromptRows() {
-  if (promptWrites.size && !promptTicker) {
-    promptTicker = setInterval(drawQueue, 1000);
-  } else if (!promptWrites.size && promptTicker) {
-    clearInterval(promptTicker);
-    promptTicker = 0;
-  }
-  drawQueue();
+    顺带的好处：进度不再只活在这一个标签页里。关掉页面再打开，看到的还是
+    同一份队列。 */
+function promptJobFor(id) {
+  const at = sceneIndexById(id);
+  if (at < 0) return null;
+  return (state.queue.jobs || []).find(
+    (job) => job.kind === "prompt"
+      && jobScene(job) === at
+      && (job.state === "queued" || job.state === "running")
+  ) || null;
 }
 
 /** 输入框下面那一行小字：``{ id, text, kind }``，``null`` 是不说话。
@@ -1676,113 +1660,42 @@ function trackPromptEdits(scene, input) {
   input.addEventListener("change", () => savePromptEdit(edit));
 }
 
-/** 把写好的那一条落下去：撤销留底、框里换字、存到服务端、时间线改字。
+/** 请队列去写这一段的提示词。
 
-    一件都不靠那个输入框还在不在。这一步以前是交给框里的自动保存接着做的，
-    而框在换段时就被摘掉了，于是写好的那条谁也看不见、哪儿也没存。 */
-async function applyWrittenPrompt(id, written) {
+    不在这里写，也不在这里存：这个活跑的时候这个页面可能已经关了，而写好的
+    提示词不该跟着没了。服务端写完会把它存进场景，然后**接着**排一个出图的
+    活——写提示词几乎永远是为了换一张图。
+
+    撤销的底在按下去的这一刻留：那一刻框里是什么，撤销就该还原成什么。 */
+async function startPromptWrite(id, direction, current) {
+  if (promptJobFor(id)) return;
   const at = sceneIndexById(id);
-  const scene = (state.scenes || [])[at];
-  if (!scene) throw new Error("that scene is no longer in the timeline");
-  assistState(id).undo = String(scene.keyword || "");
-  // 框还在屏上就连框里的字一起换掉，不然用户看着旧词、存下去的是新词。同时
-  // 把"已存"记成新的，免得那边的自动保存再把同一句存第二遍。
-  const live = promptEdit && promptEdit.id === id ? promptEdit : null;
-  if (live) {
-    clearTimeout(live.timer);
-    live.input.value = written;
-    live.saved = written;
-  }
-  setPromptStatus(id, "Saving…");
-  try {
-    await call("PUT", scenePath(at), { keyword: written });
-  } catch (error) {
-    // 没存上就要说，而且框还在的话要让自动保存还能再试一次。
-    if (live) live.saved = null;
-    setPromptStatus(id, `Not saved: ${error.message || error}`, "warn");
-    throw error;
-  }
-  scene.keyword = written;
-  setPromptStatus(id, "Saved");
-  promptStatusTimer = setTimeout(() => {
-    if (promptStatus && promptStatus.id === id && promptStatus.text === "Saved") {
-      setPromptStatus(id, "");
-    }
-  }, 2500);
-  relabelClip(at);
-}
-
-/** 人已经看着别处时，写完了、写崩了都得有个地方说一声——那一小块不在屏上。 */
-function announcePromptWrite(id, error) {
-  const at = sceneIndexById(id);
-  if (at >= 0 && at === state.selected) return;
-  const where = at >= 0
-    ? `scene ${at + 1}`
-    : "a scene that is no longer in the timeline";
-  if (error) say(`The prompt for ${where} was not written: ${error}`, "error");
-  else say(`The prompt for ${where} is written.`);
-}
-
-/** 去写这一段的提示词。中途换段、面板重画都不打断，写完自己落下去。
-
-    每次重新按身份算下标：等模型的这几十秒里用户可能在前面插了一段。 */
-function startPromptWrite(id, direction, current) {
-  if (promptWrites.has(id)) return;
-  promptWrites.add(id);
-  // 开始的时刻跟这一段其它助写状态放在一起。队列那一行要拿它跳秒：
-  // "正在写"不带时间的话，和卡死了看起来一模一样。
-  assistState(id).startedAt = Date.now();
-  watchPromptRows();
-  // 没把现有那条递过来，就是"重新想一条"，而不是"把这条写好"。
-  // 两个按钮走的是同一条路，差别就在这里，所以这里自己看得出来。
-  const fresh = !String(current || "").trim();
+  const scene = at >= 0 ? state.scenes[at] : null;
   const assist = assistState(id);
-  assist.note = (fresh ? "Thinking of another one… " : "Writing the prompt… ")
-    + "you can go on to another scene while it writes; it finishes on its own.";
-  assist.kind = "";
-  (async () => {
-    try {
-      const at = sceneIndexById(id);
-      if (at < 0) throw new Error("that scene is no longer in the timeline");
-      const data = await call("POST", `${scenePath(at)}/prompt`, {
-        direction,
-        current,
-      });
-      const written = String((data && data.prompt) || "").trim();
-      if (!written) throw new Error("the model returned no prompt");
-      await applyWrittenPrompt(id, written);
-      // 写完就接着重画。写提示词几乎永远是为了换一张图——让用户再点一下
-      // "重出一张"只是多一步，而那一步谁都不会想要省掉之外的第二种答案。
-      //
-      // 排进队列而不是当场画：这样它和别的重画排在同一条队里，看得见、也
-      // 撤得掉（排着的那几张有 Cancel）。所以"写歪了不想画"仍然来得及。
-      // 重新找一次位置：这几秒里用户完全可能把这一段拖到别处去了。上面
-      // 那个 ``at`` 是发请求时的位置，不能拿来排现在这个活。
-      const nowAt = sceneIndexById(id);
-      const scene = nowAt >= 0 ? state.scenes[nowAt] : null;
-      if (scene) {
-        await queueRegeneration(
-          nowAt, written, scene.image_style || null, false
-        );
-      }
-      assist.note = (fresh
-        ? "A different idea, written from this scene's narration. "
-        : "Written into the box above. ")
-        + "Redrawing the picture now — cancel it in the queue if you would "
-        + "rather change the words first.";
-      assist.kind = "";
-      announcePromptWrite(id, null);
-    } catch (error) {
-      // 服务端的错误文案是点名的（哪个供应商、缺哪一行配置），照原样显示。
-      assist.note = String(error.message || error);
-      assist.kind = "warn";
-      announcePromptWrite(id, assist.note);
-    } finally {
-      promptWrites.delete(id);
-      watchPromptRows();
-      if (assist.show) assist.show();
-    }
-  })();
+  if (!scene) {
+    assist.note = "that scene is no longer in the timeline";
+    assist.kind = "warn";
+    if (assist.show) assist.show();
+    return;
+  }
+  assist.undo = String(scene.keyword || "");
+  try {
+    const job = await call(
+      "POST", `${scenePath(at)}/prompt/queue`, { direction, current });
+    assist.note = job && job.position > 1
+      ? `Queued — ${job.position - 1} ahead of it. The picture is redrawn `
+        + "straight after, and both are in the queue below."
+      : "Queued. The picture is redrawn straight after, and both are in the "
+        + "queue below.";
+    assist.kind = "";
+    await fetchQueue();
+    draw();
+    watchQueue();
+  } catch (error) {
+    assist.note = String(error.message || error);
+    assist.kind = "warn";
+    if (assist.show) assist.show();
+  }
 }
 
 /** "用 AI 写这条提示词"那一小块。
@@ -1838,7 +1751,7 @@ function drawPromptAssist(scene, input) {
 
   const note = document.createElement("p");
   const undo = button("Undo", "small", async () => {
-    if (state_.undo === null || promptWrites.has(id)) return;
+    if (state_.undo === null || promptJobFor(id)) return;
     input.value = state_.undo;
     state_.undo = null;
     state_.note = "Put back the prompt that was there before.";
@@ -1856,9 +1769,9 @@ function drawPromptAssist(scene, input) {
   // "写好了"写到一块早就不在屏上的 DOM 上。
   function show() {
     if (state_.show !== show) return;
-    const busy = promptWrites.has(id);
+    const busy = !!promptJobFor(id);
     write.disabled = busy;
-    write.textContent = busy ? "Writing…" : "Write the prompt";
+    write.textContent = busy ? "In the queue…" : "Write the prompt";
     // 一段一次只写一条，所以两个按钮共用同一个"忙"。
     suggest.disabled = busy;
     undo.disabled = busy;
@@ -1871,7 +1784,7 @@ function drawPromptAssist(scene, input) {
   // 己跑完，用户接着去改别的段落都不打断它。以前这件事在这个闭包里等结果，
   // 换一段就把框和闭包一起换掉了，写好的那条无处可落。
   const write = button("Write the prompt", "small", () => {
-    if (promptWrites.has(id)) return;
+    if (promptJobFor(id)) return;
     startPromptWrite(id, direction.input.value, input.value);
     show();
   });
@@ -1880,7 +1793,7 @@ function drawPromptAssist(scene, input) {
   // 条，而不是把现有的润色一遍。"我不要这个想法"和"这句话写得不好"是两件
   // 事，而原来只有后面那个按钮——想换个想法得先自己把框清空，谁也猜不到。
   const suggest = button("Suggest another", "small", () => {
-    if (promptWrites.has(id)) return;
+    if (promptJobFor(id)) return;
     startPromptWrite(id, direction.input.value, "");
     show();
   });
