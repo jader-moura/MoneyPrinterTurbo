@@ -500,3 +500,77 @@ class TestAskingForADifferentIdea:
         """两个按钮摆在一起，不说清楚就只能靠猜。"""
         drawer = self._drawer(self._source())
         assert "ignores the box" in drawer
+
+
+class TestPromptWritingShowsUpInTheQueue:
+    """用户的原话："The prompt regenerations should come to the
+    regeneration timeline we have in the modal, so I know what is queue"。
+
+    写提示词和重画图片是两种活，但用户问的是同一个问题：现在有什么在
+    跑。原来写提示词只在那一段自己的抽屉里说一句话，换一段就看不见了。
+    """
+
+    @staticmethod
+    def _source() -> str:
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parents[2]
+        return (root / "resource" / "public" / "editor" / "editor.js").read_text(
+            encoding="utf-8"
+        )
+
+    @classmethod
+    def _draw_queue(cls) -> str:
+        source = cls._source()
+        start = source.index("function drawQueue()")
+        opened = source.index("{", start)
+        depth = 0
+        for at in range(opened, len(source)):
+            if source[at] == "{":
+                depth += 1
+            elif source[at] == "}":
+                depth -= 1
+                if depth == 0:
+                    return source[opened : at + 1]
+        raise AssertionError("drawQueue has unbalanced braces")
+
+    def test_the_strip_opens_for_a_prompt_even_with_no_picture_jobs(self):
+        """一张图都没在重画的时候，写提示词也得显示出来。"""
+        body = self._draw_queue()
+        assert "!jobs.length && !writing.length" in body
+
+    def test_a_row_says_it_is_writing_and_for_how_long(self):
+        body = self._draw_queue()
+        assert "writing a prompt" in body
+        assert "Date.now() - since" in body
+
+    def test_the_collapsed_summary_counts_them(self):
+        """折起来的时候那一行是唯一看得见的东西。"""
+        body = self._draw_queue()
+        assert "being written" in body
+
+    def test_a_deleted_scene_does_not_borrow_someone_else_s_number(self):
+        body = self._draw_queue()
+        start = body.index("writing a prompt")
+        assert "A deleted scene" in body[max(0, start - 500) : start]
+
+    def test_there_is_no_cancel_button_on_them(self):
+        """请求已经发出去了，撤不回来。给个假的按钮更差。"""
+        body = self._draw_queue()
+        writing_loop = body[body.index("for (const { id, since } of writing)") :]
+        writing_loop = writing_loop[: writing_loop.index("for (const job of jobs)")]
+        assert "button(" not in writing_loop
+
+    def test_the_seconds_only_tick_while_something_is_writing(self):
+        """服务端那条轮询不知道这些活，所以这里自己跳；完了就停。"""
+        source = self._source()
+        start = source.index("function watchPromptRows()")
+        body = source[start : start + 600]
+        assert "setInterval(drawQueue, 1000)" in body
+        assert "clearInterval(promptTicker)" in body
+
+    def test_it_starts_and_stops_with_the_write(self):
+        source = self._source()
+        start = source.index("function startPromptWrite(")
+        body = source[start : start + 2200]
+        assert body.count("watchPromptRows()") == 2

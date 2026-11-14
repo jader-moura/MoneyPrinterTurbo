@@ -602,9 +602,16 @@ async function queueRegeneration(index, keyword, imageStyle, fromPhoto, strength
 /** 队列栏。排着的、正在出的、刚结束的都在这里，失败原因照原样显示。 */
 function drawQueue() {
   const jobs = (state.queue.jobs || []).filter((job) => job.state !== "cancelled");
+  // 写提示词和重画图片是两种活，但用户问的是同一个问题："现在有什么在跑"。
+  // 所以它们进同一条。区别在于这几条只属于这一页：写提示词是这个浏览器发
+  // 出去的请求，不像队列里的活那样存在服务端、换个标签页也看得见。
+  const writing = [...promptWrites].map((id) => ({
+    id,
+    since: assistState(id).startedAt || Date.now(),
+  }));
   ui.queue.innerHTML = "";
-  ui.queue.hidden = !jobs.length;
-  if (!jobs.length) return;
+  ui.queue.hidden = !jobs.length && !writing.length;
+  if (!jobs.length && !writing.length) return;
 
   const running = state.queue.running;
   const waiting = state.queue.waiting || 0;
@@ -616,12 +623,17 @@ function drawQueue() {
   title.className = "queue-title";
   // 收起来之后这一行是唯一还看得见的东西，所以失败的条数要写在这里——
   // 否则一张图出错了而面板是收着的，用户永远不会知道。
+  const writingNote = writing.length
+    ? `${writing.length} prompt${writing.length === 1 ? "" : "s"} being written`
+    : "";
   const summary = running
     ? `Regenerating scene ${running.index + 1} · ${fmt(running.elapsed)}`
       + (waiting ? ` · ${waiting} waiting` : "")
+      + (writingNote ? ` · ${writingNote}` : "")
     : waiting
       ? `${waiting} picture${waiting === 1 ? "" : "s"} waiting`
-      : "Nothing left to regenerate";
+        + (writingNote ? ` · ${writingNote}` : "")
+      : writingNote || "Nothing left to regenerate";
   title.textContent = (state.queueCollapsed ? "▸ " : "▾ ")
     + summary
     + (failed ? ` · ${failed} failed` : "");
@@ -646,6 +658,24 @@ function drawQueue() {
     head.appendChild(clear);
   }
   ui.queue.appendChild(head);
+
+  for (const { id, since } of writing) {
+    const row = document.createElement("div");
+    row.className = "queue-row running";
+    const label = document.createElement("span");
+    label.className = "queue-label";
+    const at = sceneIndexById(id);
+    // 那一段可能已经被删掉了，而这条请求还在路上。
+    const where = at < 0 ? "A deleted scene" : `Scene ${at + 1}`;
+    label.textContent =
+      `${where} · writing a prompt ${fmt((Date.now() - since) / 1000)}`;
+    // 不给撤销按钮：请求已经发出去了，撤不回来。给一个假的只会让用户看着
+    // 它继续跑——和正在出图的那一张同样的道理。
+    label.title = "The model is writing this scene's prompt. It finishes on "
+      + "its own, and only this browser tab is doing it.";
+    row.appendChild(label);
+    ui.queue.appendChild(row);
+  }
 
   for (const job of jobs) {
     const row = document.createElement("div");
@@ -1520,6 +1550,19 @@ function assistState(id) {
     被摘掉（换段就会）写回去的字就没了去处，等的那几十秒等于白等。 */
 const promptWrites = new Set();
 
+// 只在真的有东西在写的时候跑。队列那边的轮询只看服务端的活，写提示词是
+// 这一页自己发出去的请求，服务端不知道，所以得自己让这一行跳秒。
+let promptTicker = 0;
+function watchPromptRows() {
+  if (promptWrites.size && !promptTicker) {
+    promptTicker = setInterval(drawQueue, 1000);
+  } else if (!promptWrites.size && promptTicker) {
+    clearInterval(promptTicker);
+    promptTicker = 0;
+  }
+  drawQueue();
+}
+
 /** 输入框下面那一行小字：``{ id, text, kind }``，``null`` 是不说话。
 
     自动保存最大的毛病是看不见：存了没存都是同一副样子，用户只能赌。
@@ -1682,6 +1725,10 @@ function announcePromptWrite(id, error) {
 function startPromptWrite(id, direction, current) {
   if (promptWrites.has(id)) return;
   promptWrites.add(id);
+  // 开始的时刻跟这一段其它助写状态放在一起。队列那一行要拿它跳秒：
+  // "正在写"不带时间的话，和卡死了看起来一模一样。
+  assistState(id).startedAt = Date.now();
+  watchPromptRows();
   // 没把现有那条递过来，就是"重新想一条"，而不是"把这条写好"。
   // 两个按钮走的是同一条路，差别就在这里，所以这里自己看得出来。
   const fresh = !String(current || "").trim();
@@ -1713,6 +1760,7 @@ function startPromptWrite(id, direction, current) {
       announcePromptWrite(id, assist.note);
     } finally {
       promptWrites.delete(id);
+      watchPromptRows();
       if (assist.show) assist.show();
     }
   })();
