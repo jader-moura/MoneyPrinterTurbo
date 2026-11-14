@@ -111,8 +111,12 @@ def unload_ollama_wanted() -> bool:
 # materialising its host-side copy of the transformer on first use, which is
 # how the design works and does not come back. A first guess of 28 GB sat
 # *below* that and refused the request after the one that had just succeeded.
-# 44 GB leaves room for that and still catches the real runaway, which was 52.
-MAX_OWN_COMMIT_MB = int(float(os.environ.get("GEN_MAX_COMMIT_GB", "44")) * 1024)
+# Six redraws in a row then settled it: 41, 41, 43, 43, 43, 43 GB. So working
+# costs 43 GB on this card and a 44 GB ceiling was one gigabyte of headroom -
+# the backstop would have fired on an ordinary afternoon. 56 GB sits above
+# working cost with room to spare and still catches the 61 GB accumulation
+# that started all this.
+MAX_OWN_COMMIT_MB = int(float(os.environ.get("GEN_MAX_COMMIT_GB", "56")) * 1024)
 
 # Refuse to start work when the machine has less commit charge left than this.
 #

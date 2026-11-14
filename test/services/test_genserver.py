@@ -676,7 +676,7 @@ def test_growing_past_the_ceiling_drops_the_model_first(server, monkeypatch):
     monkeypatch.setattr(srv.RESIDENT, "unload", lambda: dropped.append(True) or 0.0)
     monkeypatch.setattr(srv.RESIDENT, "model_id", "zimage-turbo")
     monkeypatch.setattr(srv, "machine_commit_mb", lambda: (65 * 1024, 66 * 1024))
-    readings = iter([50 * 1024, 12 * 1024])
+    readings = iter([60 * 1024, 12 * 1024])
     monkeypatch.setattr(srv, "own_commit_mb", lambda: next(readings))
 
     srv.watch_own_commit()
@@ -689,13 +689,13 @@ def test_a_leak_it_cannot_give_back_stops_it_taking_work(server, monkeypatch):
     monkeypatch.setattr(srv.RESIDENT, "unload", lambda: 0.0)
     monkeypatch.setattr(srv.RESIDENT, "model_id", "zimage-turbo")
     # 还完之后还是 59 GB，而且机器只剩 6 GB：这就是那次事故。
-    monkeypatch.setattr(srv, "own_commit_mb", lambda: 59 * 1024)
+    monkeypatch.setattr(srv, "own_commit_mb", lambda: 62 * 1024)
     monkeypatch.setattr(srv, "machine_commit_mb", lambda: (65 * 1024, 66 * 1024))
 
     srv.watch_own_commit()
 
     assert srv.BLOATED is not None
-    assert "59 GB" in srv.BLOATED
+    assert "62 GB" in srv.BLOATED
 
     response = draw(server)
     assert response.status_code == 503
@@ -708,7 +708,7 @@ def test_a_leak_it_cannot_give_back_stops_it_taking_work(server, monkeypatch):
 def test_health_says_it_rather_than_waiting_to_be_asked(server, monkeypatch):
     monkeypatch.setattr(srv.RESIDENT, "unload", lambda: 0.0)
     monkeypatch.setattr(srv.RESIDENT, "model_id", "zimage-turbo")
-    monkeypatch.setattr(srv, "own_commit_mb", lambda: 59 * 1024)
+    monkeypatch.setattr(srv, "own_commit_mb", lambda: 62 * 1024)
     monkeypatch.setattr(srv, "machine_commit_mb", lambda: (65 * 1024, 66 * 1024))
     assert server.get("/health").json()["ok"] is True
 
@@ -716,7 +716,7 @@ def test_health_says_it_rather_than_waiting_to_be_asked(server, monkeypatch):
 
     health = server.get("/health").json()
     assert health["ok"] is False
-    assert "59 GB" in str(health["bloated"])
+    assert "62 GB" in str(health["bloated"])
 
 
 def test_being_large_on_a_roomy_machine_is_not_a_reason_to_refuse(
@@ -733,7 +733,7 @@ def test_being_large_on_a_roomy_machine_is_not_a_reason_to_refuse(
     """
     dropped = []
     monkeypatch.setattr(srv.RESIDENT, "unload", lambda: dropped.append(True) or 0.0)
-    monkeypatch.setattr(srv, "own_commit_mb", lambda: 50 * 1024)
+    monkeypatch.setattr(srv, "own_commit_mb", lambda: 60 * 1024)
     # 机器还剩 60 GB。
     monkeypatch.setattr(srv, "machine_commit_mb", lambda: (20 * 1024, 80 * 1024))
 
@@ -742,7 +742,7 @@ def test_being_large_on_a_roomy_machine_is_not_a_reason_to_refuse(
     assert srv.BLOATED is None
     assert dropped == []
     # 但要说一声，万一它还在涨。
-    assert "50 GB" in str(srv.NOTED)
+    assert "60 GB" in str(srv.NOTED)
     assert draw(server).status_code == 200
 
 
@@ -773,7 +773,7 @@ def test_a_generation_in_flight_is_not_interrupted(server, monkeypatch):
     dropped = []
     monkeypatch.setattr(srv.RESIDENT, "unload", lambda: dropped.append(True) or 0.0)
     monkeypatch.setattr(srv.RESIDENT, "model_id", "zimage-turbo")
-    monkeypatch.setattr(srv, "own_commit_mb", lambda: 59 * 1024)
+    monkeypatch.setattr(srv, "own_commit_mb", lambda: 62 * 1024)
     monkeypatch.setattr(srv, "BUSY_WAIT_SECONDS", 0.05)
 
     srv.RESIDENT.lock.acquire()
@@ -1039,7 +1039,7 @@ def test_what_building_it_costs_is_measured(resident, monkeypatch):
 def test_a_build_that_eats_the_machine_is_stopped_on_the_spot(resident, monkeypatch):
     """超了就当场放手，而不是留着一个不准用的管线等下一次请求被拒。"""
     monkeypatch.setattr(srv, "torch", FakeTorch())
-    readings = iter([10 * 1024, 50 * 1024, 49 * 1024])
+    readings = iter([10 * 1024, 60 * 1024, 59 * 1024])
     monkeypatch.setattr(srv, "own_commit_mb", lambda: next(readings))
 
     with pytest.raises(srv.Leaking) as caught:
@@ -1047,7 +1047,7 @@ def test_a_build_that_eats_the_machine_is_stopped_on_the_spot(resident, monkeypa
 
     said = str(caught.value)
     # 两头的数都要在：看到的人要知道是这一步涨上去的。
-    assert "10 GB" in said and "50 GB" in said
+    assert "10 GB" in said and "60 GB" in said
     assert "was not drawn" in said
     assert srv.RESIDENT.image_pipe is None
 
