@@ -660,24 +660,6 @@ function drawQueue() {
   }
   ui.queue.appendChild(head);
 
-  for (const { id, since } of writing) {
-    const row = document.createElement("div");
-    row.className = "queue-row running";
-    const label = document.createElement("span");
-    label.className = "queue-label";
-    const at = sceneIndexById(id);
-    // 那一段可能已经被删掉了，而这条请求还在路上。
-    const where = at < 0 ? "A deleted scene" : `Scene ${at + 1}`;
-    label.textContent =
-      `${where} · writing a prompt ${fmt((Date.now() - since) / 1000)}`;
-    // 不给撤销按钮：请求已经发出去了，撤不回来。给一个假的只会让用户看着
-    // 它继续跑——和正在出图的那一张同样的道理。
-    label.title = "The model is writing this scene's prompt. It finishes on "
-      + "its own, and only this browser tab is doing it.";
-    row.appendChild(label);
-    ui.queue.appendChild(row);
-  }
-
   for (const job of jobs) {
     const row = document.createElement("div");
     row.className = "queue-row " + job.state;
@@ -740,6 +722,27 @@ function drawQueue() {
       savePromptEdit();
       // 跳到它**现在**在的那一段，不是排队时那一段。
       if (at === null || !state.scenes[at]) return;
+  // 写提示词的那几条排在最后：它们是顺带发生的事，而用户盯着这条看的是
+  // "我的图画到哪了"。把它们放在最上面，就等于每写一条提示词都把真正在等
+  // 的那几张往下挤一行。
+  for (const { id, since } of writing) {
+    const row = document.createElement("div");
+    row.className = "queue-row running";
+    const label = document.createElement("span");
+    label.className = "queue-label";
+    const at = sceneIndexById(id);
+    // 那一段可能已经被删掉了，而这条请求还在路上。
+    const where = at < 0 ? "A deleted scene" : `Scene ${at + 1}`;
+    label.textContent =
+      `${where} · writing a prompt ${fmt((Date.now() - since) / 1000)}`;
+    // 不给撤销按钮：请求已经发出去了，撤不回来。给一个假的只会让用户看着
+    // 它继续跑——和正在出图的那一张同样的道理。
+    label.title = "The model is writing this scene's prompt. It finishes on "
+      + "its own, and only this browser tab is doing it.";
+    row.appendChild(label);
+    ui.queue.appendChild(row);
+  }
+
       state.selected = at;
       draw();
     });
@@ -1748,10 +1751,25 @@ function startPromptWrite(id, direction, current) {
       const written = String((data && data.prompt) || "").trim();
       if (!written) throw new Error("the model returned no prompt");
       await applyWrittenPrompt(id, written);
-      assist.note = fresh
-        ? "A different idea, written from this scene's narration."
-        : "Written into the box above. Read it, change what you like, then "
-          + "redraw the picture.";
+      // 写完就接着重画。写提示词几乎永远是为了换一张图——让用户再点一下
+      // "重出一张"只是多一步，而那一步谁都不会想要省掉之外的第二种答案。
+      //
+      // 排进队列而不是当场画：这样它和别的重画排在同一条队里，看得见、也
+      // 撤得掉（排着的那几张有 Cancel）。所以"写歪了不想画"仍然来得及。
+      // 重新找一次位置：这几秒里用户完全可能把这一段拖到别处去了。上面
+      // 那个 ``at`` 是发请求时的位置，不能拿来排现在这个活。
+      const nowAt = sceneIndexById(id);
+      const scene = nowAt >= 0 ? state.scenes[nowAt] : null;
+      if (scene) {
+        await queueRegeneration(
+          nowAt, written, scene.image_style || null, false
+        );
+      }
+      assist.note = (fresh
+        ? "A different idea, written from this scene's narration. "
+        : "Written into the box above. ")
+        + "Redrawing the picture now — cancel it in the queue if you would "
+        + "rather change the words first.";
       assist.kind = "";
       announcePromptWrite(id, null);
     } catch (error) {
@@ -1804,10 +1822,11 @@ function drawPromptAssist(scene, input) {
     + "picture for this scene's narration, for when what is there is not "
     + "working and you want a different idea rather than a tidier version "
     + "of the same one. Either way the people, the period and the setting "
-    + "of the rest of the video are kept, Undo puts your own words back, "
-    + "and the picture itself does not change until you redraw it. Writing "
-    + "takes a while, so you can move to another scene while it writes — it "
-    + "finishes on its own.";
+    + "of the rest of the video are kept and Undo puts your own words back. "
+    + "The picture is redrawn as soon as the prompt is written — that lands "
+    + "in the queue below, so cancel it there if you would rather read the "
+    + "words first. Writing takes a while, so you can move to another scene "
+    + "while it writes — it finishes on its own.";
   box.appendChild(hint);
 
   const direction = field("What it should show", "input", state_.direction);

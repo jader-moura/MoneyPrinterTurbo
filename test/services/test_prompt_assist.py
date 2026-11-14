@@ -557,8 +557,8 @@ class TestPromptWritingShowsUpInTheQueue:
     def test_there_is_no_cancel_button_on_them(self):
         """请求已经发出去了，撤不回来。给个假的按钮更差。"""
         body = self._draw_queue()
+        # 写提示词那几条在最后，所以从它们开始到函数末尾都是它们。
         writing_loop = body[body.index("for (const { id, since } of writing)") :]
-        writing_loop = writing_loop[: writing_loop.index("for (const job of jobs)")]
         assert "button(" not in writing_loop
 
     def test_the_seconds_only_tick_while_something_is_writing(self):
@@ -574,3 +574,91 @@ class TestPromptWritingShowsUpInTheQueue:
         start = source.index("function startPromptWrite(")
         body = source[start : start + 2200]
         assert body.count("watchPromptRows()") == 2
+
+
+class TestWhatHappensWhenTheWordsLand:
+    """用户的原话："when the 'write the prompt' or 'suggest another
+    prompt' finishes would be good if we regenerate the image automatically"。
+
+    写提示词几乎永远是为了换一张图。让用户再点一下"重出一张"只是多
+    一步，而那一步没有第二种答案。
+    """
+
+    @staticmethod
+    def _body() -> str:
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parents[2]
+        source = (root / "resource" / "public" / "editor" / "editor.js").read_text(
+            encoding="utf-8"
+        )
+        start = source.index("function startPromptWrite(")
+        return source[start : source.index("function drawPromptAssist(", start)]
+
+    def test_the_picture_is_queued_as_soon_as_the_prompt_lands(self):
+        body = self._body()
+        assert "queueRegeneration(" in body
+        # 写进去之后才排，不然排的是旧那条。
+        assert body.index("applyWrittenPrompt(id, written)") < body.index(
+            "queueRegeneration("
+        )
+
+    def test_it_draws_the_words_that_were_just_written(self):
+        body = self._body()
+        start = body.index("queueRegeneration(")
+        assert "written" in body[start : start + 160]
+
+    def test_it_keeps_that_scene_s_own_style(self):
+        """漫画片里補出一张油画就是这么来的。"""
+        body = self._body()
+        start = body.index("queueRegeneration(")
+        assert "scene.image_style" in body[start : start + 160]
+
+    def test_it_looks_up_where_the_scene_is_now(self):
+        """写的那几秒里用户完全可能把这一段拖到别处去了。"""
+        body = self._body()
+        start = body.index("queueRegeneration(")
+        before = body[:start]
+        assert before.rindex("sceneIndexById(id)") > before.index(
+            "applyWrittenPrompt(id, written)"
+        )
+
+    def test_a_scene_that_is_gone_queues_nothing(self):
+        body = self._body()
+        assert "if (scene) {" in body
+
+    def test_the_note_says_it_is_redrawing_and_how_to_stop_it(self):
+        """自动发生的事情要说出来，并且要告诉用户怎么反悔。"""
+        body = self._body()
+        assert "Redrawing the picture now" in body
+        assert "cancel it in the queue" in body
+
+
+class TestWhereThosePromptRowsSit:
+    @staticmethod
+    def _draw_queue() -> str:
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parents[2]
+        source = (root / "resource" / "public" / "editor" / "editor.js").read_text(
+            encoding="utf-8"
+        )
+        start = source.index("function drawQueue()")
+        opened = source.index("{", start)
+        depth = 0
+        for at in range(opened, len(source)):
+            if source[at] == "{":
+                depth += 1
+            elif source[at] == "}":
+                depth -= 1
+                if depth == 0:
+                    return source[opened : at + 1]
+        raise AssertionError("drawQueue has unbalanced braces")
+
+    def test_they_come_after_the_pictures_not_before(self):
+        """用户盯这条看的是"我的图画到哪了"。写提示词是顺带发生的事，
+        摆在最上面就是每写一条就把真正在等的那几张往下挤一行。"""
+        body = self._draw_queue()
+        assert body.index("for (const job of jobs)") < body.index(
+            "for (const { id, since } of writing)"
+        )
