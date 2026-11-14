@@ -16,6 +16,8 @@ later in the edition the user must be able to do whatever he wants"。
 而且会照旧报 ``clamped``。
 """
 
+import os
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -117,6 +119,55 @@ class TestAPictureBakedAtFiveSecondsCanStillBeHeldLonger:
                 scene_editor.update_timing(task_id, 0, trim_start=2.0, duration=10.0)
 
         assert extend.call_args.args[2] == pytest.approx(12.0)
+
+
+class TestTheDragHandleKnowsToo:
+    """服务端放开了不够：拖拽把手在浏览器里就先夾了一次。
+
+    浏览器没办法知道磁盘上还在不在那张原图，所以这件事必须由服务端
+    告诉它。用文件名判断：64 位十六进制的摘要前缀就是"图片烘出来的"。
+    """
+
+    def test_a_clip_baked_from_a_picture_says_so(self):
+        assert timeline.baked_from_an_image("a" * 64 + ".zoom-abc.mp4")
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "pexels-12345.mp4",
+            "shot.zoom-abc123.mp4",      # 前缀不是 64 位摘要
+            ("z" * 64) + ".mp4",          # 64 位但不是十六进制
+            "",
+        ],
+    )
+    def test_everything_else_does_not(self, name):
+        assert not timeline.baked_from_an_image(name)
+
+    def test_it_never_opens_a_file(self, tmp_path):
+        """列表接口每一段都要问一次，所以它不能碰磁盘。"""
+        missing = str(tmp_path / ("b" * 64 + ".zoom-x.mp4"))
+        assert not os.path.exists(missing)
+        assert timeline.baked_from_an_image(missing)
+
+    def test_the_scene_list_carries_the_flag(self, task_root, idle_task):
+        task_id, _ = a_task(task_root, material=("c" * 64) + ".zoom-abc.mp4")
+        with patch.object(timeline, "probe_duration", return_value=BAKED):
+            scenes = scene_editor.describe(task_id, with_timing=True)["scenes"]
+        assert scenes[0]["can_hold_longer"] is True
+
+    def test_a_downloaded_clip_is_flagged_as_fixed_length(self, task_root, idle_task):
+        task_id, _ = a_task(task_root, material="downloaded.mp4")
+        with patch.object(timeline, "probe_duration", return_value=BAKED):
+            scenes = scene_editor.describe(task_id, with_timing=True)["scenes"]
+        assert scenes[0]["can_hold_longer"] is False
+
+    def test_the_editor_clamps_on_the_flag_not_on_the_kind(self):
+        """``scene.kind`` 对一段 .zoom-*.mp4 来说就是 video。"""
+        source = (
+            Path(__file__).parents[2] / "resource" / "public" / "editor" / "editor.js"
+        ).read_text(encoding="utf-8")
+        assert "!scene.can_hold_longer" in source
+        assert 'scene.kind === "video"' not in source
 
 
 class TestWhatStaysTheSame:

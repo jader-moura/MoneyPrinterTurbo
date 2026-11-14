@@ -108,6 +108,19 @@ def probe_duration(path: str) -> float:
     return duration
 
 
+def baked_from_an_image(material: str) -> bool:
+    """这段片子看起来是不是由一张图烘出来的——只看文件名，不碰磁盘。
+
+    ``render_image_zoom_video`` 用 64 位十六进制摘要当文件名前缀，所以这个
+    形状就是"图片烘出来的片段"的标记。``source_image_for`` 要把目录里每张
+    png 都打开重算一遍摘要才能确认，那个代价不能放进列表接口；而界面只需要
+    知道"这一段值不值得让用户往长里拖"，猜错的代价是服务端照旧夹回去并说
+    一句 ``clamped``。
+    """
+    stem = os.path.basename(str(material or "")).split(".", 1)[0]
+    return len(stem) == 64 and all(c in "0123456789abcdef" for c in stem.lower())
+
+
 def source_image_for(task_id: str, material: str) -> str | None:
     """找回这段图片素材的原始 png，找不到返回 None。
 

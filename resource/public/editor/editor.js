@@ -2381,8 +2381,13 @@ function startTrim(event) {
     const deltaSeconds = (move.clientX - startX) / state.pxPerSecond;
     if (side === "right") {
       nextSpan = Math.max(MIN_DURATION, startSpan + deltaSeconds);
-      if (source != null && scene.kind === "video") {
-        // 视频素材拉不过源长度；图片会按新时长重渲，所以不在这里夹。
+      if (source != null && !scene.can_hold_longer) {
+        // 真·视频拉不过源长度：没法凭空造帧。
+        //
+        // 判断依据是服务端给的 can_hold_longer，不是 scene.kind：图片烘出
+        // 来的片段（推拉镜头在文件里）后缀也是 .mp4，kind 也是 video，按
+        // 它来夹就等于把"把这张图停久一点"这件事整个挡掉——而那正是出片时
+        // 的 max_clip_duration 不该管到的地方。
         nextSpan = Math.min(nextSpan, (source - nextTrimStart) / state.speed);
       }
     } else {

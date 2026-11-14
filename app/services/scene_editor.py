@@ -1031,6 +1031,13 @@ def describe(task_id: str, endpoint: str = "", *, with_timing: bool = False) -> 
         record["trim_start"] = timing["trim_start"]
         record["duration"] = timing["duration"]
         record["source_duration"] = None
+        # 这一段能不能拉得比素材本身还长。图片烘出来的片段可以（按新时长重
+        # 渲一段），网上下回来的视频不行（没法凭空造帧）。界面拿它决定拖拽
+        # 把手要不要夹——不告诉它的话，它只能按后缀猜，而推拉镜头烘出来的
+        # 片段后缀就是 .mp4。
+        record["can_hold_longer"] = timeline.baked_from_an_image(
+            scene.get("material") or ""
+        )
         if with_timing and record["exists"]:
             try:
                 record["source_duration"] = timeline.probe_duration(
