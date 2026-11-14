@@ -556,6 +556,47 @@ def _sync_kokoro_config_from_session_state():
     )
 
 
+# 下拉框里的语言标题。Streamlit 的 selectbox 没有分组，所以标题只能是一个
+# 混在选项里的特殊值：这个前缀就是用来认出它的。前缀取一个用户不可能输入、
+# 也不可能和音色名撞上的样子。
+VOICE_HEADING = "\u2500\u2500language\u2500\u2500:"
+
+
+def _is_voice_heading(value) -> bool:
+    return isinstance(value, str) and value.startswith(VOICE_HEADING)
+
+
+def _with_language_headings(voices, prefer: str = ""):
+    """音色清单，每种语言前面插一条标题。
+
+    返回 ``(选项, {标题: 这一组的第一个音色})``。第二个是给"用户点到标题了"
+    那一下用的：标题没法做成不可选，所以点到它就当成"要这门语言"，落到这一
+    组的第一个音色上，而不是报一句错。
+    """
+    options = []
+    heads = {}
+    for code, names in voice.by_language(list(voices), prefer=prefer):
+        if not names:
+            continue
+        if code:
+            head = f"{VOICE_HEADING}{code}"
+            options.append(head)
+            heads[head] = names[0]
+        options.extend(names)
+    return options, heads
+
+
+def _first_real_voice(options, index: int) -> int:
+    """从 ``index`` 往后数，第一个不是标题的位置。"""
+    for at in range(max(0, index), len(options)):
+        if not _is_voice_heading(options[at]):
+            return at
+    for at in range(0, len(options)):
+        if not _is_voice_heading(options[at]):
+            return at
+    return 0
+
+
 def _get_kokoro_voice_options(saved_voice_name: str) -> list[str]:
     """会话内短缓存远端目录，断线时保留上次选择，不把故障当成用户改音色。"""
     if config.kokoro.get("voices"):
@@ -8456,6 +8497,9 @@ def _render_audio_settings(panel, params):
 
             # 根据选择的TTS服务器获取声音列表
             filtered_voices = []
+            # 只有带 locale 的那份清单（Azure）会分组，其余 provider 的名字里
+            # 没有语言，清单也短。这里先给个空的，下面那一句判断才不用分情况。
+            voice_headings = {}
             saved_voice_name = config.ui.get("voice_name", "")
             elevenlabs_api_key_rendered = False
 
@@ -8510,7 +8554,22 @@ def _render_audio_settings(panel, params):
                         if "V2" not in v:
                             filtered_voices.append(v)
 
+                # 331 个音色、75 种语言平铺成一个下拉框，谁都找不到自己要的
+                # 那几个——而要找的永远是"和脚本同一种语言的"。所以按语言分
+                # 组，脚本那门语言排最前面；脚本语言是"自动"的时候退回界面
+                # 语言，那也是一个比字母序更好的猜测。
+                filtered_voices, voice_headings = _with_language_headings(
+                    filtered_voices,
+                    params.video_language
+                    or st.session_state.get("ui_language", ""),
+                )
+
             def _friendly(v):
+                if _is_voice_heading(v):
+                    # 标题，不是音色。两边的横线是它和音色行的唯一区别，
+                    # Streamlit 不给选项加样式。
+                    name = voice.language_label(v.split(":", 1)[1])
+                    return f"\u2500\u2500\u2500  {name}  \u2500\u2500\u2500"
                 if voice.is_no_voice(v):
                     return tr("No Voice Selected")
                 if voice.is_elevenlabs_voice(v):
@@ -8593,6 +8652,12 @@ def _render_audio_settings(panel, params):
             if saved_voice_name_index >= len(friendly_names) and friendly_names:
                 saved_voice_name_index = 0
 
+            # 默认值不能落在语言标题上：那不是一个音色。往后挪到第一个真的。
+            if friendly_names:
+                saved_voice_name_index = _first_real_voice(
+                    list(friendly_names.keys()), saved_voice_name_index
+                )
+
             # 确保有声音可选
             if tts_mode_enabled and friendly_names:
                 voice_name = stable_selectbox(
@@ -8608,6 +8673,20 @@ def _render_audio_settings(panel, params):
                     # Provider 维持原选择器行为，不扩大本次修改的影响范围。
                     accept_new_options=selected_tts_server == "minimax-tts",
                 )
+
+                # 点到语言标题：当成"我要这门语言"，落到这一组的第一个
+                # 音色上。标题做不成不可选的，而把一句"那不是音色"摔回给
+                # 用户，比替他做这个显而易见的选择要差。
+                if _is_voice_heading(voice_name):
+                    voice_name = voice_headings.get(
+                        voice_name, params.voice_name
+                    )
+                    st.session_state[
+                        localized_widget_key(
+                            f"speech_synthesis_select_{selected_tts_server}"
+                        )
+                    ] = voice_name
+                    st.rerun()
 
                 if selected_tts_server == "minimax-tts":
                     custom_voice_id = str(voice_name or "").strip()

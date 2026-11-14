@@ -426,6 +426,86 @@ def get_all_azure_voices(filter_locals=None) -> list[str]:
     return voices
 
 
+# 音色名前面那两三个字母就是语言：``en-US-AvaNeural-Female`` 是 ``en``。
+# Azure 那份清单有 331 个音色、75 种语言，一长串平铺下来没人找得到自己要的
+# 那几个——而要找的永远是"和脚本同一种语言的"。
+#
+# 这里是一张写死的表，不是某个库：babel 不在依赖里，为了 75 个固定的名字多
+# 拉一个依赖不划算，而这些名字也不会变。表里没有的语言就把代码原样显示，
+# 比显示 "Unknown" 有用。
+LANGUAGE_NAMES = {
+    "af": "Afrikaans", "am": "Amharic", "ar": "Arabic", "az": "Azerbaijani",
+    "bg": "Bulgarian", "bn": "Bengali", "bs": "Bosnian", "ca": "Catalan",
+    "cs": "Czech", "cy": "Welsh", "da": "Danish", "de": "German",
+    "el": "Greek", "en": "English", "es": "Spanish", "et": "Estonian",
+    "fa": "Persian", "fi": "Finnish", "fil": "Filipino", "fr": "French",
+    "ga": "Irish", "gl": "Galician", "gu": "Gujarati", "he": "Hebrew",
+    "hi": "Hindi", "hr": "Croatian", "hu": "Hungarian", "id": "Indonesian",
+    "is": "Icelandic", "it": "Italian", "iu": "Inuktitut", "ja": "Japanese",
+    "jv": "Javanese", "ka": "Georgian", "kk": "Kazakh", "km": "Khmer",
+    "kn": "Kannada", "ko": "Korean", "lo": "Lao", "lt": "Lithuanian",
+    "lv": "Latvian", "mk": "Macedonian", "ml": "Malayalam", "mn": "Mongolian",
+    "mr": "Marathi", "ms": "Malay", "mt": "Maltese", "my": "Burmese",
+    "nb": "Norwegian", "ne": "Nepali", "nl": "Dutch", "pl": "Polish",
+    "ps": "Pashto", "pt": "Portuguese", "ro": "Romanian", "ru": "Russian",
+    "si": "Sinhala", "sk": "Slovak", "sl": "Slovenian", "so": "Somali",
+    "sq": "Albanian", "sr": "Serbian", "su": "Sundanese", "sv": "Swedish",
+    "sw": "Swahili", "ta": "Tamil", "te": "Telugu", "th": "Thai",
+    "tr": "Turkish", "uk": "Ukrainian", "ur": "Urdu", "uz": "Uzbek",
+    "vi": "Vietnamese", "zh": "Chinese", "zu": "Zulu",
+}
+
+
+def language_of(voice_name: str) -> str:
+    """``en-US-AvaNeural-Female`` -> ``en``。认不出来就返回空字符串。
+
+    只认 ``语言-地区-...`` 这种带 locale 的名字，也就是 Azure 那一套。
+    ``kokoro:af_heart`` 这类名字里没有语言，返回空的，由调用方决定怎么排。
+    """
+    name = str(voice_name or "").strip()
+    if not name or ":" in name:
+        return ""
+    head = name.split("-", 1)[0].lower()
+    if not head.isalpha() or not 2 <= len(head) <= 3:
+        return ""
+    return head
+
+
+def language_label(code: str) -> str:
+    """``en`` -> ``English``。表里没有的就把代码原样返回。"""
+    code = str(code or "").strip().lower()
+    return LANGUAGE_NAMES.get(code, code.upper() if code else "")
+
+
+def by_language(
+    voices: list, prefer: str = ""
+) -> "list[tuple[str, list[str]]]":
+    """按语言分好组，``[(语言代码, [音色...]), ...]``。
+
+    ``prefer`` 是脚本的语言（``en-US`` 或 ``en`` 都行），排在最前面：选音色
+    这件事十次有九次是在找"和脚本同一种语言的那几个"。其余按语言名字排，
+    组内按名字排。认不出语言的放在最后，保持原来的顺序——那是别家 provider
+    的音色名，它们本来就不带语言。
+    """
+    wanted = language_of(prefer) or str(prefer or "").strip().lower()[:3].rstrip("-")
+    groups: dict = {}
+    nameless: list = []
+    for name in voices:
+        code = language_of(name)
+        if not code:
+            nameless.append(name)
+            continue
+        groups.setdefault(code, []).append(name)
+
+    def order(code: str):
+        return (0 if code == wanted else 1, language_label(code).lower(), code)
+
+    out = [(code, sorted(groups[code])) for code in sorted(groups, key=order)]
+    if nameless:
+        out.append(("", nameless))
+    return out
+
+
 def parse_voice_name(name: str):
     # zh-CN-XiaoyiNeural-Female
     # zh-CN-YunxiNeural-Male
