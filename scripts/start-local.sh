@@ -19,6 +19,11 @@
 # something that is working. Anything this script starts itself is stopped when
 # it exits; anything that was already running is left alone.
 #
+# What is *not* working is cleared away first: a process of ours holding one of
+# these ports while answering nothing is the reason the next start fails. Only
+# this project's own processes, only when their health check does not answer.
+# See reap_stale below; KEEP_STALE=1 turns it off.
+#
 # Each check prints what to do about a failure rather than only that it failed.
 # With no config.toml, it offers to copy config.local.example.toml.
 
@@ -175,6 +180,123 @@ wait_for() {
   return 1
 }
 
+
+# --- leftovers from a previous run -------------------------------------------
+#
+# The rule above - "a service that is already up is left exactly as it is" -
+# is about services that *work*. A process that owns the port and answers
+# nothing is not a running service, it is the reason the next start fails, and
+# until now the script only printed the taskkill line for you to copy.
+#
+# What may be stopped here is deliberately narrow. All three have to hold:
+#
+#   1. it owns a port this script manages;
+#   2. its own health check does not answer, or answers "not ok";
+#   3. its command line belongs to *this* project.
+#
+# (3) is the one that matters. Something else on :8080 is somebody else's
+# program, and a start script that kills unknown processes to free a port it
+# wants is a worse problem than the one it solves. Those are reported, never
+# killed. Ollama and Kokoro are not touched either way: this script does not
+# own them, it only checks whether they answer.
+#
+# KEEP_STALE=1 turns all of this off.
+
+KEEP_STALE="${KEEP_STALE:-0}"
+
+pid_on_port() {
+  # pid_on_port PORT -> the OS pid listening there, if any.
+  if [ "${OS:-}" = "Windows_NT" ] && command -v netstat >/dev/null 2>&1; then
+    netstat -ano 2>/dev/null | tr -d '\r' \
+      | awk -v want=":$1" '$1 == "TCP" && $4 == "LISTENING" {
+          n = split($2, a, ":"); if (":" a[n] == want) { print $5; exit }
+        }'
+    return 0
+  fi
+  if command -v lsof >/dev/null 2>&1; then
+    lsof -ti "tcp:$1" -sTCP:LISTEN 2>/dev/null | head -1
+  fi
+}
+
+command_of() {
+  # command_of PID -> its command line, as one line.
+  if [ "${OS:-}" = "Windows_NT" ] && command -v powershell >/dev/null 2>&1; then
+    powershell -NoProfile -Command \
+      "(Get-CimInstance Win32_Process -Filter \"ProcessId=$1\").CommandLine" \
+      2>/dev/null | tr -d '\r' | tr '\n' ' '
+    return 0
+  fi
+  ps -o args= -p "$1" 2>/dev/null | tr '\n' ' '
+}
+
+ours() {
+  # ours PID -> 0 when that command line is one of this project's own.
+  # Matched on the script paths this repo starts, not on "python": the point
+  # is to be sure before stopping anything.
+  case "$(command_of "$1")" in
+    *local_services/genserver/server.py*|*local_services\\genserver\\server.py*) return 0 ;;
+    *webui/Main.py*|*webui\\Main.py*) return 0 ;;
+    *"$CURRENT_DIR"*main.py*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+stop_os_pid() {
+  # stop_os_pid PID — an OS pid, not the MSYS one that stop_pid takes.
+  if command -v taskkill >/dev/null 2>&1; then
+    taskkill //F //T //PID "$1" >/dev/null 2>&1 && return 0
+  fi
+  kill -9 "$1" 2>/dev/null
+}
+
+answers_well() {
+  # answers_well URL [JSON_OK_FIELD] -> 0 when it replies, and when the field
+  # is given, when that field is true. The genserver reports ok:false after it
+  # has lost the GPU or outgrown its memory ceiling; it answers every request
+  # in that state and generates nothing, so "it replied" is not enough.
+  http_ok "$1" 3 || return 1
+  [ -z "${2:-}" ] && return 0
+  [ -z "$PYTHON_BIN" ] && return 0
+  "$PYTHON_BIN" - "$1" "$2" <<'PY' 2>/dev/null
+import json, sys, urllib.request
+try:
+    with urllib.request.urlopen(sys.argv[1], timeout=3) as answer:
+        sys.exit(0 if json.load(answer).get(sys.argv[2]) else 1)
+except Exception:
+    sys.exit(0)  # unreadable is not the same as unhealthy; leave it alone
+PY
+}
+
+reap_stale() {
+  # reap_stale PORT URL LABEL [JSON_OK_FIELD]
+  [ "$KEEP_STALE" = "1" ] && return 0
+  pid=$(pid_on_port "$1")
+  [ -z "$pid" ] && return 0
+  answers_well "$2" "${4:-}" && return 0
+
+  if ! ours "$pid"; then
+    warn "something that is not ours owns :$1 and is not answering (pid $pid)"
+    detail "this script will not kill a process it does not recognise"
+    detail "  $(command_of "$pid" | cut -c1-70)"
+    return 0
+  fi
+  warn "a $3 from an earlier run is on :$1 and not answering — stopping it"
+  detail "pid $pid"
+  stop_os_pid "$pid"
+  # Give the port a moment to come back before the caller tests it again.
+  for _ in 1 2 3 4 5 6 7 8 9 10; do
+    [ -z "$(pid_on_port "$1")" ] && break
+    sleep 1
+  done
+  if [ -n "$(pid_on_port "$1")" ]; then
+    fail "could not free :$1 (pid $pid is still there)"
+    detail "stop it by hand, then run this script again"
+    FAILED=1
+  else
+    ok "freed :$1"
+  fi
+}
+
 echo
 echo "MoneyPrinterTurbo — local services"
 echo
@@ -252,7 +374,8 @@ fi
 
 # --- 2. genserver ------------------------------------------------------------
 
-if http_ok "$GEN_URL/health"; then
+reap_stale 8730 "$GEN_URL/health" "genserver" "ok"
+if http_ok "$GEN_URL/health" && answers_well "$GEN_URL/health" "ok"; then
   ok "genserver     $GEN_URL"
 else
   # In order: an interpreter named outright in GEN_PYTHON, this repo's own
@@ -466,6 +589,7 @@ PY
 )
 API_PORT=${API_PORT:-8080}
 
+reap_stale "$API_PORT" "http://127.0.0.1:$API_PORT/docs" "API server"
 if port_owned "$API_PORT"; then
   ok "API server already on :$API_PORT"
 elif [ -z "$PYTHON_BIN" ]; then
