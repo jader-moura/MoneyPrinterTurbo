@@ -8554,15 +8554,17 @@ def _render_audio_settings(panel, params):
                         if "V2" not in v:
                             filtered_voices.append(v)
 
-                # 331 个音色、75 种语言平铺成一个下拉框，谁都找不到自己要的
-                # 那几个——而要找的永远是"和脚本同一种语言的"。所以按语言分
-                # 组，脚本那门语言排最前面；脚本语言是"自动"的时候退回界面
-                # 语言，那也是一个比字母序更好的猜测。
-                filtered_voices, voice_headings = _with_language_headings(
-                    filtered_voices,
-                    params.video_language
-                    or st.session_state.get("ui_language", ""),
-                )
+            # 平铺一长串音色，谁都找不到自己要的那几个——而要找的永远是
+            # "和脚本同一种语言的"。所以按语言分组，脚本那门语言排最前面；
+            # 脚本语言是"自动"的时候退回界面语言，比字母序是个更好的猜测。
+            #
+            # 对所有 provider 都做，而不是只对 Azure：Kokoro 的名字里也有
+            # 语言（af_heart 的 a 是 American English）。名字里确实没有语言
+            # 的那几家，这一步会原样返回，顺序一个字都不变。
+            filtered_voices, voice_headings = _with_language_headings(
+                filtered_voices,
+                params.video_language or st.session_state.get("ui_language", ""),
+            )
 
             def _friendly(v):
                 if _is_voice_heading(v):
@@ -8577,7 +8579,14 @@ def _render_audio_settings(panel, params):
                     return parts[2] if len(parts) >= 3 else v
                 if voice.is_chatterbox_voice(v) or voice.is_kokoro_voice(v):
                     name = v.split(":", 1)[1] if ":" in v else v
-                    return name.replace("-Female", "").replace("-Male", "")
+                    name = name.replace("-Female", "").replace("-Male", "")
+                    # 男声还是女声，是挑音色时第一个要问的问题。Kokoro 把它
+                    # 藏在第二个字母里（af_heart 的 f），界面上看不出来。
+                    said = {
+                        "female": tr("Female"),
+                        "male": tr("Male"),
+                    }.get(voice.gender_of(v), "")
+                    return f"{name} ({said})" if said else name
                 if voice.is_minimax_voice(v):
                     return minimax_voice_labels.get(v, v.split(":", 1)[1])
                 if voice.is_fish_audio_voice(v):

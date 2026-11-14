@@ -456,14 +456,66 @@ LANGUAGE_NAMES = {
 }
 
 
+# Kokoro 的音色名是两个字母加下划线：第一个是语言，第二个是性别。
+# ``af_heart`` 是 American Female，``zm_yunxi`` 是 Mandarin Male。所以这里
+# 只能看第一个字母——把 ``af`` 当成 Afrikaans 是刚好会"看起来对"的那种错。
+KOKORO_LANGUAGE_LETTERS = {
+    "a": "en",  # American English
+    "b": "en",  # British English
+    "e": "es",
+    "f": "fr",
+    "h": "hi",
+    "i": "it",
+    "j": "ja",
+    "p": "pt",  # Brazilian Portuguese
+    "z": "zh",  # Mandarin
+}
+
+
+def _kokoro_language(name: str) -> str:
+    """``kokoro:af_heart`` -> ``en``。不是那个形状就返回空字符串。"""
+    body = name.split(":", 1)[1].strip().lower()
+    if len(body) < 3 or body[2] != "_" or not body[:2].isalpha():
+        return ""
+    return KOKORO_LANGUAGE_LETTERS.get(body[0], "")
+
+
+def gender_of(voice_name: str) -> str:
+    """``"female"``、``"male"``，或者认不出来时的空字符串。
+
+    两种写法：Azure 和 Chatterbox 把它放在名字末尾（``-Female``），Kokoro
+    放在第二个字母里（``af_heart`` 的 ``f``，``am_puck`` 的 ``m``）。后者
+    在界面上是看不出来的，而"这是男声还是女声"是挑音色时第一个要问的问题。
+    """
+    name = str(voice_name or "").strip()
+    if not name:
+        return ""
+    lowered = name.lower()
+    if lowered.endswith("-female"):
+        return "female"
+    if lowered.endswith("-male"):
+        return "male"
+    if lowered.startswith("kokoro:"):
+        body = lowered.split(":", 1)[1]
+        if len(body) >= 3 and body[2] == "_" and body[:2].isalpha():
+            return {"f": "female", "m": "male"}.get(body[1], "")
+    return ""
+
+
 def language_of(voice_name: str) -> str:
     """``en-US-AvaNeural-Female`` -> ``en``。认不出来就返回空字符串。
 
-    只认 ``语言-地区-...`` 这种带 locale 的名字，也就是 Azure 那一套。
-    ``kokoro:af_heart`` 这类名字里没有语言，返回空的，由调用方决定怎么排。
+    两套命名：Azure 那种 ``语言-地区-...``，以及 Kokoro 那种
+    ``kokoro:af_heart``（两个字母分别是语言和性别）。别家 provider 的名字
+    里确实没有语言（``minimax:male-qn-qingse``、``elevenlabs:id:Name``），
+    那就返回空的，由调用方决定怎么排——瞎猜一个比不猜更糟。
     """
     name = str(voice_name or "").strip()
-    if not name or ":" in name:
+    if not name:
+        return ""
+    if name.lower().startswith("kokoro:"):
+        return _kokoro_language(name)
+    if ":" in name:
         return ""
     head = name.split("-", 1)[0].lower()
     if not head.isalpha() or not 2 <= len(head) <= 3:

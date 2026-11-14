@@ -64,14 +64,38 @@ class TestReadingTheLanguageOffAVoice:
         assert voice.language_of(name) == code
 
     @pytest.mark.parametrize(
-        "name",
-        ["kokoro:af_heart", "minimax:male-qn-qingse", "", "   ", "NoVoice"],
+        "name,code",
+        [
+            ("kokoro:af_heart", "en"),   # American Female
+            ("kokoro:am_puck", "en"),    # American Male
+            ("kokoro:bm_george", "en"),  # British Male
+            ("kokoro:zf_xiaobei", "zh"),
+            ("kokoro:jf_alpha", "ja"),
+            ("kokoro:pm_santa", "pt"),
+        ],
     )
-    def test_a_name_without_a_locale_has_no_language(self, name):
-        """别家 provider 的音色名里没有语言，不能瞎猜一个。
+    def test_kokoro_says_it_in_one_letter(self, name, code):
+        """两个字母是语言和性别，只能看第一个。
 
-        ``kokoro:af_heart`` 的 ``af`` 是 American Female，不是 Afrikaans。
+        把 ``af`` 当成 Afrikaans 是刚好会"看起来对"的那种错：
+        它是 American Female。
         """
+        assert voice.language_of(name) == code
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "minimax:male-qn-qingse",
+            "elevenlabs:abc123:Rachel",
+            "kokoro:my_own_clone",   # 不是两字母下划线那个形状
+            "kokoro:xf_whatever",    # x 不是 kokoro 的语言字母
+            "",
+            "   ",
+            "NoVoice",
+        ],
+    )
+    def test_a_name_without_a_language_has_none(self, name):
+        """名字里真没有语言的时候，瞎猜一个比不猜更糟。"""
         assert voice.language_of(name) == ""
 
     def test_a_language_it_knows_reads_as_a_language(self):
@@ -81,6 +105,59 @@ class TestReadingTheLanguageOffAVoice:
     def test_one_it_does_not_know_still_says_something(self):
         """表里没有的语言显示代码，总比显示 Unknown 有用。"""
         assert voice.language_label("xx") == "XX"
+
+
+class TestMaleOrFemale:
+    """挑音色时第一个要问的就是这个。
+
+    三种写法：Azure 和 Chatterbox 放在名字末尾（``-Female``），Kokoro
+    放在第二个字母里（``af_heart`` 的 ``f``）——后者在界面上原本
+    是完全看不出来的。
+    """
+
+    @pytest.mark.parametrize(
+        "name,gender",
+        [
+            ("kokoro:af_heart", "female"),
+            ("kokoro:am_puck", "male"),
+            ("kokoro:bm_george", "male"),
+            ("kokoro:zf_xiaobei", "female"),
+            ("en-US-AvaNeural-Female", "female"),
+            ("zh-CN-YunxiNeural-Male", "male"),
+            ("chatterbox:default-Female", "female"),
+        ],
+    )
+    def test_it_reads_all_three_ways_of_writing_it(self, name, gender):
+        assert voice.gender_of(name) == gender
+
+    @pytest.mark.parametrize(
+        "name",
+        [
+            "minimax:male-qn-qingse",  # id 里的 male 不是后缀
+            "kokoro:my_clone",         # 不是两字母下划线那个形状
+            "elevenlabs:abc:Rachel",
+            "",
+        ],
+    )
+    def test_it_does_not_guess(self, name):
+        """``minimax:male-qn-qingse`` 里有 male 两个字母，那不是性别后缀。"""
+        assert voice.gender_of(name) == ""
+
+    def test_every_kokoro_voice_says_which_it_is(self):
+        """用户用的就是这一家：72 个音色一个不能漏。"""
+        unknown = [
+            v for v in voice.get_kokoro_voices() if not voice.gender_of(v)
+        ]
+        assert unknown == []
+
+    def test_the_dropdown_actually_shows_it(self):
+        """转成界面文案那一步在 Main.py 的闭包里，这里只能看源码。
+
+        渲染出来的那一行由 test_webui_kokoro 的真页面测试盯。
+        """
+        source = MAIN.read_text(encoding="utf-8")
+        assert "voice.gender_of(v)" in source
+        assert 'tr("Female")' in source
 
 
 class TestTheOrderOfTheGroups:
@@ -118,11 +195,24 @@ class TestTheOrderOfTheGroups:
             "en-US-AvaNeural-Female",
         ]
 
+    def test_kokoro_keeps_every_voice_as_well(self):
+        """用户用的就是这一家：72 个音色，也是一长串。"""
+        everything = voice.get_kokoro_voices()
+        regrouped = [
+            name for _, names in voice.by_language(everything, prefer="en-US")
+            for name in names
+        ]
+        assert sorted(regrouped) == sorted(everything)
+
     def test_voices_without_a_language_go_last_in_their_own_order(self):
-        mixed = ["en-US-AvaNeural-Female", "kokoro:af_heart", "kokoro:am_puck"]
+        mixed = [
+            "en-US-AvaNeural-Female",
+            "minimax:male-qn-qingse",
+            "elevenlabs:abc:Rachel",
+        ]
         groups = voice.by_language(mixed, prefer="")
         assert groups[-1][0] == ""
-        assert groups[-1][1] == ["kokoro:af_heart", "kokoro:am_puck"]
+        assert groups[-1][1] == ["minimax:male-qn-qingse", "elevenlabs:abc:Rachel"]
 
     def test_not_one_voice_is_lost_or_duplicated(self):
         """这是分组这件事唯一不能出的错。真清单，331 个。"""
@@ -172,9 +262,9 @@ class TestTheHeadingsInTheDropdown:
 
     def test_nothing_without_a_language_grows_a_heading(self):
         options, heads = HELPERS["_with_language_headings"](
-            ["kokoro:af_heart", "kokoro:am_puck"], prefer=""
+            ["minimax:male-qn-qingse", "elevenlabs:abc:Rachel"], prefer=""
         )
-        assert options == ["kokoro:af_heart", "kokoro:am_puck"]
+        assert options == ["minimax:male-qn-qingse", "elevenlabs:abc:Rachel"]
         assert heads == {}
 
 

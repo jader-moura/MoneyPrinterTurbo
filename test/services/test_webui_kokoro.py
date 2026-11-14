@@ -2,7 +2,7 @@
 
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, call
 
 import pytest
 from streamlit.testing.v1 import AppTest
@@ -73,16 +73,26 @@ def test_endpoint_or_credential_change_invalidates_cache(monkeypatch, ui, input_
 
 
 def test_manual_voices_and_clearing_them(monkeypatch, ui):
-    """手填音色立即使用；清空后自动发现，新版对象列表显示为简洁 ID。"""
+    """手填音色立即使用；清空后自动发现，列表按语言分组并标出性别。
+
+    这里盯的是"没有去发现"，所以打的是 ``get_kokoro_voices``，不是
+    ``voice.requests.get``。后者是整个进程共用的 requests 模块，后台那条
+    检查更新的线程一发请求就会被计进来，跟 Kokoro 毫无关系。
+    """
     config.kokoro["voices"] = ["zf_xiaobei", "af_heart"]
-    get = Mock(return_value=SimpleNamespace(status_code=200, json=lambda: {
-        "voices": [{"id": "zf_xiaobei"}, {"id": "af_heart"}],
-    }))
-    monkeypatch.setattr(voice.requests, "get", get)
+    fetch = Mock(return_value=["kokoro:zf_xiaobei", "kokoro:af_heart"])
+    monkeypatch.setattr(voice, "get_kokoro_voices", fetch)
     ui.run()
-    get.assert_not_called()
+    # 配置里填了就直接用，不去问服务器（发现走的是 fallback=False）。
+    assert call(fallback=False) not in fetch.call_args_list
     next(item for item in ui.text_input if item.key == "kokoro_voices_input").set_value("").run()
-    get.assert_called_once()
-    assert selected_voice(ui).options == ["zf_xiaobei", "af_heart"]
+    assert call(fallback=False) in fetch.call_args_list
+    # 按语言分组，每组一条标题；性别跟着界面语言翻译。
+    assert selected_voice(ui).options == [
+        "───  English  ───",
+        "af_heart (女性)",
+        "───  Chinese  ───",
+        "zf_xiaobei (女性)",
+    ]
     assert selected_voice(ui).value == "kokoro:zf_xiaobei"
     assert not ui.exception
