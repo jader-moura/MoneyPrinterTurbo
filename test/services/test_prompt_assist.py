@@ -425,3 +425,78 @@ class TestWritingKeepsGoingWhenYouLookElsewhere:
         end = source.index("function announcePromptWrite", landed)
         assert "draw()" not in source[landed:end]
         assert "relabelClip(at);" in source[landed:end]
+
+
+class TestAskingForADifferentIdea:
+    """用户的原话："we have the write the prompt option, but we also should
+    have a button to get a new image prompt suggestion"。
+
+    原来只有一个按钮，而它总是把框里那条一起递过去，所以它做的是"把这句话
+    写好"。想换个**想法**的人得先自己把框清空——那是猜不出来的。
+
+    两个按钮走的是同一条路，差别只有一个：递不递现有那条。
+    """
+
+    @staticmethod
+    def _source() -> str:
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parents[2]
+        return (root / "resource" / "public" / "editor" / "editor.js").read_text(
+            encoding="utf-8"
+        )
+
+    @staticmethod
+    def _drawer(source: str) -> str:
+        start = source.index("function drawPromptAssist(")
+        return source[start : source.index("/* ---------- inspector ----------", start)]
+
+    def test_there_are_two_buttons_now(self):
+        drawer = self._drawer(self._source())
+        assert 'button("Write the prompt"' in drawer
+        assert 'button("Suggest another"' in drawer
+
+    def test_suggesting_does_not_hand_over_the_current_prompt(self):
+        """这就是两者唯一的区别：不给它，它就重新想。"""
+        drawer = self._drawer(self._source())
+        start = drawer.index('button("Suggest another"')
+        assert 'startPromptWrite(id, direction.input.value, "")' in drawer[start:start + 400]
+
+    def test_writing_still_hands_it_over(self):
+        drawer = self._drawer(self._source())
+        start = drawer.index('button("Write the prompt"')
+        assert (
+            "startPromptWrite(id, direction.input.value, input.value)"
+            in drawer[start : start + 400]
+        )
+
+    def test_a_typed_direction_is_honoured_by_both(self):
+        """"再想一个，但要晚上的"——方向两边都该带上。"""
+        drawer = self._drawer(self._source())
+        assert drawer.count("direction.input.value") >= 2
+
+    def test_only_one_can_run_at_a_time(self):
+        """一段一次只写一条，所以两个按钮共用同一个"忙"。"""
+        drawer = self._drawer(self._source())
+        assert "suggest.disabled = busy" in drawer
+
+    def test_which_one_happened_is_said_differently(self):
+        source = self._source()
+        start = source.index("function startPromptWrite(")
+        body = source[start : start + 2000]
+        assert "const fresh = !String(current || \"\").trim()" in body
+        assert "A different idea" in body
+
+    def test_the_signature_did_not_grow_a_flag(self):
+        """哪一种是**看参数**看出来的，不是多传一个布尔。
+
+        这一条和上面那条 ``test_the_writing_is_started_outside_that_little_block``
+        钉的是同一个签名；那条是早就有的，这里写出来是为了说明理由：没把
+        现有提示词递过去，本身就已经是"重新想一条"的意思了。
+        """
+        assert "function startPromptWrite(id, direction, current)" in self._source()
+
+    def test_the_hint_explains_the_difference(self):
+        """两个按钮摆在一起，不说清楚就只能靠猜。"""
+        drawer = self._drawer(self._source())
+        assert "ignores the box" in drawer

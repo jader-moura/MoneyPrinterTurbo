@@ -1682,9 +1682,12 @@ function announcePromptWrite(id, error) {
 function startPromptWrite(id, direction, current) {
   if (promptWrites.has(id)) return;
   promptWrites.add(id);
+  // 没把现有那条递过来，就是"重新想一条"，而不是"把这条写好"。
+  // 两个按钮走的是同一条路，差别就在这里，所以这里自己看得出来。
+  const fresh = !String(current || "").trim();
   const assist = assistState(id);
-  assist.note = "Writing the prompt… you can go on to another scene while "
-    + "it writes; it finishes on its own.";
+  assist.note = (fresh ? "Thinking of another one… " : "Writing the prompt… ")
+    + "you can go on to another scene while it writes; it finishes on its own.";
   assist.kind = "";
   (async () => {
     try {
@@ -1697,8 +1700,10 @@ function startPromptWrite(id, direction, current) {
       const written = String((data && data.prompt) || "").trim();
       if (!written) throw new Error("the model returned no prompt");
       await applyWrittenPrompt(id, written);
-      assist.note = "Written into the box above. Read it, change what you "
-        + "like, then redraw the picture.";
+      assist.note = fresh
+        ? "A different idea, written from this scene's narration."
+        : "Written into the box above. Read it, change what you like, then "
+          + "redraw the picture.";
       assist.kind = "";
       announcePromptWrite(id, null);
     } catch (error) {
@@ -1745,11 +1750,15 @@ function drawPromptAssist(scene, input) {
   hint.className = "hint";
   hint.textContent =
     "Say in a few words what this picture should show, or what to change "
-    + "about it. The model writes the whole prompt into the box above, "
-    + "keeping the people, the period and the setting of the rest of the "
-    + "video. The picture itself does not change until you redraw it. "
-    + "Writing takes a while, so you can move to another scene while it "
-    + "writes — it finishes on its own.";
+    + "about it, then press Write the prompt — it rewrites what is in the "
+    + "box above. Suggest another ignores the box and thinks of a fresh "
+    + "picture for this scene's narration, for when what is there is not "
+    + "working and you want a different idea rather than a tidier version "
+    + "of the same one. Either way the people, the period and the setting "
+    + "of the rest of the video are kept, Undo puts your own words back, "
+    + "and the picture itself does not change until you redraw it. Writing "
+    + "takes a while, so you can move to another scene while it writes — it "
+    + "finishes on its own.";
   box.appendChild(hint);
 
   const direction = field("What it should show", "input", state_.direction);
@@ -1782,6 +1791,8 @@ function drawPromptAssist(scene, input) {
     const busy = promptWrites.has(id);
     write.disabled = busy;
     write.textContent = busy ? "Writing…" : "Write the prompt";
+    // 一段一次只写一条，所以两个按钮共用同一个"忙"。
+    suggest.disabled = busy;
     undo.disabled = busy;
     note.className = "hint" + (state_.kind ? " " + state_.kind : "");
     note.textContent = state_.note;
@@ -1797,9 +1808,18 @@ function drawPromptAssist(scene, input) {
     show();
   });
 
+  // 同一条路，只是**不把框里那条递过去**：模型于是从这一段的旁白重新想一
+  // 条，而不是把现有的润色一遍。"我不要这个想法"和"这句话写得不好"是两件
+  // 事，而原来只有后面那个按钮——想换个想法得先自己把框清空，谁也猜不到。
+  const suggest = button("Suggest another", "small", () => {
+    if (promptWrites.has(id)) return;
+    startPromptWrite(id, direction.input.value, "");
+    show();
+  });
+
   const row = document.createElement("div");
   row.className = "row";
-  row.append(write, undo);
+  row.append(write, suggest, undo);
   box.append(row, note);
   // 从这一刻起这一块才是这一段当家的那一块（上面那个 ``show`` 的规矩）。
   state_.show = show;
