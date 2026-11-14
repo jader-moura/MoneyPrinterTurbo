@@ -105,10 +105,14 @@ def unload_ollama_wanted() -> bool:
 # this is the number to watch, and the only one that would have said what was
 # wrong.
 
-# This process is leaking once it is past here. A resident model with CPU
-# offload accounts for roughly 16 GB, so this leaves room for a redraw's
-# peaks and still catches a runaway long before the machine is in trouble.
-MAX_OWN_COMMIT_MB = int(float(os.environ.get("GEN_MAX_COMMIT_GB", "28")) * 1024)
+# Past here this process is bigger than working costs. Measured on a 5060 Ti
+# with CPU offload, rather than guessed: 23 GB with the model resident and the
+# img2img pipeline built, 34 GB after one redraw - the jump is CPU offload
+# materialising its host-side copy of the transformer on first use, which is
+# how the design works and does not come back. A first guess of 28 GB sat
+# *below* that and refused the request after the one that had just succeeded.
+# 44 GB leaves room for that and still catches the real runaway, which was 52.
+MAX_OWN_COMMIT_MB = int(float(os.environ.get("GEN_MAX_COMMIT_GB", "44")) * 1024)
 
 # Refuse to start work when the machine has less commit left than this.
 MIN_FREE_COMMIT_MB = int(float(os.environ.get("GEN_MIN_FREE_COMMIT_GB", "4")) * 1024)
@@ -117,9 +121,13 @@ MIN_FREE_COMMIT_MB = int(float(os.environ.get("GEN_MIN_FREE_COMMIT_GB", "4")) * 
 # during: a load that runs out halfway leaves the pieces behind.
 LOAD_COMMIT_MB = int(float(os.environ.get("GEN_LOAD_COMMIT_GB", "18")) * 1024)
 
-# Set once this process is past MAX_OWN_COMMIT_MB and could not give it back.
-# Nothing clears it: only exiting returns commit charge.
+# Set once this process is past MAX_OWN_COMMIT_MB and could not give it back,
+# *and* the machine has no room left. Nothing clears it: only exiting returns
+# commit charge.
 BLOATED: Optional[str] = None
+
+# Said once, when this process is large but nothing is suffering for it.
+NOTED: Optional[str] = None
 
 IDLE_SECONDS = float(os.environ.get("GEN_IDLE_SECONDS", "0"))
 IDLE_CHECK_SECONDS = float(os.environ.get("GEN_IDLE_CHECK_SECONDS", "10"))
@@ -354,6 +362,21 @@ def guard_memory(for_a_load: bool) -> None:
     )
 
 
+def crowded() -> bool:
+    """True when the machine no longer has room to load a model.
+
+    This, not the size of this process, is the harm. A server holding 34 GB on
+    a machine with 30 GB of commit charge still free is doing its job; the
+    same server on a machine with 1 GB free is why a 40 MB allocation starts
+    reporting "CUDA out of memory".
+    """
+    room = machine_commit_mb()
+    if room is None:
+        return False
+    used, limit = room
+    return (limit - used) < (MIN_FREE_COMMIT_MB + LOAD_COMMIT_MB)
+
+
 def watch_own_commit() -> None:
     """Notice this process growing, give back what can be given, then stop.
 
@@ -361,12 +384,27 @@ def watch_own_commit() -> None:
     the machine's commit charge until unrelated things start failing. So the
     growth is capped: one attempt at handing it back, and if that does not
     work it stops taking work and says to restart it.
+
+    Being large is not by itself a reason to refuse work - that mistake cost
+    the request right after the first redraw that ever succeeded. It takes
+    both: past the ceiling *and* a machine with no room left.
     """
-    global BLOATED
+    global BLOATED, NOTED
     if BLOATED is not None:
         return
     mine = own_commit_mb()
     if mine is None or mine <= MAX_OWN_COMMIT_MB:
+        return
+    if not crowded():
+        if NOTED is None:
+            NOTED = f"{mine // 1024} GB of commit charge"
+            print(
+                f"[genserver] this process holds {NOTED}, past the "
+                f"{MAX_OWN_COMMIT_MB // 1024} GB ceiling, but the machine has "
+                "room. Carrying on, and saying it once in case it keeps "
+                "growing.",
+                flush=True,
+            )
         return
     try:
         with held("letting go of the model"):
@@ -386,8 +424,8 @@ def watch_own_commit() -> None:
         return
     BLOATED = (
         f"this process holds {after // 1024} GB of commit charge, past the "
-        f"{MAX_OWN_COMMIT_MB // 1024} GB ceiling, and dropping the model gave "
-        f"back only {(mine - after) // 1024} GB"
+        f"{MAX_OWN_COMMIT_MB // 1024} GB ceiling, dropping the model gave back "
+        f"only {(mine - after) // 1024} GB, and the machine has no room left"
     )
     print(
         f"[genserver] {BLOATED}. Refusing further work: left alone this is "
@@ -423,7 +461,13 @@ class Resident:
         self.generating: Optional[str] = None
 
     def unload(self) -> float:
-        """Drops whatever is resident and returns the free VRAM in MB after."""
+        """Drops whatever is resident and returns the free VRAM in MB after.
+
+        Says what it gave back, because "dropping the model gave back only
+        3 GB" is the kind of thing worth knowing before it matters.
+        """
+        was = self.model_id
+        commit_before = own_commit_mb()
         self.pipe = None
         # The img2img pipeline holds the same transformer, text encoder and
         # VAE. Left behind it would keep all three alive after the unload and
@@ -441,6 +485,14 @@ class Resident:
                 # A card that cannot run a kernel cannot empty a cache either.
                 # Nothing to do about it here; /health reports the real reason.
                 pass
+        if was is not None and commit_before is not None:
+            commit_after = own_commit_mb()
+            if commit_after is not None:
+                print(
+                    f"[genserver] dropped {was}; commit charge "
+                    f"{commit_before // 1024} GB -> {commit_after // 1024} GB",
+                    flush=True,
+                )
         return free_mb()
 
     def load(self, spec: ModelSpec, offload: bool) -> dict:
@@ -651,6 +703,7 @@ def health() -> dict:
         "ok": TORCH_IMPORT_ERROR is None and LOST is None and BLOATED is None,
         "lost": LOST,
         "bloated": BLOATED,
+        "noted": NOTED,
         # So "is it growing?" is one request rather than an afternoon.
         "commit": commit_report(),
         # The process actually holding the card, so a client can stop a
@@ -1024,6 +1077,14 @@ def generate(body: dict) -> dict:
             RESIDENT.generating = None
             LAST_USED = time.monotonic()
 
+    # Every generation, so what this costs is on the record rather than
+    # reconstructed afterwards from the one that failed.
+    print(
+        f"[genserver] drew {width}x{height} in {seconds}s"
+        + (" from a photograph" if reference is not None else "")
+        + f"; peak VRAM {peak} MB, commit charge {(own_commit_mb() or 0) // 1024} GB",
+        flush=True,
+    )
     return {
         "model": spec.id,
         "repo": spec.repo,

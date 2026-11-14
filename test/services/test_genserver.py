@@ -159,6 +159,7 @@ def server(monkeypatch):
     # 模块级的"显卡丢了"状态不能从一条测试漏到下一条。
     monkeypatch.setattr(srv, "LOST", None)
     monkeypatch.setattr(srv, "BLOATED", None)
+    monkeypatch.setattr(srv, "NOTED", None)
     # 内存余量也必须是固定的：这台机器此刻 commit 还剩多少，不能决定
     # 测试过不过。真的量在 TestTheCommitChargeGuard 里单独考。
     monkeypatch.setattr(srv, "own_commit_mb", lambda: 2 * 1024)
@@ -656,7 +657,8 @@ def test_growing_past_the_ceiling_drops_the_model_first(server, monkeypatch):
     dropped = []
     monkeypatch.setattr(srv.RESIDENT, "unload", lambda: dropped.append(True) or 0.0)
     monkeypatch.setattr(srv.RESIDENT, "model_id", "zimage-turbo")
-    readings = iter([40 * 1024, 12 * 1024])
+    monkeypatch.setattr(srv, "machine_commit_mb", lambda: (60 * 1024, 66 * 1024))
+    readings = iter([50 * 1024, 12 * 1024])
     monkeypatch.setattr(srv, "own_commit_mb", lambda: next(readings))
 
     srv.watch_own_commit()
@@ -668,8 +670,9 @@ def test_growing_past_the_ceiling_drops_the_model_first(server, monkeypatch):
 def test_a_leak_it_cannot_give_back_stops_it_taking_work(server, monkeypatch):
     monkeypatch.setattr(srv.RESIDENT, "unload", lambda: 0.0)
     monkeypatch.setattr(srv.RESIDENT, "model_id", "zimage-turbo")
-    # 还完之后还是 59 GB：这就是那次事故。
+    # 还完之后还是 59 GB，而且机器只剩 6 GB：这就是那次事故。
     monkeypatch.setattr(srv, "own_commit_mb", lambda: 59 * 1024)
+    monkeypatch.setattr(srv, "machine_commit_mb", lambda: (60 * 1024, 66 * 1024))
 
     srv.watch_own_commit()
 
@@ -688,6 +691,7 @@ def test_health_says_it_rather_than_waiting_to_be_asked(server, monkeypatch):
     monkeypatch.setattr(srv.RESIDENT, "unload", lambda: 0.0)
     monkeypatch.setattr(srv.RESIDENT, "model_id", "zimage-turbo")
     monkeypatch.setattr(srv, "own_commit_mb", lambda: 59 * 1024)
+    monkeypatch.setattr(srv, "machine_commit_mb", lambda: (60 * 1024, 66 * 1024))
     assert server.get("/health").json()["ok"] is True
 
     srv.watch_own_commit()
@@ -695,6 +699,43 @@ def test_health_says_it_rather_than_waiting_to_be_asked(server, monkeypatch):
     health = server.get("/health").json()
     assert health["ok"] is False
     assert "59 GB" in str(health["bloated"])
+
+
+def test_being_large_on_a_roomy_machine_is_not_a_reason_to_refuse(
+    server, monkeypatch
+):
+    """这一条就是我上一版犯的错。
+
+    常驻模型 + 建好的 img2img 管线是 23 GB，画完一张"照着照片重画"是 34 GB
+    ——涨的那 11 GB 是 CPU offload 第一次用到 transformer 时在主机上摆出来的
+    那份，本来就是这么设计的，也不会还回来。上一版的上限是 28 GB，于是第一
+    张真正画成功的图刚画完，下一次请求就被自己拦掉了。
+
+    伤害在机器没内存，不在这个进程大。
+    """
+    dropped = []
+    monkeypatch.setattr(srv.RESIDENT, "unload", lambda: dropped.append(True) or 0.0)
+    monkeypatch.setattr(srv, "own_commit_mb", lambda: 50 * 1024)
+    # 机器还剩 60 GB。
+    monkeypatch.setattr(srv, "machine_commit_mb", lambda: (20 * 1024, 80 * 1024))
+
+    srv.watch_own_commit()
+
+    assert srv.BLOATED is None
+    assert dropped == []
+    # 但要说一声，万一它还在涨。
+    assert "50 GB" in str(srv.NOTED)
+    assert draw(server).status_code == 200
+
+
+def test_what_one_redraw_costs_is_in_the_log(server, capfd):
+    """每一张都记一行，而不是等出事了再去倒推。"""
+    draw(server)
+    # readouterr() 只读一次，两条流要一起拿。
+    captured = capfd.readouterr()
+    said = captured.out + captured.err
+    assert "peak VRAM" in said
+    assert "commit charge" in said
 
 
 def test_an_ordinary_size_is_left_alone(server, monkeypatch):

@@ -144,7 +144,7 @@ the repository.
 | `OLLAMA_UNLOAD_TIMEOUT` | `30` | Seconds to wait for Ollama's VRAM to come back. |
 | `GEN_IDLE_SECONDS` | `0` (off) | Unload the model after this long idle. |
 | `GEN_IDLE_CHECK_SECONDS` | `10` | How often the idle worker looks, and how often the commit charge is checked. |
-| `GEN_MAX_COMMIT_GB` | `28` | This process is leaking past here: it drops the model, and if that does not help it refuses further work. |
+| `GEN_MAX_COMMIT_GB` | `44` | Bigger than working costs past here. On a crowded machine it drops the model, and if that does not help it refuses further work. |
 | `GEN_MIN_FREE_COMMIT_GB` | `4` | Refuse to generate when the machine has less commit charge left. |
 | `GEN_LOAD_COMMIT_GB` | `18` | Extra commit charge a model load is asked for, on top of the above. |
 | `GEN_DEFAULT_MODEL` | `zimage-turbo` | What `/v1/images/generations` loads with no `model`. |
@@ -297,7 +297,8 @@ What the server does about it now:
 | it sees | it answers |
 | --- | --- |
 | the machine has less than `GEN_MIN_FREE_COMMIT_GB` left (plus `GEN_LOAD_COMMIT_GB` when a load is needed) | `503`, naming how much is left and how much was wanted |
-| its own commit charge past `GEN_MAX_COMMIT_GB` | drops the resident model, and carries on if that gave it back |
+| its own commit charge past `GEN_MAX_COMMIT_GB`, machine still roomy | says so once and carries on — being large is not the harm |
+| past the ceiling **and** the machine out of room | drops the resident model, and carries on if that gave it back |
 | still past it after dropping the model | `503` on everything, and "stop this server and start it again" — `/health` stops saying `ok` |
 | a CUDA error meaning the context is gone | the same, naming the error |
 
@@ -329,7 +330,45 @@ reporting "out of memory" with 5.76 GB of VRAM free. Had it ever succeeded it
 would also have been generating in float32.
 
 The fix is naming the dtype it was loaded with, so the cast is a no-op. The
-measurement stays, because that is the line that found it.
+measurement stays, because that is the line that found it:
+
+```
+[genserver] img2img pipeline built: commit charge 23 GB -> 23 GB (+0 MB)
+POST /v1/images/generations "POST /v1/images/generations HTTP/1.1" 200
+```
+
+#### And then the ceiling itself was wrong
+
+The redraw after that one was refused — by this guard, not by the machine:
+
+```
+[genserver] this process holds 34 GB of commit charge, past the 28 GB ceiling,
+            and dropping the model gave back only 3 GB
+```
+
+So here is what the thing actually costs, measured rather than guessed:
+
+| | commit charge |
+| --- | --- |
+| model resident, img2img pipeline built | 23 GB |
+| after one redraw | 34 GB |
+| after dropping the model again | 31 GB |
+
+The 11 GB is CPU offload materialising its host-side copy of the transformer
+the first time a generation touches it. That is how the design works, it does
+not come back while the process lives, and 28 GB was below it — so the guard
+refused the request right after the first redraw that had ever succeeded.
+
+The ceiling is 44 GB now, above what working costs and below the 52 GB
+runaway. More to the point, being large is no longer by itself a reason to
+refuse: it takes the ceiling **and** a machine with no room left, because the
+harm was always the machine running out, never the size of this process.
+
+Worth knowing on a 32 GB machine: one genserver drawing redraws sits at ~34 GB
+of commit charge, so the commit limit — RAM plus the pagefile, which Windows
+resizes on its own — is what decides whether anything else can run. Here it
+moved from 79.9 GB to 66.6 GB between two restarts, and with everything else
+running the machine was left with 3 GB.
 
 The watcher runs on the idle worker's tick, which is why that thread now
 starts even with `GEN_IDLE_SECONDS=0` — before this there was no background
