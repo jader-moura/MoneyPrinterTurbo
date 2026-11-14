@@ -114,12 +114,32 @@ def unload_ollama_wanted() -> bool:
 # 44 GB leaves room for that and still catches the real runaway, which was 52.
 MAX_OWN_COMMIT_MB = int(float(os.environ.get("GEN_MAX_COMMIT_GB", "44")) * 1024)
 
-# Refuse to start work when the machine has less commit left than this.
-MIN_FREE_COMMIT_MB = int(float(os.environ.get("GEN_MIN_FREE_COMMIT_GB", "4")) * 1024)
+# Refuse to start work when the machine has less commit charge left than this.
+#
+# Small on purpose, and nearly off. On Windows the commit limit is RAM plus a
+# pagefile that the system resizes by itself: it read 79.9 GB, then 66.6 GB,
+# then 61 GB here within an hour, and "free commit" shrinks with it without
+# anything being wrong. A first guess of 4 GB turned into the whole failure -
+# this machine idles at about 1 GB free with a genserver resident, so every
+# redraw after the first one was refused with "the machine has 1.0 GB of
+# commit charge left and this needs about 4 GB". Only the last GB before an
+# allocation really fails is worth refusing for.
+MIN_FREE_COMMIT_MB = int(float(os.environ.get("GEN_MIN_FREE_COMMIT_GB", "0.5")) * 1024)
 
-# What a load needs on top of that. Asked for before loading rather than
-# during: a load that runs out halfway leaves the pieces behind.
-LOAD_COMMIT_MB = int(float(os.environ.get("GEN_LOAD_COMMIT_GB", "18")) * 1024)
+# Extra commit charge demanded before a *load*, on top of the above. Zero by
+# default for the same reason: a load that needs more than the current limit
+# makes the system grow its pagefile, which is what a pagefile is for. Set it
+# on a machine with a fixed pagefile, where the limit really is a wall and
+# running out mid-load surfaces as "the paging file is too small" (error 1455).
+LOAD_COMMIT_MB = int(float(os.environ.get("GEN_LOAD_COMMIT_GB", "0")) * 1024)
+
+# When the machine counts as in trouble, for the runaway backstop below. Kept
+# separate from the two above: that one decides whether to refuse a request,
+# this one decides whether a process holding more than the ceiling is a
+# problem worth dropping the model over.
+CRITICAL_FREE_COMMIT_MB = int(
+    float(os.environ.get("GEN_CRITICAL_FREE_COMMIT_GB", "2")) * 1024
+)
 
 # Set once this process is past MAX_OWN_COMMIT_MB and could not give it back,
 # *and* the machine has no room left. Nothing clears it: only exiting returns
@@ -350,7 +370,7 @@ def guard_memory(for_a_load: bool) -> None:
     used, limit = room
     free = limit - used
     wanted = MIN_FREE_COMMIT_MB + (LOAD_COMMIT_MB if for_a_load else 0)
-    if free >= wanted:
+    if free >= wanted or wanted <= 0:
         return
     raise NoRoom(
         f"the machine has {free // 1024}.{(free % 1024) * 10 // 1024} GB of "
@@ -374,7 +394,7 @@ def crowded() -> bool:
     if room is None:
         return False
     used, limit = room
-    return (limit - used) < (MIN_FREE_COMMIT_MB + LOAD_COMMIT_MB)
+    return (limit - used) < CRITICAL_FREE_COMMIT_MB
 
 
 def watch_own_commit() -> None:

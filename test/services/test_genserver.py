@@ -630,16 +630,34 @@ def test_it_can_actually_read_the_numbers():
     assert 0 < used <= limit
 
 
-def test_a_load_is_refused_when_the_machine_has_nothing_left(server, monkeypatch):
-    # 还剩 2 GB，装一个模型要 18 GB。
-    monkeypatch.setattr(srv, "machine_commit_mb", lambda: (78 * 1024, 80 * 1024))
+def test_work_is_refused_only_when_the_last_of_the_commit_is_gone(
+    server, monkeypatch
+):
+    """只剩 200 MB：下一次分配本来就要失败了。"""
+    monkeypatch.setattr(
+        srv, "machine_commit_mb", lambda: (80 * 1024 - 200, 80 * 1024)
+    )
     response = draw(server)
     assert response.status_code == 503
     said = response.json()["error"]
     # 要说清楚剩多少、要多少、以及该做什么。
     assert "commit charge" in said
-    assert "78 of 80" in said
+    assert "79 of 80" in said
     assert server.painted == []
+
+
+def test_a_machine_that_merely_runs_close_to_its_limit_is_left_alone(
+    server, monkeypatch
+):
+    """这一条就是把每一次重画都挡掉的那个错。
+
+    Windows 的 commit limit 是内存加上一个它自己会调整大小的分页文件：一小时
+    里读到过 79.9 GB、66.6 GB、61 GB，而"还剩多少"跟着一起缩，并不代表出了
+    问题。这台机器常驻一个 genserver 的时候就稳定在 1 GB 左右，于是第一张之
+    后的每一次重画都被"还剩 1.0 GB，需要 4 GB"挡掉了。
+    """
+    monkeypatch.setattr(srv, "machine_commit_mb", lambda: (60 * 1024, 61 * 1024))
+    assert draw(server).status_code == 200
 
 
 def test_finishing_what_is_already_loaded_needs_less_room(server, monkeypatch):
@@ -657,7 +675,7 @@ def test_growing_past_the_ceiling_drops_the_model_first(server, monkeypatch):
     dropped = []
     monkeypatch.setattr(srv.RESIDENT, "unload", lambda: dropped.append(True) or 0.0)
     monkeypatch.setattr(srv.RESIDENT, "model_id", "zimage-turbo")
-    monkeypatch.setattr(srv, "machine_commit_mb", lambda: (60 * 1024, 66 * 1024))
+    monkeypatch.setattr(srv, "machine_commit_mb", lambda: (65 * 1024, 66 * 1024))
     readings = iter([50 * 1024, 12 * 1024])
     monkeypatch.setattr(srv, "own_commit_mb", lambda: next(readings))
 
@@ -672,7 +690,7 @@ def test_a_leak_it_cannot_give_back_stops_it_taking_work(server, monkeypatch):
     monkeypatch.setattr(srv.RESIDENT, "model_id", "zimage-turbo")
     # 还完之后还是 59 GB，而且机器只剩 6 GB：这就是那次事故。
     monkeypatch.setattr(srv, "own_commit_mb", lambda: 59 * 1024)
-    monkeypatch.setattr(srv, "machine_commit_mb", lambda: (60 * 1024, 66 * 1024))
+    monkeypatch.setattr(srv, "machine_commit_mb", lambda: (65 * 1024, 66 * 1024))
 
     srv.watch_own_commit()
 
@@ -691,7 +709,7 @@ def test_health_says_it_rather_than_waiting_to_be_asked(server, monkeypatch):
     monkeypatch.setattr(srv.RESIDENT, "unload", lambda: 0.0)
     monkeypatch.setattr(srv.RESIDENT, "model_id", "zimage-turbo")
     monkeypatch.setattr(srv, "own_commit_mb", lambda: 59 * 1024)
-    monkeypatch.setattr(srv, "machine_commit_mb", lambda: (60 * 1024, 66 * 1024))
+    monkeypatch.setattr(srv, "machine_commit_mb", lambda: (65 * 1024, 66 * 1024))
     assert server.get("/health").json()["ok"] is True
 
     srv.watch_own_commit()

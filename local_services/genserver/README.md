@@ -145,8 +145,9 @@ the repository.
 | `GEN_IDLE_SECONDS` | `0` (off) | Unload the model after this long idle. |
 | `GEN_IDLE_CHECK_SECONDS` | `10` | How often the idle worker looks, and how often the commit charge is checked. |
 | `GEN_MAX_COMMIT_GB` | `44` | Bigger than working costs past here. On a crowded machine it drops the model, and if that does not help it refuses further work. |
-| `GEN_MIN_FREE_COMMIT_GB` | `4` | Refuse to generate when the machine has less commit charge left. |
-| `GEN_LOAD_COMMIT_GB` | `18` | Extra commit charge a model load is asked for, on top of the above. |
+| `GEN_MIN_FREE_COMMIT_GB` | `0.5` | Refuse to generate when the machine has less commit charge left. Nearly off on purpose: the commit limit is elastic, so this is only the last half gigabyte before an allocation really fails. |
+| `GEN_LOAD_COMMIT_GB` | `0` | Extra commit charge demanded before a load. Off by default, since the system grows its pagefile; set it where the pagefile is fixed. |
+| `GEN_CRITICAL_FREE_COMMIT_GB` | `2` | When the machine counts as out of room, for the runaway backstop. |
 | `GEN_DEFAULT_MODEL` | `zimage-turbo` | What `/v1/images/generations` loads with no `model`. |
 
 ## config.toml
@@ -296,7 +297,7 @@ What the server does about it now:
 
 | it sees | it answers |
 | --- | --- |
-| the machine has less than `GEN_MIN_FREE_COMMIT_GB` left (plus `GEN_LOAD_COMMIT_GB` when a load is needed) | `503`, naming how much is left and how much was wanted |
+| the machine has less than `GEN_MIN_FREE_COMMIT_GB` left (plus `GEN_LOAD_COMMIT_GB` when a load is needed) | `503`, naming how much is left and how much was wanted. Both default low: a machine simply running close to its elastic commit limit is normal, and refusing there blocked every redraw after the first. |
 | its own commit charge past `GEN_MAX_COMMIT_GB`, machine still roomy | says so once and carries on — being large is not the harm |
 | past the ceiling **and** the machine out of room | drops the resident model, and carries on if that gave it back |
 | still past it after dropping the model | `503` on everything, and "stop this server and start it again" — `/health` stops saying `ok` |

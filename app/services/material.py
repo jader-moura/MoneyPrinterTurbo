@@ -1821,26 +1821,42 @@ def _save_openai_image_file(
 # 这一次失败的原话。素材源按约定返回空列表（上层跳过这个关键词继续），
 # 原话就只剩在日志里——用户看到的是"没出图"，看不到"为什么"。
 #
-# 用 thread-local 而不是全局：每个任务、每个重画任务各跑在自己的线程里，
-# 全局会让这条片子的错误出现在另一条片子的提示里。
-_LAST_FAILURE = threading.local()
+# 曾经写成 thread-local，那是错的：出图那一步跑在 ``ThreadPoolExecutor`` 的
+# 工作线程里（见下面取素材那两处），而读它的是排队那条线程，于是永远读到空
+# 字符串，界面上还是只有"没出图"。
+#
+# 所以是一个带锁的全局，外加一个时间戳。代价说清楚：两条片子同时在出图的时
+# 候，理论上会读到另一条的那句话。那是一行提示文字读错，而不是数据出错，比
+# "永远不告诉用户为什么"便宜得多。
+_LAST_FAILURE_LOCK = threading.Lock()
+_LAST_FAILURE: dict = {"source": "", "detail": "", "when": 0.0}
+
+# 超过这么久的原话就不要再贴到新的错误上去了：那大概是上一轮的事。
+FAILURE_MEMORY_SECONDS = 120.0
 
 
 def remember_failure(source: str, detail: str) -> None:
     """记下某个素材源这一次失败的原话。``detail`` 为空表示"重新开始"。"""
-    _LAST_FAILURE.source = str(source or "")
     # 一行、不太长：这段文字要进界面。CUDA 的报错后面跟着三行链接和提示，
     # 真正有用的那半句在最前面。
-    _LAST_FAILURE.detail = " ".join(str(detail or "").split())[:240]
+    said = " ".join(str(detail or "").split())[:240]
+    with _LAST_FAILURE_LOCK:
+        _LAST_FAILURE["source"] = str(source or "")
+        _LAST_FAILURE["detail"] = said
+        _LAST_FAILURE["when"] = time.monotonic() if said else 0.0
 
 
 def last_failure(source: str = "") -> str:
-    """这个线程里那个素材源上一次失败的原话，没有就是空字符串。"""
-    if getattr(_LAST_FAILURE, "detail", "") == "":
-        return ""
-    if source and getattr(_LAST_FAILURE, "source", "") != source:
-        return ""
-    return str(_LAST_FAILURE.detail)
+    """那个素材源刚刚失败的原话，没有就是空字符串。"""
+    with _LAST_FAILURE_LOCK:
+        detail = str(_LAST_FAILURE["detail"])
+        if not detail:
+            return ""
+        if source and _LAST_FAILURE["source"] != source:
+            return ""
+        if time.monotonic() - float(_LAST_FAILURE["when"]) > FAILURE_MEMORY_SECONDS:
+            return ""
+        return detail
 
 
 def generate_images_openai(

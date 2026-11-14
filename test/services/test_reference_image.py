@@ -882,24 +882,37 @@ class TestTheReasonReachesTheScreen:
         assert len(said) <= 240
         assert said.startswith("HTTP 500: CUDA error: unknown error")
 
-    def test_each_task_keeps_its_own_failure(self):
-        """两条片子同时在重画，一条的错误不能冒出来挂在另一条上。"""
-        import threading
+    def test_a_failure_in_a_worker_thread_still_reaches_the_message(self):
+        """出图跑在线程池里，读错误的是排队那条线程。
+
+        这一条本来写成"每条线程各记自己的"，于是 ``last_failure`` 永远返回
+        空字符串，界面上还是只有"没出图"：``generate_images_openai`` 是在
+        ``ThreadPoolExecutor`` 的工作线程里跑的，而读它的人不在那条线程上。
+        """
+        from concurrent.futures import ThreadPoolExecutor
 
         from app.services import material
 
-        material.remember_failure("openai_image", "this thread's failure")
-        seen = []
+        material.remember_failure("openai_image", "")
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            pool.submit(
+                material.remember_failure, "openai_image", "the card is gone"
+            ).result()
+        assert material.last_failure("openai_image") == "the card is gone"
 
-        def other():
-            material.remember_failure("openai_image", "the other thread's failure")
-            seen.append(material.last_failure("openai_image"))
+    def test_an_old_failure_is_not_pinned_on_a_new_attempt(self, monkeypatch):
+        """上一轮的原话不要贴到这一轮的错误上。"""
+        from app.services import material
 
-        thread = threading.Thread(target=other)
-        thread.start()
-        thread.join()
-        assert seen == ["the other thread's failure"]
-        assert material.last_failure("openai_image") == "this thread's failure"
+        material.remember_failure("openai_image", "last time's failure")
+        monkeypatch.setattr(
+            material.time,
+            "monotonic",
+            lambda: material._LAST_FAILURE["when"]
+            + material.FAILURE_MEMORY_SECONDS
+            + 1,
+        )
+        assert material.last_failure("openai_image") == ""
 
     def test_the_scene_error_says_what_the_source_said(self, monkeypatch):
         from types import SimpleNamespace
