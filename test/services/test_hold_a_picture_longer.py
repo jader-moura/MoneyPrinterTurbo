@@ -30,7 +30,10 @@ from test.services.test_scene_editor import idle_task, task_root  # noqa: F401
 BAKED = 4.0
 
 
-def a_task(task_root, material="shot.zoom-abc123.mp4"):
+BAKED_NAME = ("a" * 64) + ".zoom-abc123.mp4"
+
+
+def a_task(task_root, material=BAKED_NAME):
     """一个等着审的任务，唯一那段画面是出片时烘出来的 4 秒片段。"""
     task_id = "holding"
     directory = task_root / task_id
@@ -79,9 +82,6 @@ class TestAPictureBakedAtFiveSecondsCanStillBeHeldLonger:
     ):
         task_id, material = a_task(task_root)
         with patch.object(timeline, "probe_duration", return_value=BAKED):
-            with patch.object(
-                timeline, "source_image_for", return_value="a-still.png"
-            ):
                 with patch.object(timeline, "ensure_image_length") as render:
                     scene = scene_editor.update_timing(task_id, 0, duration=10.0)
 
@@ -100,9 +100,6 @@ class TestAPictureBakedAtFiveSecondsCanStillBeHeldLonger:
         task_id, material = a_task(task_root)
         before = scene_manifest.load(task_id)["scenes"][0]["material"]
         with patch.object(timeline, "probe_duration", return_value=BAKED):
-            with patch.object(
-                timeline, "source_image_for", return_value="a-still.png"
-            ):
                 scene_editor.update_timing(task_id, 0, duration=10.0)
         after = scene_manifest.load(task_id)["scenes"][0]["material"]
         assert after == before
@@ -112,19 +109,35 @@ class TestAPictureBakedAtFiveSecondsCanStillBeHeldLonger:
     def test_an_in_point_does_not_eat_into_the_hold(self, task_root, idle_task):
         task_id, _ = a_task(task_root)
         with patch.object(timeline, "probe_duration", return_value=BAKED):
-            with patch.object(
-                timeline, "source_image_for", return_value="a-still.png"
-            ):
                 scene = scene_editor.update_timing(
                     task_id, 0, trim_start=2.0, duration=10.0
                 )
         assert scene["duration"] == pytest.approx(10.0)
         assert not scene.get("clamped")
 
+    def test_deciding_costs_nothing(self, task_root, idle_task, monkeypatch):
+        """拖一下不能打开目录里每一张图。
+
+        ``source_image_for`` 要重算每张 png 的摘要，实测一次 2.42 秒。
+        挂在拖拽上就是每松手卡两秒半，和之前跑 ffmpeg 没差多少。
+        """
+        task_id, _ = a_task(task_root, material=("d" * 64) + ".zoom-abc.mp4")
+        monkeypatch.setattr(
+            timeline,
+            "source_image_for",
+            lambda *a, **k: pytest.fail("a drag must not hash every still"),
+        )
+        with patch.object(timeline, "probe_duration", return_value=BAKED):
+            scene = scene_editor.update_timing(task_id, 0, duration=10.0)
+        assert scene["duration"] == pytest.approx(10.0)
+        assert not scene.get("clamped")
+
+
     def test_the_render_is_what_actually_extends_it(self, task_root, idle_task):
         """放行之后，长出来的那一段由出片那一步渲——这里钉住那一步真的会渲。"""
         task_id, material = a_task(task_root)
         scenes = [{"index": 0, "material": material, "duration": 10.0}]
+        # 出片那一步可以慢，它用的就是那个贵的、准确的判断。
         with patch.object(timeline, "probe_duration", return_value=BAKED):
             with patch.object(
                 timeline, "source_image_for", return_value="a-still.png"

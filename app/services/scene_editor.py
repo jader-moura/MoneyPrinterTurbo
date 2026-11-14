@@ -2108,7 +2108,13 @@ def update_timing(
                 material = extended
                 source_duration = timeline.probe_duration(material)
     else:
-        may_exceed = timeline.source_image_for(task_id, material) is not None
+        # 看文件名，不去翻磁盘。``source_image_for`` 要把任务目录里每张
+        # png 都打开重算一遍摘要才能确认：实测一次 2.42 秒，挂在拖拽上就
+        # 是每松手卡两秒半，那和之前跑 ffmpeg 没差多少。
+        #
+        # 猜错的代价仍旧是零：原图真被删了的话，出片那一步照旧夹回素材长
+        # 度并说一句 clamped。
+        may_exceed = timeline.baked_from_an_image(material)
 
     timing = timeline.normalise_timing(
         source_duration=source_duration,
