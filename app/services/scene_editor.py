@@ -305,6 +305,7 @@ def regenerate_material(
     image_style: str | None = None,
     expect_scene: str | None = None,
     reference: Any = None,
+    strength: float | None = None,
 ) -> dict:
     """重新取这一个场景的素材。
 
@@ -350,12 +351,19 @@ def regenerate_material(
 
     # 出图在锁外面。本机一张图要几分钟，拿着锁出图等于这几分钟里这个任务
     # 什么都改不了。
+    # 一次算清楚，出图和记在场景上的是同一个数：日后回头看"这张是怎么来
+    # 的"，答案必须是真的那一个。
+    kept = None
+    if reference is not None:
+        kept = float(strength) if strength else reference_image.strength()
+
     new_path, source = _produce_material(
         task_id,
         term,
         what=f"scene {position}",
         image_style=style,
         reference=reference,
+        strength=kept,
     )
 
     # 重新读一遍清单：刚才那几分钟里用户完全可能改过别的场景，拿出图之前
@@ -376,7 +384,7 @@ def regenerate_material(
         # 这一张是照着哪张照片画的，或者不再是了。记的是**现在这张图**怎么
         # 来的，所以普通重生成要把旧的那条抹掉——留着它就是说谎。
         if reference is not None:
-            scene["reference"] = reference.payload()
+            scene["reference"] = {**reference.payload(), "strength": kept}
         else:
             scene.pop("reference", None)
         # 用户亲手重生成过的结果，不应该被后续批量操作再覆盖掉。
@@ -416,6 +424,7 @@ def _produce_material(
     advice: str = "replace this scene with your own file instead",
     image_style: str | None = None,
     reference: Any = None,
+    strength: float | None = None,
 ) -> tuple[str, str]:
     """按关键词取一份素材，返回 ``(文件路径, 素材源)``。
 
@@ -443,7 +452,9 @@ def _produce_material(
     if reference is not None:
         starting_from = {
             "reference_image": reference.b64,
-            "reference_strength": reference_image.strength(),
+            "reference_strength": (
+                float(strength) if strength else reference_image.strength()
+            ),
         }
     logger.info(
         f"generating {what} of task {task_id} "

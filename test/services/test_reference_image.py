@@ -967,6 +967,183 @@ class TestTheReasonReachesTheScreen:
         assert str(caught.value).endswith("'a comet'")
 
 
+def _params():
+    from types import SimpleNamespace
+
+    return SimpleNamespace(
+        video_source="openai_image", video_clip_duration=5, image_motion="zoom"
+    )
+
+
+def _a_reference():
+    return reference_image.Reference(
+        data=a_photo(),
+        query="comet",
+        source_url="https://pics.example.org/c.jpg",
+        page_url="https://example.org/page",
+        provider="openverse",
+        width=1200,
+        height=800,
+    )
+
+
+class TestChoosingHowMuchPhotoPerPicture:
+    """这两件事在这个模型上换不来，所以每一张都要自己选。
+
+    同一张照片、同一句提示词、同一个种子，量过一整条：
+
+        0.35-0.60  照片的构图、比例、机型都在，出来的是一张照片
+        0.75       两头都不要：构图丢了，画风也没上去
+        0.90-0.98  画风完全对，照片一点没剩（0.95 那次画出了螺旋桨）
+
+    所以界面上给的是两个说实话的选项，而不是一个假装中间值有用的滑块。
+    """
+
+    def test_the_request_takes_it(self):
+        from app.models.schema import SceneRegenerateRequest
+
+        asked = SceneRegenerateRequest(from_photo=True, strength=0.95)
+        assert asked.strength == 0.95
+
+    def test_not_choosing_leaves_it_to_the_configuration(self):
+        from app.models.schema import SceneRegenerateRequest
+
+        assert SceneRegenerateRequest().strength is None
+
+    @pytest.mark.parametrize("value", [0, -0.1, 1.5, 2])
+    def test_an_impossible_amount_is_refused_by_the_request(self, value):
+        import pydantic
+
+        from app.models.schema import SceneRegenerateRequest
+
+        with pytest.raises(pydantic.ValidationError):
+            SceneRegenerateRequest(from_photo=True, strength=value)
+
+    def test_the_queue_carries_the_choice_to_the_worker(self):
+        from app.services import scene_regen_queue
+
+        job = scene_regen_queue._Job(
+            task_id="t",
+            index=0,
+            keyword="k",
+            image_style=None,
+            anchor="",
+            from_photo=True,
+            strength=0.95,
+        )
+        assert job.strength == 0.95
+        assert job.payload()["strength"] == 0.95
+
+    def test_the_chosen_amount_is_what_reaches_the_image_request(self, monkeypatch):
+        """配置里那个值是**没选**的时候才用的。"""
+        from app.services import material, scene_editor
+
+        sent = {}
+        monkeypatch.setattr(
+            material,
+            "download_videos",
+            lambda **kwargs: sent.update(kwargs) or ["a.png"],
+        )
+        monkeypatch.setattr(
+            scene_editor, "load_params", lambda task_id: _params()
+        )
+        monkeypatch.setattr(
+            scene_editor.reference_image, "strength", lambda *a, **k: 0.55
+        )
+        scene_editor._produce_material(
+            "t", "a comet", what="scene 1", reference=_a_reference(), strength=0.95
+        )
+        assert sent["reference_strength"] == 0.95
+
+    def test_without_a_choice_the_configuration_decides(self, monkeypatch):
+        from app.services import material, scene_editor
+
+        sent = {}
+        monkeypatch.setattr(
+            material,
+            "download_videos",
+            lambda **kwargs: sent.update(kwargs) or ["a.png"],
+        )
+        monkeypatch.setattr(
+            scene_editor, "load_params", lambda task_id: _params()
+        )
+        monkeypatch.setattr(
+            scene_editor.reference_image, "strength", lambda *a, **k: 0.55
+        )
+        scene_editor._produce_material(
+            "t", "a comet", what="scene 1", reference=_a_reference()
+        )
+        assert sent["reference_strength"] == 0.55
+
+    def test_what_was_chosen_is_recorded_on_the_scene(self):
+        """过几天回头看"这张怎么来的"，答案里得有这一项。"""
+        from app.services import scene_manifest
+
+        scene = scene_manifest._normalise_scene(
+            {
+                "material": "a.mp4",
+                "reference": {
+                    "query": "comet",
+                    "provider": "openverse",
+                    "source_url": "https://pics.example.org/c.jpg",
+                    "strength": 0.95,
+                },
+            },
+            0,
+        )
+        assert scene["reference"]["strength"] == 0.95
+
+    @pytest.mark.parametrize("value", [0, -1, 1.5, "lots", None])
+    def test_rubbish_in_that_field_is_dropped(self, value):
+        from app.services import scene_manifest
+
+        scene = scene_manifest._normalise_scene(
+            {
+                "material": "a.mp4",
+                "reference": {
+                    "query": "comet",
+                    "source_url": "https://pics.example.org/c.jpg",
+                    "strength": value,
+                },
+            },
+            0,
+        )
+        assert "strength" not in scene["reference"]
+
+
+class TestTheEditorOffersTheChoice:
+    @staticmethod
+    def _source():
+        from pathlib import Path
+
+        here = Path(__file__).resolve().parents[2]
+        return (here / "resource" / "public" / "editor" / "editor.js").read_text(
+            encoding="utf-8"
+        )
+
+    def test_both_options_are_there_and_no_middle_one(self):
+        """0.75 是量出来两头都不要的那个值，不该出现在选项里。"""
+        source = self._source()
+        assert "const KEEP_THE_PHOTO = 0.55;" in source
+        assert "const KEEP_MY_STYLE = 0.95;" in source
+        assert "0.75" not in source.split("function photoKeepPicker")[1][:900]
+
+    def test_the_choice_is_sent_with_the_job(self):
+        source = self._source()
+        assert "body.strength = strength" in source
+
+    def test_the_picker_says_what_each_one_costs(self):
+        """选项的名字本身要说实话，不能两个都听起来像"两样都有"。"""
+        source = self._source()
+        assert "Keep the photograph" in source
+        assert "Loosely inspired" in source
+
+    def test_the_queue_row_says_which_was_chosen(self):
+        source = self._source()
+        assert "keptLabel(job.strength)" in source
+        assert "keeping the photo" in source
+
+
 class TestHowFarItMayMove:
     def test_the_default_keeps_the_composition(self):
         assert reference_image.strength({}) == 0.75

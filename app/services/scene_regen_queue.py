@@ -81,6 +81,7 @@ class _Job:
         "finished_at",
         "from_photo",
         "search",
+        "strength",
         "reference",
     )
 
@@ -94,6 +95,7 @@ class _Job:
         material: str = "",
         from_photo: bool = False,
         search: str = "",
+        strength: Optional[float] = None,
     ) -> None:
         self.id = uuid.uuid4().hex[:12]
         self.task_id = task_id
@@ -118,6 +120,8 @@ class _Job:
         # 已经写好了。
         self.from_photo = bool(from_photo)
         self.search = str(search or "")
+        # 这一张要保留多少照片。None = 用配置里那个。
+        self.strength = None if strength is None else float(strength)
         # 真的找到的那一张（``reference_image.Reference.payload()``）。找到之后
         # 才有，界面拿它显示"搜的是什么词、照片来自哪个网站"。
         self.reference: Optional[dict] = None
@@ -154,6 +158,7 @@ class _Job:
             # 搜图加下载只要几秒，但那几秒里界面上得有话说。
             "from_photo": self.from_photo,
             "search": self.search,
+            "strength": self.strength,
             "reference": self.reference,
         }
 
@@ -189,6 +194,7 @@ def enqueue(
     image_style: Optional[str] = None,
     from_photo: bool = False,
     search: str = "",
+    strength: Optional[float] = None,
 ) -> dict:
     """把一次重生成排进队列，立刻返回。
 
@@ -213,6 +219,7 @@ def enqueue(
         material=plan["material"],
         from_photo=from_photo,
         search=search,
+        strength=strength,
     )
     with _LOCK:
         _QUEUE.append(job)
@@ -469,6 +476,7 @@ def _run(job: _Job) -> None:
             image_style=job.image_style,
             expect_scene=job.anchor,
             reference=reference,
+            strength=job.strength,
         )
     except SceneError as exc:
         # 场景层的错误本来就是给人看的（哪个源失败了、下标越界多少），

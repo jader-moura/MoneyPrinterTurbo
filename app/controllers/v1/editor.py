@@ -834,6 +834,8 @@ def queue_scene_material(
             # 分钟级的，而队列那边本来就一张一张地画、一张一张地报进度。
             from_photo=bool(body.from_photo),
             search=str(body.search or ""),
+            # 每一张自己选保留多少照片。不给就用配置里那个。
+            strength=body.strength,
         ),
     )
     return utils.get_response(200, job)
@@ -863,6 +865,7 @@ def regenerate_scene_material(
             index,
             keyword=body.keyword,
             image_style=body.image_style,
+            strength=body.strength,
             reference=(
                 scene_editor.find_reference_photo(
                     task_id,

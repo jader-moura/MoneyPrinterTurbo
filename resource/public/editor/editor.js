@@ -527,10 +527,61 @@ function pendingJobs(index) {
 
     ``fromPhoto`` 打开的是另一条画法：先去搜一张真实照片，再照着它画这一
     张。排的是同一个队列——出一张图还是那几分钟，而搜图只多几秒。 */
-async function queueRegeneration(index, keyword, imageStyle, fromPhoto) {
+/* 照一张照片画的时候，这一张要保留多少照片。
+ *
+ * 两个值，不是滑块。在 Z-Image-Turbo 上拿同一张照片、同一句提示词、同一个
+ * 种子量过一整条曲线：0.35-0.60 照片的构图和机型都在，但出来的是照片，提示
+ * 词里的画风不起作用；0.90-0.98 画风完全对，而照片什么都没剩——0.95 那次把
+ * 一架喷气客机画成了螺旋桨。中间的 0.75（原来的默认值）两头都不是。
+ *
+ * 所以这里不提供中间值：摆出来等于请用户去挑一个两边都不要的结果。
+ */
+const KEEP_THE_PHOTO = 0.55;
+const KEEP_MY_STYLE = 0.95;
+
+// 上一次选的那个。整个编辑器记着：连着重画好几段的时候，用户的意图通常
+// 是同一个，每一段都要重选一遍是白费的点击。
+let photoKeep = KEEP_THE_PHOTO;
+
+/** "这一张保留多少照片"的下拉框。 */
+function photoKeepPicker() {
+  const wrap = document.createElement("div");
+  wrap.className = "field";
+  const caption = document.createElement("label");
+  caption.textContent = "How much of the photo";
+  const input = document.createElement("select");
+  const choices = [
+    [KEEP_THE_PHOTO, "Keep the photograph — the real subject and framing"],
+    [KEEP_MY_STYLE, "Loosely inspired — my style exactly"],
+  ];
+  for (const [value, label] of choices) {
+    const option = document.createElement("option");
+    option.value = String(value);
+    option.textContent = label;
+    input.appendChild(option);
+  }
+  input.value = String(photoKeep);
+  input.addEventListener("change", () => {
+    photoKeep = Number(input.value) || KEEP_THE_PHOTO;
+  });
+  wrap.append(caption, input);
+  return { wrap, input };
+}
+
+/** 队列行上那半句："这一张是照着照片画的，还是只借了个意思"。 */
+function keptLabel(strength) {
+  if (!strength) return "";
+  return strength <= 0.7 ? " · keeping the photo" : " · loosely inspired";
+}
+
+async function queueRegeneration(index, keyword, imageStyle, fromPhoto, strength) {
   try {
     const body = { keyword, image_style: imageStyle };
-    if (fromPhoto) body.from_photo = true;
+    if (fromPhoto) {
+      body.from_photo = true;
+      // 没选就不发：由服务端用配置里那个值，而不是在这里硬写一个默认。
+      if (strength) body.strength = strength;
+    }
     const job = await call(
       "POST",
       `${scenePath(index)}/material/queue`,
@@ -615,6 +666,9 @@ function drawQueue() {
         + (job.reference && job.reference.page_url
           ? ` (${host(job.reference.page_url)})`
           : "")
+        // 选的是哪一头也要写上：同一段重画两次、两次选得不一样，事后得看
+        // 得出来哪一张是怎么来的。
+        + keptLabel(job.strength)
       : "";
     if (job.state === "running") {
       label.textContent = `${where}${term}${photo} · `
@@ -1845,18 +1899,27 @@ function drawInspector() {
   // 只对生成源出现：库存素材源是去库里搜一个现成文件，没有"照着这张画"
   // 这回事（接口那边也会拒）。
   if (isGenerated(scene)) {
+    // 选择摆在按钮**上面**：它改变这个按钮会做什么，看到按钮之前就该看到它。
+    const keep = photoKeepPicker();
+    keep.wrap.title = "Measured on this model: keeping the photograph gives you "
+      + "the real subject and framing but a photographic picture, and loosely "
+      + "inspired gives your style exactly while the photograph only hints at "
+      + "the subject. There is no setting that gives both.";
+    ui.inspBody.appendChild(keep.wrap);
+
     const fromPhoto = button("Redraw from a photo", "", async () => {
       await savePromptEdit();
       queueRegeneration(
         scene.index,
         keyword.input.value || null,
         style ? style.input.value : null,
-        true
+        true,
+        Number(keep.input.value) || photoKeep
       );
     });
     fromPhoto.title = "Search the web for a photograph of this, then draw this "
-      + "scene from it in the chosen style. The search words are written from "
-      + "this scene's narration and prompt.";
+      + "scene from it. The search words are written from this scene's "
+      + "narration and prompt.";
     ui.inspBody.appendChild(fromPhoto);
   }
 

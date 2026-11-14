@@ -387,6 +387,13 @@ def _normalise_scene(raw: Any, index: int) -> dict:
                 continue
             if value > 0:
                 kept[key] = value
+        # 这一张保留了多少照片。小数，和宽高那两个整数分开处理。
+        try:
+            strength = float(reference.get("strength") or 0)
+        except (TypeError, ValueError):
+            strength = 0.0
+        if 0 < strength <= 1:
+            kept["strength"] = round(strength, 3)
         if kept:
             scene["reference"] = kept
     # 时间线字段只在用户真的设置过之后才出现，所以这里按"有才带"处理：

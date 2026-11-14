@@ -367,10 +367,30 @@ openai_image_prompt_template = "{term}, candid cinematic photograph, natural lig
 # openverse_license_type = "commercial,modification"
 # openverse_api_token = ""
 #
-# How far the redraw may move from the photograph. 1.0 ignores it entirely,
-# 0.75 keeps the composition and repaints everything else, 0.3 hands back
-# nearly the same picture. The step count is scaled to match, so a low
-# strength is not a faster image.
+# How far the redraw may move from the photograph, when the caller does not
+# say. The editor now asks per picture - "keep the photograph" (0.55) or
+# "loosely inspired" (0.95) - so this only applies to callers that choose
+# nothing, and the number below is deliberately NOT the one the editor uses.
+#
+# Measured on Z-Image-Turbo with one photograph, one prompt and one seed:
+#
+#   0.35-0.60   the photograph's subject, framing and proportions survive,
+#               and the picture is photographic. A stylised prompt (comic,
+#               painted, anime) has almost no effect at all.
+#   0.75        neither: the composition is gone and the style has not
+#               arrived. This was the old default and it was the worst
+#               value on the curve.
+#   0.90-0.98   the style is exactly right and nothing of the photograph
+#               survives - not even what the thing looked like. At 0.95 a
+#               photograph of a four-engined jet produced a propeller
+#               airliner, which is the ignorance this feature exists to fix.
+#
+# So the two cannot be had together on this model: structure and appearance
+# are the same knob. Pick by what the video needs - a documentary or
+# cinematic template works beautifully around 0.55, a comic one does not
+# work with a photograph at all and should use plain generation instead.
+#
+# The step count is scaled to match, so a low strength is not a faster image.
 # reference_image_strength = 0.75
 #
 # SafeSearch: "active" or "off" ("active" is Brave's "strict").

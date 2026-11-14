@@ -757,16 +757,36 @@ class SceneRegenerateRequest(BaseModel):
     （提示词本身带着画风，直接拿去搜图会搜回别人画的漫画）。只在
     ``from_photo`` 打开时有意义。
 
+    ``strength`` 决定这一张保留多少照片：0 到 1，越大越不看照片。这是**每
+    一张**都要选的，不是一个全局设置——"这一张要照片里那架飞机，那一张只要
+    画风"是两次不同的判断。不给就用 ``reference_image_strength``。
+
+    量过的分界（Z-Image-Turbo，同一张照片、同一句提示词、同一个种子）：
+
+    ==========  ====================================================
+    0.35-0.60   照片的构图、比例、机型都在，但出来的是一张照片，提示
+                词里的画风基本不起作用。
+    0.75        两边都不要：构图丢了，画风也没上去。
+    0.90-0.98   画风完全对，照片一点没剩——连"那是什么飞机"都没剩，0.95
+                那次画出了一架螺旋桨客机。
+    ==========  ====================================================
+
+    所以这两件事在这个模型上换不来：没有哪个值能同时给到。界面上给的是
+    两个说实话的选项，而不是一个假装中间值有用的滑块。
+
     ``from_photo`` turns on the other way of drawing: find a real photograph
     first, then redraw it in the chosen style. Default off, so existing
     callers behave exactly as before. ``search`` overrides the query the model
-    would have written.
+    would have written. ``strength`` is how much of the photograph to keep,
+    chosen per picture, because keeping the subject and keeping a stylised
+    template are mutually exclusive on this model.
     """
 
     keyword: Optional[str] = None
     image_style: Optional[str] = None
     from_photo: bool = False
     search: Optional[str] = Field(default="", max_length=200)
+    strength: Optional[float] = Field(default=None, gt=0, le=1)
 
 
 class ScenePromptSuggestRequest(BaseModel):
