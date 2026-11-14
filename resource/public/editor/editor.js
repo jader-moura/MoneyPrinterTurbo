@@ -2583,15 +2583,56 @@ ui.zoom.addEventListener("input", () => {
   draw();
 });
 
-// 在时间线上点一下就把播放头移到那里，这是剪辑软件最基本的期待。
+/** 把播放头放到某一秒——放着的时候也能放。
+ *
+ * 为什么要动旁白：放着的时候旁白才是时钟（见 ``tick``，它每一帧都把播放头
+ * 读成 ``narration.currentTime``）。只改 ``state.playhead`` 的话，下一帧就
+ * 被旁白拽回原处，看起来就是"播放时拖不动，必须先暂停"。
+ *
+ * 背景音乐是循环的，所以按余数对位，拖到哪儿听到的就是成片里那一刻的那一
+ * 段，而不是从头开始的另一段。
+ */
+function scrubTo(seconds) {
+  state.playhead = Math.max(0, Math.min(projectTotal(), seconds));
+  if (ui.narration.src) {
+    try { ui.narration.currentTime = state.playhead; } catch { /* 元数据未就绪 */ }
+  }
+  if (ui.musicBed.src) {
+    try {
+      const length = ui.musicBed.duration;
+      ui.musicBed.currentTime = Number.isFinite(length) && length > 0
+        ? state.playhead % length
+        : 0;
+    } catch { /* 元数据未就绪 */ }
+  }
+  // 这里不重置 loadedClip：同一段之内 syncPreview(true) 只是改 currentTime，
+  // 很便宜。清掉它等于每挪一个像素都把同一个文件重新加载一遍，拖动会卡成
+  // 幻灯片，而且每次重载都算一次"切片段"，转场动画会一直闪。
+  syncPreview(true);
+  movePlayhead();
+}
+
+// 在时间线上点一下就把播放头移到那里，按住还能拖着走——这是剪辑软件最基本
+// 的期待，而且放着的时候也该管用。
 for (const track of [ui.ruler, ui.audioTrack]) {
   track.addEventListener("pointerdown", (event) => {
     const rect = track.getBoundingClientRect();
-    state.playhead = Math.max(0, Math.min(projectTotal(),
-      (event.clientX - rect.left) / state.pxPerSecond));
-    state.loadedClip = -1;
-    syncPreview(true);
-    movePlayhead();
+    const secondsAt = (clientX) => (clientX - rect.left) / state.pxPerSecond;
+    scrubTo(secondsAt(event.clientX));
+
+    // 指针捕获：拖出轨道范围（往上拖到素材区、往下拖出窗口）也继续跟手，
+    // 松开才停。没有它的话指针一离开轨道就不再收到事件，播放头卡在半路。
+    try { track.setPointerCapture(event.pointerId); } catch { /* 老浏览器 */ }
+    const onMove = (move) => scrubTo(secondsAt(move.clientX));
+    const onUp = () => {
+      track.removeEventListener("pointermove", onMove);
+      track.removeEventListener("pointerup", onUp);
+      track.removeEventListener("pointercancel", onUp);
+      try { track.releasePointerCapture(event.pointerId); } catch { /* 同上 */ }
+    };
+    track.addEventListener("pointermove", onMove);
+    track.addEventListener("pointerup", onUp);
+    track.addEventListener("pointercancel", onUp);
   });
 }
 
