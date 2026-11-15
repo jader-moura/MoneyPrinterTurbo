@@ -1,10 +1,15 @@
 #!/usr/bin/env bash
 #
-# Bring up the three local services, then the WebUI.
+# Bring up the three local services, then the app (the editor, on one port).
 #
-#   scripts/start-local.sh            check, start what is missing, open the WebUI
+#   scripts/start-local.sh            check, start what is missing, open the editor
 #   scripts/start-local.sh --check    check only, report, exit non-zero if anything is down
-#   scripts/start-local.sh --no-webui start the services and stop there
+#   scripts/start-local.sh --webui    also start the old WebUI on :8501
+#
+# Everything is done in the editor now — starting a video, the settings, the
+# timeline — so the old WebUI is no longer started by default. It is still
+# there and still works: --webui brings it up exactly as before. (--no-webui
+# is accepted and does nothing; it is what the default now is.)
 #
 # The services:
 #
@@ -64,12 +69,13 @@ GEN_LOG="${GEN_LOG:-$CURRENT_DIR/storage/logs/genserver.log}"
 export GEN_IDLE_SECONDS="${GEN_IDLE_SECONDS:-0}"
 
 CHECK_ONLY=0
-START_WEBUI=1
+START_WEBUI=0
 for arg in "$@"; do
   case "$arg" in
     --check) CHECK_ONLY=1; START_WEBUI=0 ;;
+    --webui) START_WEBUI=1 ;;
     --no-webui) START_WEBUI=0 ;;
-    -h|--help) sed -n '2,25p' "$0" | sed 's/^#\{1,2\} \{0,1\}//'; exit 0 ;;
+    -h|--help) sed -n '2,30p' "$0" | sed 's/^#\{1,2\} \{0,1\}//'; exit 0 ;;
     *) echo "unknown option: $arg (try --help)" >&2; exit 2 ;;
   esac
 done
@@ -593,8 +599,8 @@ reap_stale "$API_PORT" "http://127.0.0.1:$API_PORT/docs" "API server"
 if port_owned "$API_PORT"; then
   ok "API server already on :$API_PORT"
 elif [ -z "$PYTHON_BIN" ]; then
-  fail "no Python found; cannot start the API server"
-  detail "the WebUI still works; only the timeline editor needs this"
+  fail "no Python found; cannot start the app"
+  API_FAILED=1
 else
   mkdir -p storage/logs
   "$PYTHON_BIN" main.py >> storage/logs/api.log 2>&1 &
@@ -602,17 +608,34 @@ else
   if wait_for "http://127.0.0.1:$API_PORT/docs" 40; then
     ok "API server on :$API_PORT"
   else
-    # Not fatal: one-click generation never touches the API, so refusing to
-    # start the WebUI over this would take away the part that does work.
-    fail "the API server did not answer on :$API_PORT"
-    detail "the WebUI still works; the timeline editor will not"
+    fail "the app did not answer on :$API_PORT"
     detail "see storage/logs/api.log"
+    API_FAILED=1
   fi
 fi
-detail "timeline editor: http://127.0.0.1:$API_PORT/editor/"
+EDITOR_URL="http://127.0.0.1:$API_PORT/editor/"
 echo
 
 if [ "$START_WEBUI" != "1" ]; then
+  # The editor is the app. If it is not up there is nothing to open, and
+  # saying "ready" would be a lie: say what failed and stop.
+  if [ "${API_FAILED:-0}" = "1" ]; then
+    fail "the app is not running, so there is nothing to open"
+    detail "the old WebUI does not need it: scripts/start-local.sh --webui"
+    exit 1
+  fi
+  echo "Ready: $EDITOR_URL"
+  echo
+  # Open it, the way the WebUI used to open itself. NO_BROWSER=1 to skip.
+  if [ "${NO_BROWSER:-0}" != "1" ]; then
+    if command -v cmd.exe >/dev/null 2>&1; then
+      cmd.exe //c start "" "$EDITOR_URL" >/dev/null 2>&1 || true
+    elif command -v open >/dev/null 2>&1; then
+      open "$EDITOR_URL" >/dev/null 2>&1 || true
+    elif command -v xdg-open >/dev/null 2>&1; then
+      xdg-open "$EDITOR_URL" >/dev/null 2>&1 || true
+    fi
+  fi
   if [ -n "$STARTED_PIDS" ]; then
     echo "Services this script started will stop when it exits. Ctrl-C when done."
     echo
@@ -620,6 +643,16 @@ if [ "$START_WEBUI" != "1" ]; then
   fi
   exit 0
 fi
+
+# With --webui a missing API is not fatal: one-click generation in the WebUI
+# never touches it, so refusing to start the WebUI over this would take away
+# the part that does work.
+if [ "${API_FAILED:-0}" = "1" ]; then
+  detail "the WebUI still works; the editor will not"
+else
+  detail "editor: $EDITOR_URL"
+fi
+echo
 
 # --- 5. the WebUI ------------------------------------------------------------
 

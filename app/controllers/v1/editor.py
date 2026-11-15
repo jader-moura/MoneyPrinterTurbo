@@ -20,10 +20,12 @@ scene, since seeing the real result is the entire point of a review.
 """
 
 import os
+from typing import Optional
 
-from fastapi import Depends, Path, Query, Request
+from fastapi import Depends, File, Path, Query, Request, UploadFile
 from fastapi.responses import FileResponse
 from loguru import logger
+from starlette.background import BackgroundTask
 
 from app.config import config
 from app.controllers import base
@@ -34,6 +36,12 @@ from app.models.schema import (
     BackgroundMusicRequest,
     BackgroundMusicResponse,
     CutSoundRequest,
+    CacheCleanRequest,
+    ConfirmRequest,
+    LoggingOptionsRequest,
+    NewVideoRequest,
+    SettingsUpdateRequest,
+    VoicePreviewRequest,
     RevealRequest,
     VideoEffectsRequest,
     SubtitleEditRequest,
@@ -63,10 +71,13 @@ from app.models.schema import (
 from app.controllers.manager.base_manager import TaskQueueFullError
 from app.services import bgm as bgm_service
 from app.services import transition_sound as transition_sound_service
+from app.services import app_settings
+from app.services import new_video
 from app.services import picture_shelf
 from app.services import publish_metadata
 from app.services import reveal
 from app.services import scene_editor, scene_manifest, scene_regen_queue
+from app.services import signin, upkeep
 from app.services import state as sm
 from app.services import task as tm
 from app.utils import utils
@@ -156,6 +167,302 @@ def create_review_task(request: Request, body: TaskVideoRequest):
     没有它的话，HTTP 调用方根本无法开始一次可审片的生成——只有 WebUI 能。
     """
     return create_task(request, body, stop_at="materials")
+
+
+@router.get(
+    "/new-video/options",
+    summary="The editor's New video form: every field, its choices and defaults",
+)
+def new_video_options(request: Request):
+    """表单长什么样、每一项能挑什么、默认是什么。"""
+    base.get_task_id(request)
+    return utils.get_response(200, new_video.form())
+
+
+@router.get(
+    "/new-video/voices",
+    summary="The voices of one voice service, grouped by language",
+)
+def new_video_voices(
+    request: Request,
+    server: str = Query(..., max_length=40),
+    language: str = Query("", max_length=20),
+    keep: str = Query("", max_length=300),
+):
+    request_id = base.get_task_id(request)
+    try:
+        data = new_video.voices(server, prefer=language, keep=keep)
+    except new_video.NewVideoError as exc:
+        raise HttpException(
+            task_id=request_id, status_code=400, message=f"{request_id}: {exc}"
+        ) from exc
+    return utils.get_response(200, data)
+
+
+@router.post(
+    "/new-video/voice-preview",
+    summary="Hear a voice read a short sample",
+)
+def new_video_voice_preview(request: Request, body: VoicePreviewRequest):
+    request_id = base.get_task_id(request)
+    try:
+        path = new_video.preview_voice(
+            body.voice_name, body.voice_rate, body.voice_volume, body.text
+        )
+    except new_video.NewVideoError as exc:
+        raise HttpException(
+            task_id=request_id, status_code=400, message=f"{request_id}: {exc}"
+        ) from exc
+    # 播完就删：试听不是任务产物，不该在 temp 里越攒越多。
+    return FileResponse(
+        path, media_type="audio/mpeg", filename="voice-preview.mp3",
+        background=BackgroundTask(_remove_quietly, path),
+    )
+
+
+@router.post(
+    "/new-video/audio",
+    summary="Upload your own narration for a new video",
+)
+def new_video_audio(request: Request, file: UploadFile = File(...)):
+    request_id = base.get_task_id(request)
+    try:
+        token = new_video.stage_audio(file.filename or "", file.file)
+    except new_video.NewVideoError as exc:
+        raise HttpException(
+            task_id=request_id, status_code=400, message=f"{request_id}: {exc}"
+        ) from exc
+    return utils.get_response(200, {"file": token, "name": file.filename or token})
+
+
+@router.post(
+    "/new-video/script",
+    summary="Write the script for a new video, to read before starting it",
+)
+def write_new_video_script(request: Request, body: NewVideoRequest):
+    request_id = base.get_task_id(request)
+    try:
+        script = new_video.write_script(body.model_dump())
+    except new_video.NewVideoError as exc:
+        raise HttpException(
+            task_id=request_id, status_code=400, message=f"{request_id}: {exc}"
+        ) from exc
+    return utils.get_response(200, {"video_script": script})
+
+
+@router.post(
+    "/new-video",
+    response_model=TaskResponse,
+    summary="Start a video from the editor; it stops for review, never renders",
+)
+def start_new_video(request: Request, body: NewVideoRequest):
+    """从编辑器开一条片子。
+
+    和 ``POST /materials`` 走同一条流水线，区别只在请求体：这里收的是表单
+    那些项，其余用存下来的设置补齐。文生图停在字幕（先看提示词），别的
+    停在素材——成片永远由编辑器里的"渲染"决定。
+    """
+    request_id = base.get_task_id(request)
+    choices = body.model_dump()
+    task_id = utils.get_uuid()
+    try:
+        params = new_video.build_params(choices)
+        if choices.get("voice_mode") == new_video.VOICE_UPLOAD:
+            params.custom_audio_file = new_video.place_audio(
+                task_id, choices.get("custom_audio") or ""
+            )
+    except new_video.NewVideoError as exc:
+        raise HttpException(
+            task_id=request_id, status_code=400, message=f"{request_id}: {exc}"
+        ) from exc
+    response = create_task(
+        request, params,
+        stop_at=new_video.stop_stage(params, choices.get("review_prompts")),
+        task_id=task_id,
+    )
+    # 开成了才记：没开成的那一次不算"上次用的"。
+    new_video.remember(choices, params)
+    return response
+
+
+def _remove_quietly(path: str) -> None:
+    try:
+        os.remove(path)
+    except OSError:
+        pass
+
+
+@router.get(
+    "/settings",
+    summary="Provider addresses, keys and models; keys are never sent back",
+)
+def read_settings(request: Request):
+    base.get_task_id(request)
+    return utils.get_response(200, app_settings.describe())
+
+
+@router.put(
+    "/settings",
+    summary="Save provider settings to config.toml",
+)
+def save_settings(request: Request, body: SettingsUpdateRequest):
+    request_id = base.get_task_id(request)
+    try:
+        data = app_settings.apply(body.changes, body.clear)
+    except app_settings.SettingsError as exc:
+        raise HttpException(
+            task_id=request_id, status_code=400, message=f"{request_id}: {exc}"
+        ) from exc
+    return utils.get_response(200, data)
+
+
+@router.get(
+    "/settings/signin/{provider}",
+    summary="Whether an account-based provider is connected",
+)
+def signin_status(request: Request, provider: str = Path(..., max_length=40)):
+    request_id = base.get_task_id(request)
+    return utils.get_response(
+        200, _signin(request_id, lambda: signin.status(provider))
+    )
+
+
+@router.post(
+    "/settings/signin/{provider}/{step}",
+    summary="Begin, poll, cancel or disconnect an account sign-in",
+)
+def signin_step(
+    request: Request,
+    provider: str = Path(..., max_length=40),
+    step: str = Path(..., max_length=20),
+):
+    request_id = base.get_task_id(request)
+    steps = {"begin": signin.begin, "poll": signin.poll,
+             "cancel": signin.cancel, "disconnect": signin.disconnect}
+    if step not in steps:
+        raise HttpException(
+            task_id=request_id, status_code=404,
+            message=f"{request_id}: unknown sign-in step {step!r}",
+        )
+    return utils.get_response(
+        200, _signin(request_id, lambda: steps[step](provider))
+    )
+
+
+def _signin(request_id: str, operation):
+    try:
+        return operation()
+    except signin.SignInError as exc:
+        raise HttpException(
+            task_id=request_id, status_code=400, message=f"{request_id}: {exc}"
+        ) from exc
+
+
+def _upkeep(request_id: str, operation):
+    try:
+        return operation()
+    except upkeep.UpkeepError as exc:
+        raise HttpException(
+            task_id=request_id, status_code=400, message=f"{request_id}: {exc}"
+        ) from exc
+
+
+@router.get(
+    "/settings/upkeep",
+    summary="The material cache size and the logging options",
+)
+def read_upkeep(request: Request):
+    base.get_task_id(request)
+    return utils.get_response(200, upkeep.describe())
+
+
+@router.get(
+    "/settings/cache",
+    summary="What a cache clean-up of this range would delete; deletes nothing",
+)
+def preview_cache(request: Request, days: Optional[int] = Query(None)):
+    request_id = base.get_task_id(request)
+    return utils.get_response(
+        200, _upkeep(request_id, lambda: upkeep.cache_stats(days))
+    )
+
+
+@router.post(
+    "/settings/cache/clean",
+    summary="Delete downloaded stock material older than a number of days",
+)
+def clean_cache(request: Request, body: CacheCleanRequest):
+    request_id = base.get_task_id(request)
+    return utils.get_response(
+        200, _upkeep(request_id, lambda: upkeep.clean_cache(body.days, body.confirm))
+    )
+
+
+@router.put(
+    "/settings/logging",
+    summary="Change the log level; takes effect at once",
+)
+def set_logging(request: Request, body: LoggingOptionsRequest):
+    request_id = base.get_task_id(request)
+    return utils.get_response(
+        200,
+        _upkeep(request_id, lambda: upkeep.set_logging(body.level, body.log_requests)),
+    )
+
+
+@router.post(
+    "/settings/keys/export",
+    summary="Download every saved key as a backup file; must be confirmed",
+)
+def export_keys(request: Request, body: ConfirmRequest):
+    """密钥备份。设置页别的接口都不回传 Key，这一条是唯一的例外，所以它
+    不是 GET，而且要请求体里明说 ``confirm``。"""
+    request_id = base.get_task_id(request)
+    if body.confirm is not True:
+        raise HttpException(
+            task_id=request_id, status_code=400,
+            message=f"{request_id}: confirm that the keys may be written to a file",
+        )
+    logger.warning("the saved keys were exported to a backup file from the editor")
+    return utils.get_response(200, {
+        "filename": upkeep.KEY_BACKUP_FILE_NAME, "payload": upkeep.key_backup(),
+    })
+
+
+@router.post(
+    "/settings/keys/restore",
+    summary="Restore keys from a backup file",
+)
+def restore_keys(request: Request, file: UploadFile = File(...)):
+    request_id = base.get_task_id(request)
+    raw = file.file.read(upkeep.MAX_TRANSFER_BYTES + 1)
+    return utils.get_response(
+        200, _upkeep(request_id, lambda: upkeep.restore_keys(raw))
+    )
+
+
+@router.post(
+    "/settings/preset/export",
+    summary="Download the last-used video settings as a preset file",
+)
+def export_preset(request: Request):
+    base.get_task_id(request)
+    return utils.get_response(200, {
+        "filename": upkeep.SETTINGS_PRESET_FILE_NAME,
+        "payload": upkeep.settings_preset(),
+    })
+
+
+@router.post(
+    "/settings/preset/import",
+    summary="Load a settings preset; the next new video starts from it",
+)
+def import_preset(request: Request, file: UploadFile = File(...)):
+    request_id = base.get_task_id(request)
+    raw = file.file.read(upkeep.MAX_TRANSFER_BYTES + 1)
+    return utils.get_response(
+        200, _upkeep(request_id, lambda: upkeep.apply_preset(raw))
+    )
 
 
 @router.get(

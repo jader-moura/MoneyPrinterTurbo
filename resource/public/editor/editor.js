@@ -94,6 +94,24 @@ const ui = {
   shelfModal: el("shelf-modal"), shelfTitle: el("shelf-title"),
   shelfNote: el("shelf-note"), shelfGrid: el("shelf-grid"),
   shelfStatus: el("shelf-status"), shelfClose: el("shelf-close"),
+  newVideo: el("new-video"), libraryNew: el("library-new"),
+  newModal: el("new-modal"), newSubject: el("new-subject"),
+  newScript: el("new-script"), newWrite: el("new-write"),
+  newParagraphs: el("new-paragraphs"), newLanguage: el("new-language"),
+  newTabs: el("new-tabs"), newFields: el("new-fields"),
+  newScriptMore: el("new-script-more"),
+  newScriptMoreLabel: el("new-script-more-label"),
+  newScriptFields: el("new-script-fields"),
+  newStatus: el("new-status"), newSettings: el("new-settings"),
+  newCancel: el("new-cancel"), newCreate: el("new-create"),
+  appSettings: el("app-settings"), settingsModal: el("settings-modal"),
+  settingsNav: el("settings-nav"), settingsBody: el("settings-body"),
+  settingsStatus: el("settings-status"), settingsClose: el("settings-close"),
+  settingsSave: el("settings-save"),
+  createModal: el("create-modal"), createTitle: el("create-title"),
+  createNote: el("create-note"), createBar: el("create-bar"),
+  createPct: el("create-pct"), createElapsed: el("create-elapsed"),
+  createHide: el("create-hide"), createDone: el("create-done"),
 };
 
 const state = {
@@ -1325,6 +1343,1208 @@ ui.shelfModal.addEventListener("click", (event) => {
 });
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape" && !ui.shelfModal.hidden) closePictureShelf();
+});
+
+/* ---------- 开一条新片子 ----------
+
+   以前这一步在另一个页面（WebUI）。现在编辑器自己能开：填主题，点创建，
+   流水线跑到"该让人看一眼"的地方停下，时间线就在这里打开。
+
+   表单不是手写的。有哪几页、每页哪些项、能挑什么、默认是什么，全是服务端
+   给的（``/new-video/options``）——默认值就是上次用的那一套。页面里不留
+   第二份清单：留了，迟早和服务端认的名字对不上。 */
+const fresh = {
+  form: null, values: {}, tab: "", aspectTouched: false, writing: false,
+  voices: null, files: {}, sample: null, lastVoice: {}, more: {},
+};
+const CREATING_KEY = "mpt_creating_task";
+const PHASES = {
+  queued: "Waiting for its turn",
+  script: "Writing the script",
+  terms: "Writing a picture prompt for each line",
+  audio: "Recording the narration",
+  subtitle: "Timing the subtitles",
+  materials: "Getting the pictures",
+  downloading: "Getting the pictures",
+};
+
+function option(value, label) {
+  const node = document.createElement("option");
+  node.value = value;
+  node.textContent = label;
+  return node;
+}
+
+/** 传文件。``call`` 只会发 JSON，文件得走 multipart。 */
+async function upload(path, file) {
+  const body = new FormData();
+  body.append("file", file);
+  const headers = {};
+  const key = apiKey();
+  if (key) headers["x-api-key"] = key;
+  const response = await fetch(API + path, { method: "POST", headers, body });
+  let payload = null;
+  try { payload = await response.json(); } catch { /* 空响应体 */ }
+  if (!response.ok) {
+    throw new Error((payload && (payload.message || payload.detail))
+      || response.statusText);
+  }
+  return payload ? payload.data : null;
+}
+
+/** 这一项现在该不该出现。``show`` 是 {别的项: [让它出现的那些值]}。 */
+function fieldShown(field, values) {
+  for (const [name, wanted] of Object.entries(field.show || {})) {
+    if (!wanted.includes(values[name])) return false;
+  }
+  return true;
+}
+
+function fillSelect(node, options, labelOf) {
+  const groups = new Map();
+  for (const one of options || []) {
+    const item = option(String(one.id), labelOf ? labelOf(one) : one.label);
+    if (one.group) {
+      if (!groups.has(one.group)) {
+        const box = document.createElement("optgroup");
+        box.label = one.group;
+        groups.set(one.group, box);
+        node.appendChild(box);
+      }
+      groups.get(one.group).appendChild(item);
+    } else {
+      node.appendChild(item);
+    }
+  }
+}
+
+/** 下拉框里的值都是字符串；把它还原成服务端给的那个类型（数字、布尔）。 */
+function optionValue(field, text) {
+  const hit = (field.options || []).find((one) => String(one.id) === text);
+  return hit ? hit.id : text;
+}
+
+/** 按种类画一项。``changed(value, redraw)``：redraw 为真表示别的项的显隐
+    可能跟着变，整页要重画；打字和拖滑块不重画，否则焦点会丢。 */
+function formField(field, value, changed) {
+  const box = document.createElement("div");
+  box.className = "field";
+  const wide = ["textarea", "choice", "materials", "audio", "music", "voice"];
+  if (wide.includes(field.kind) || field.wide) box.classList.add("wide");
+
+  if (field.kind === "bool") {
+    // 开关两个一排；只有"我知道要收费"那种要人停下来看的才独占一行。
+    if (field.warn) box.classList.add("wide");
+    box.classList.add("switch");
+    const label = document.createElement("label");
+    label.className = "check" + (field.warn ? " warn" : "");
+    const input = document.createElement("input");
+    input.type = "checkbox";
+    input.checked = !!value;
+    input.addEventListener("change", () => changed(input.checked, true));
+    label.append(input, document.createTextNode(" " + field.label));
+    box.appendChild(label);
+    return box;
+  }
+
+  const label = document.createElement("label");
+  label.textContent = field.label;
+  box.appendChild(label);
+
+  if (field.kind === "select") {
+    const input = document.createElement("select");
+    fillSelect(input, field.options,
+      field.style_labels ? (one) => (one.id ? styleLabel(one.id) : one.label) : null);
+    input.value = String(value ?? "");
+    input.addEventListener("change",
+      () => changed(optionValue(field, input.value), true));
+    box.appendChild(input);
+  } else if (field.kind === "choice") {
+    const row = document.createElement("div");
+    row.className = "choice";
+    for (const one of field.options || []) {
+      const node = document.createElement("button");
+      node.type = "button";
+      node.textContent = one.label;
+      node.className = one.id === value ? "on" : "";
+      node.addEventListener("click", () => changed(one.id, true));
+      row.appendChild(node);
+    }
+    box.appendChild(row);
+  } else if (field.kind === "range") {
+    const shown = document.createElement("span");
+    shown.className = "soft";
+    const say = (v) => {
+      shown.textContent = field.percent
+        ? ` ${Math.round(v * 100)}%` : ` ${Number(v).toFixed(2)}${field.unit || ""}`;
+    };
+    label.appendChild(shown);
+    const input = document.createElement("input");
+    input.type = "range";
+    input.min = field.min; input.max = field.max; input.step = field.step;
+    input.value = value ?? field.min;
+    say(input.value);
+    input.addEventListener("input", () => {
+      say(input.value);
+      changed(Number(input.value), false);
+    });
+    box.appendChild(input);
+  } else if (field.kind === "number") {
+    const input = document.createElement("input");
+    input.type = "number";
+    if (field.min !== undefined) input.min = field.min;
+    if (field.max !== undefined) input.max = field.max;
+    if (field.step !== undefined) input.step = field.step;
+    input.value = value ?? "";
+    input.addEventListener("input",
+      () => changed(input.value === "" ? null : Number(input.value), false));
+    box.appendChild(input);
+  } else if (field.kind === "color") {
+    const input = document.createElement("input");
+    input.type = "color";
+    input.value = /^#[0-9a-f]{6}$/i.test(value || "") ? value : "#000000";
+    input.addEventListener("input", () => changed(input.value, false));
+    box.appendChild(input);
+  } else if (field.kind === "textarea") {
+    const input = document.createElement("textarea");
+    input.rows = 3;
+    input.placeholder = field.placeholder || "";
+    input.value = value ?? "";
+    input.addEventListener("input", () => changed(input.value, false));
+    box.appendChild(input);
+  } else if (field.kind === "voice") {
+    box.appendChild(voiceControl(value, changed));
+  } else if (["materials", "audio", "music"].includes(field.kind)) {
+    box.appendChild(uploadControl(field, value, changed));
+  } else {
+    const input = document.createElement("input");
+    input.type = "text";
+    input.placeholder = field.placeholder || "";
+    input.value = value ?? "";
+    input.addEventListener("input", () => changed(input.value, false));
+    box.appendChild(input);
+  }
+  if (field.help) {
+    const help = document.createElement("p");
+    help.className = "hint";
+    help.textContent = field.help;
+    box.appendChild(help);
+  }
+  return box;
+}
+
+/** 音色：按语言分组的下拉框，加一个"听一下"。 */
+function voiceControl(value, changed) {
+  const wrap = document.createElement("div");
+  const row = document.createElement("div");
+  row.className = "with-button";
+  const input = document.createElement("select");
+  const data = fresh.voices || { groups: [], notes: [] };
+  for (const group of data.groups || []) {
+    const box = document.createElement("optgroup");
+    box.label = group.label;
+    for (const voice of group.voices || []) {
+      box.appendChild(option(voice.id, voice.label));
+    }
+    input.appendChild(box);
+  }
+  input.value = value || "";
+  input.addEventListener("change", () => changed(input.value, false));
+  const listen = document.createElement("button");
+  listen.type = "button";
+  listen.className = "btn small";
+  listen.textContent = "Listen";
+  listen.addEventListener("click", () => playVoiceSample(listen));
+  row.append(input, listen);
+  wrap.appendChild(row);
+  for (const note of data.notes || []) {
+    const line = document.createElement("p");
+    line.className = "hint warn";
+    line.textContent = note;
+    wrap.appendChild(line);
+  }
+  return wrap;
+}
+
+async function playVoiceSample(button) {
+  const values = fresh.values;
+  if (!values.voice_name) {
+    newVideoProblem("Choose a voice first.");
+    return;
+  }
+  if (fresh.sample) { fresh.sample.pause(); fresh.sample = null; }
+  button.disabled = true;
+  button.textContent = "Reading…";
+  try {
+    const headers = { "Content-Type": "application/json" };
+    const key = apiKey();
+    if (key) headers["x-api-key"] = key;
+    const response = await fetch(API + "/new-video/voice-preview", {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        voice_name: values.voice_name,
+        voice_rate: Number(values.voice_rate) || 1,
+        voice_volume: Number(values.voice_volume) || 1,
+        // 有脚本就念脚本的开头：听的是"它念我这段话"的样子。
+        text: ui.newScript.value.trim().slice(0, 240),
+      }),
+    });
+    if (!response.ok) {
+      let payload = null;
+      try { payload = await response.json(); } catch { /* 不是 JSON */ }
+      throw new Error((payload && payload.message) || response.statusText);
+    }
+    const sound = new Audio(URL.createObjectURL(await response.blob()));
+    fresh.sample = sound;
+    await sound.play();
+    ui.newStatus.textContent = "";
+  } catch (error) {
+    newVideoProblem(String(error.message || error));
+  } finally {
+    button.disabled = false;
+    button.textContent = "Listen";
+  }
+}
+
+/** 三种上传：自己的素材（可以好几个）、自己的配音、自己的配乐。
+    文件一选就传，服务端当场验；表单里记的是它给回来的名字。 */
+function uploadControl(field, value, changed) {
+  const many = field.kind === "materials";
+  const route = {
+    materials: "/video_materials", audio: "/new-video/audio", music: "/musics",
+  }[field.kind];
+  const wrap = document.createElement("div");
+  wrap.className = "files";
+  const names = fresh.files;
+  const held = many ? (value || []) : (value ? [value] : []);
+  for (const stored of held) {
+    const line = document.createElement("div");
+    line.className = "file";
+    const text = document.createElement("span");
+    text.textContent = names[stored] || stored;
+    const drop = document.createElement("button");
+    drop.type = "button";
+    drop.textContent = "×";
+    drop.title = "Remove";
+    drop.addEventListener("click", () =>
+      changed(many ? held.filter((one) => one !== stored) : "", true));
+    line.append(text, drop);
+    wrap.appendChild(line);
+  }
+  const input = document.createElement("input");
+  input.type = "file";
+  input.multiple = many;
+  input.accept = field.accept
+    || (many ? "video/*,image/*" : "audio/*");
+  input.addEventListener("change", async () => {
+    const chosen = [...input.files];
+    if (!chosen.length) return;
+    ui.newStatus.className = "hint pending";
+    let current = many ? [...held] : "";
+    try {
+      for (const [at, file] of chosen.entries()) {
+        ui.newStatus.textContent = chosen.length > 1
+          ? `Uploading ${at + 1} of ${chosen.length}…` : `Uploading ${file.name}…`;
+        const data = await upload(route, file);
+        const stored = data && data.file;
+        if (!stored) throw new Error("the upload was not accepted");
+        names[stored] = file.name;
+        current = many ? [...current, stored] : stored;
+      }
+      ui.newStatus.textContent = "";
+    } catch (error) {
+      newVideoProblem(String(error.message || error));
+    }
+    changed(current, true);
+  });
+  wrap.appendChild(input);
+  return wrap;
+}
+
+async function openNewVideo() {
+  ui.newModal.hidden = false;
+  ui.newStatus.textContent = "";
+  ui.newStatus.className = "hint";
+  if (!fresh.form || fresh.stale) {
+    ui.newCreate.disabled = true;
+    ui.newWrite.disabled = true;
+    ui.newStatus.textContent = "Reading your settings…";
+    try {
+      fresh.form = await call("GET", "/new-video/options");
+      fresh.values = { ...(fresh.form.values || {}) };
+      fresh.voices = fresh.form.voices || null;
+      fresh.tab = (lookTabs()[0] || {}).id || "";
+      fresh.aspectTouched = false;
+      fillNewVideo();
+      ui.newStatus.textContent = "";
+      // 还缺东西就现在说（比如 Ollama 没起来、挑不了模型），别等跑到一半。
+      const missing = fresh.form.setup_problems || [];
+      // 缺的可能马上就补上了（把 Ollama 启动起来），所以下次打开重新问。
+      fresh.stale = missing.length > 0;
+      if (missing.length) newVideoProblem(missing.join(" "));
+    } catch (error) {
+      newVideoProblem(`Could not read the options: ${error.message || error}. `
+        + "If you have just updated, the API needs restarting.");
+      return;
+    }
+  }
+  ui.newCreate.disabled = false;
+  ui.newWrite.disabled = false;
+  ui.newSubject.focus();
+}
+
+function closeNewVideo() {
+  ui.newModal.hidden = true;
+  if (fresh.sample) { fresh.sample.pause(); fresh.sample = null; }
+}
+
+function fillNewVideo() {
+  ui.newLanguage.innerHTML = "";
+  ui.newLanguage.appendChild(option("", "Auto"));
+  for (const code of fresh.form.languages || []) {
+    ui.newLanguage.appendChild(option(code, code));
+  }
+  ui.newLanguage.value = fresh.values.video_language || "";
+  ui.newParagraphs.value = fresh.values.paragraph_number || 1;
+  if (!fresh.tab) fresh.tab = (lookTabs()[0] || {}).id || "";
+  drawNewVideo();
+}
+
+/** 右边的页签。``side`` 的那一页不在这里：它收在左边脚本框底下。 */
+function lookTabs() {
+  return ((fresh.form && fresh.form.tabs) || []).filter((tab) => !tab.side);
+}
+
+function newField(field) {
+  return formField(field, fresh.values[field.name],
+    (value, redraw) => setNewValue(field.name, value, redraw));
+}
+
+function drawNewVideo() {
+  // 左边：脚本的那几项不常用的设置。
+  const side = ((fresh.form && fresh.form.tabs) || []).find((tab) => tab.side);
+  ui.newScriptMore.hidden = !side;
+  ui.newScriptFields.innerHTML = "";
+  if (side) {
+    ui.newScriptMoreLabel.textContent = side.label;
+    for (const field of side.fields || []) {
+      if (fieldShown(field, fresh.values)) {
+        ui.newScriptFields.appendChild(newField(field));
+      }
+    }
+  }
+
+  // 右边：页签，和当前那一页。
+  ui.newTabs.innerHTML = "";
+  for (const tab of lookTabs()) {
+    const node = document.createElement("button");
+    node.type = "button";
+    node.textContent = tab.label;
+    node.className = tab.id === fresh.tab ? "on" : "";
+    node.addEventListener("click", () => { fresh.tab = tab.id; drawNewVideo(); });
+    ui.newTabs.appendChild(node);
+  }
+  ui.newFields.innerHTML = "";
+  const tab = lookTabs().find((one) => one.id === fresh.tab);
+  if (!tab) return;
+  const shown = (tab.fields || []).filter((field) => fieldShown(field, fresh.values));
+  const usual = shown.filter((field) => !field.advanced);
+  const extra = shown.filter((field) => field.advanced);
+
+  const top = document.createElement("div");
+  top.className = "form-fields";
+  for (const field of usual) top.appendChild(newField(field));
+  ui.newFields.appendChild(top);
+  if (!extra.length) return;
+
+  // 平时要动的就上面那几样；其余的收在这里。收起来的照样生效、照样发出去。
+  const open = !!fresh.more[tab.id];
+  const line = document.createElement("div");
+  line.className = "more-line";
+  const toggle = document.createElement("button");
+  toggle.type = "button";
+  toggle.className = "more-toggle" + (open ? " open" : "");
+  toggle.textContent = open ? "Fewer settings" : `More settings (${extra.length})`;
+  toggle.addEventListener("click", () => {
+    fresh.more[tab.id] = !open;
+    drawNewVideo();
+  });
+  line.appendChild(toggle);
+  if (open) {
+    const rest = document.createElement("div");
+    rest.className = "form-fields";
+    for (const field of extra) rest.appendChild(newField(field));
+    line.appendChild(rest);
+  }
+  ui.newFields.appendChild(line);
+}
+
+/** 改了一项。有几项牵着别的项走，在这里一并处理。 */
+function setNewValue(name, value, redraw) {
+  if (name === "tts_server") {
+    // 记下在上一家挑的是谁：换过去看一眼再换回来，不该丢了原来那个音色。
+    fresh.lastVoice[fresh.values.tts_server] = fresh.values.voice_name;
+  }
+  fresh.values[name] = value;
+  if (name === "video_aspect") fresh.aspectTouched = true;
+  if (name === "video_source") {
+    // 画幅是按来源分别记的，换来源时跟着换——除非用户已经自己挑过。
+    const saved = (fresh.form.saved_aspects || {})[value];
+    if (saved && !fresh.aspectTouched) fresh.values.video_aspect = saved;
+    // 换了一家收费的，上一家点的"我知道要收费"不算数。
+    fresh.values.confirm_charge = false;
+  }
+  if (name === "tts_server") loadVoices(value);
+  if (redraw) drawNewVideo();
+}
+
+/** 换了配音服务：去拿那一家的音色。拿不到就照实说，不留着上一家的清单。 */
+async function loadVoices(server) {
+  const language = ui.newLanguage.value || "";
+  fresh.voices = { groups: [], notes: ["Reading the voices…"] };
+  drawNewVideo();
+  try {
+    const query = `server=${encodeURIComponent(server)}`
+      + `&language=${encodeURIComponent(language)}`
+      + `&keep=${encodeURIComponent(fresh.lastVoice[server] || "")}`;
+    fresh.voices = await call("GET", `/new-video/voices?${query}`);
+  } catch (error) {
+    fresh.voices = { groups: [], notes: [String(error.message || error)] };
+  }
+  // 还停在这一家才动：慢的那次回来时用户可能已经换到别家了。
+  if (fresh.values.tts_server !== server) return;
+  const all = (fresh.voices.groups || []).flatMap((group) => group.voices || []);
+  if (!all.some((voice) => voice.id === fresh.values.voice_name)) {
+    const before = fresh.lastVoice[server];
+    fresh.values.voice_name = all.some((voice) => voice.id === before)
+      ? before : (all.length ? all[0].id : "");
+  }
+  drawNewVideo();
+}
+
+/** 交给服务端的那一份：主题、脚本，加上此刻**该出现**的每一项。
+    收起来的项不发——库存视频没有画风，发了只会被拒绝；没发的用上次的。 */
+function newVideoChoices() {
+  const choices = {
+    video_subject: ui.newSubject.value.trim(),
+    video_script: ui.newScript.value.trim(),
+    video_language: ui.newLanguage.value,
+    paragraph_number: Number(ui.newParagraphs.value) || 1,
+  };
+  for (const tab of (fresh.form && fresh.form.tabs) || []) {
+    for (const field of tab.fields || []) {
+      if (!fieldShown(field, fresh.values)) continue;
+      const value = fresh.values[field.name];
+      if (value === null || value === undefined) continue;
+      choices[field.name] = value;
+    }
+  }
+  return choices;
+}
+
+function newVideoProblem(message) {
+  ui.newStatus.className = "hint warn";
+  ui.newStatus.textContent = message;
+}
+
+/** 先把脚本写出来给人看。写的是模型，所以要等几秒到几十秒。 */
+async function writeNewScript() {
+  if (fresh.writing) return;
+  const choices = newVideoChoices();
+  if (!choices.video_subject) {
+    newVideoProblem("Say what the video is about first.");
+    ui.newSubject.focus();
+    return;
+  }
+  if (ui.newScript.value.trim()
+      && !window.confirm("Replace the script that is already in the box?")) {
+    return;
+  }
+  fresh.writing = true;
+  ui.newWrite.disabled = true;
+  ui.newCreate.disabled = true;
+  ui.newStatus.className = "hint pending";
+  ui.newStatus.textContent = "Writing the script…";
+  try {
+    const data = await call("POST", "/new-video/script", choices);
+    ui.newScript.value = (data && data.video_script) || "";
+    ui.newStatus.className = "hint";
+    ui.newStatus.textContent = "Read it through and change anything you like.";
+  } catch (error) {
+    newVideoProblem(String(error.message || error));
+  } finally {
+    fresh.writing = false;
+    ui.newWrite.disabled = false;
+    ui.newCreate.disabled = false;
+  }
+}
+
+async function createNewVideo() {
+  const choices = newVideoChoices();
+  if (!choices.video_subject && !choices.video_script) {
+    newVideoProblem("Say what the video is about, or paste a script.");
+    ui.newSubject.focus();
+    return;
+  }
+  ui.newCreate.disabled = true;
+  ui.newStatus.className = "hint pending";
+  ui.newStatus.textContent = "Starting…";
+  try {
+    const task = await call("POST", "/new-video", choices);
+    const taskId = task && task.task_id;
+    if (!taskId) throw new Error("the API did not say which video it started");
+    try { localStorage.setItem(CREATING_KEY, taskId); } catch { /* 记不住也能做 */ }
+    closeNewVideo();
+    closeLibrary();
+    // 下一条从空表开始。选项留着，连着做几条时不用再挑一遍；但只管这一条
+    // 的那几样（传上来的文件、"我知道要收费"）不留。
+    ui.newSubject.value = "";
+    ui.newScript.value = "";
+    ui.newStatus.textContent = "";
+    Object.assign(fresh.values, {
+      confirm_charge: false, local_materials: [], custom_audio: "", video_terms: "",
+    });
+    watchCreation(taskId, choices.video_subject);
+  } catch (error) {
+    newVideoProblem(String(error.message || error));
+  } finally {
+    ui.newCreate.disabled = false;
+  }
+}
+
+function forgetCreation(taskId) {
+  try {
+    if (localStorage.getItem(CREATING_KEY) === taskId) {
+      localStorage.removeItem(CREATING_KEY);
+    }
+  } catch { /* 无所谓 */ }
+}
+
+/** 盯着新片子，直到它停下来等人看——然后把时间线打开。
+
+    这一段时间里还没有时间线：场景清单要到字幕做完才有。所以不能直接
+    ``load``（那会得到一句"没有场景"），得先等。 */
+async function watchCreation(taskId, subject) {
+  const started = Date.now();
+  const name = subject ? `“${subject}”` : "Your video";
+  ui.createModal.hidden = false;
+  ui.createModal.querySelector(".modal-box").classList.remove("failed");
+  ui.createTitle.textContent = "Creating your video";
+  ui.createNote.textContent = "Starting…";
+  ui.createBar.classList.add("waiting");
+  ui.createBar.style.width = "";
+  ui.createPct.textContent = "";
+  ui.createElapsed.textContent = "";
+  ui.createHide.hidden = false;
+  ui.createDone.hidden = true;
+  setTitleNote("Creating");
+
+  const stop = (title, note, failed) => {
+    forgetCreation(taskId);
+    ui.createModal.hidden = false;
+    ui.createModal.querySelector(".modal-box").classList.toggle("failed", !!failed);
+    ui.createBar.classList.remove("waiting");
+    ui.createBar.style.width = "100%";
+    ui.createTitle.textContent = title;
+    ui.createNote.textContent = note;
+    ui.createPct.textContent = "";
+    ui.createHide.hidden = true;
+    ui.createDone.hidden = false;
+    setTitleNote(failed ? "Failed" : "");
+  };
+
+  let misses = 0;
+  for (;;) {
+    let task;
+    try {
+      task = await call("GET", `/tasks/${encodeURIComponent(taskId)}`);
+      misses = 0;
+    } catch (error) {
+      misses += 1;
+      if (misses < STATUS_RETRIES) {
+        await new Promise((resolve) => setTimeout(resolve, STATUS_RETRY_DELAY));
+        continue;
+      }
+      stop("Lost track of the new video",
+        `Its status cannot be read any more (${error.message || error}). It `
+        + "may still be running: watch the window the API is running in, then "
+        + "look for it under My videos.", true);
+      return;
+    }
+    const stateCode = Number(task && task.state);
+    if (stateCode === -1) {
+      const stage = task.failed_stage ? ` (while ${task.failed_stage})` : "";
+      stop("The video could not be created",
+        String(task.error || "No reason was reported.") + stage, true);
+      return;
+    }
+    if (stateCode !== 4) {
+      forgetCreation(taskId);
+      setTitleNote("");
+      // 用户把挡板收起来、又去改别的片子了：别把他正在改的那条换掉。
+      if (ui.createModal.hidden && state.taskId && state.taskId !== taskId) {
+        say(`${name} is ready — open it from My videos.`, "ok");
+        return;
+      }
+      ui.createModal.hidden = true;
+      ui.task.value = taskId;
+      await load(taskId);
+      return;
+    }
+    const pct = Math.max(0, Math.min(100, Number(task.progress) || 0));
+    if (pct > 0) {
+      ui.createBar.classList.remove("waiting");
+      ui.createBar.style.width = pct + "%";
+      ui.createPct.textContent = pct + "%";
+    }
+    const phase = String((task.generation_activity || {}).phase || "");
+    if (phase) ui.createNote.textContent = (PHASES[phase] || `Stage: ${phase}`) + "…";
+    ui.createElapsed.textContent = `${fmt((Date.now() - started) / 1000)} so far`;
+    setTitleNote(pct > 0 ? `Creating ${pct}%` : "Creating");
+    await new Promise((resolve) => setTimeout(resolve, 2000));
+  }
+}
+
+/** 刷新页面之后接着盯：新片子做到一半时刷新，不该变成"它去哪了"。 */
+async function resumeCreation() {
+  let taskId = "";
+  try { taskId = localStorage.getItem(CREATING_KEY) || ""; } catch { return; }
+  if (!taskId) return;
+  try {
+    const task = await call("GET", `/tasks/${encodeURIComponent(taskId)}`);
+    if (Number(task && task.state) === 4) {
+      closeLibrary();
+      watchCreation(taskId, "");
+      return;
+    }
+  } catch { /* 查不到就是早结束了，或者接口重启过 */ }
+  forgetCreation(taskId);
+}
+
+ui.newVideo.addEventListener("click", openNewVideo);
+ui.libraryNew.addEventListener("click", openNewVideo);
+ui.newCancel.addEventListener("click", closeNewVideo);
+ui.newWrite.addEventListener("click", writeNewScript);
+ui.newCreate.addEventListener("click", createNewVideo);
+ui.newLanguage.addEventListener("change", () => {
+  fresh.values.video_language = ui.newLanguage.value;
+});
+ui.createHide.addEventListener("click", () => { ui.createModal.hidden = true; });
+ui.createDone.addEventListener("click", () => { ui.createModal.hidden = true; });
+ui.newSubject.addEventListener("keydown", (event) => {
+  if (event.key === "Enter") createNewVideo();
+});
+
+/* ---------- 设置 ----------
+
+   各家服务商的地址、Key 和模型。以前只在 WebUI 里，表单底下的"更多设置"
+   得把人送到另一个页面去。现在就在这里，写的是同一份 config.toml。
+
+   这张表也是服务端给的（``/settings``）。Key 不回传：读回来只有"设过没有"，
+   所以框是空的——留空等于不动，要清得点"清掉"。 */
+const prefs = { data: null, group: "", changes: {}, clear: new Set(), saving: false };
+
+async function openSettings() {
+  ui.settingsModal.hidden = false;
+  ui.settingsStatus.className = "hint";
+  ui.settingsStatus.textContent = "Reading…";
+  prefs.changes = {};
+  prefs.clear = new Set();
+  try {
+    prefs.data = await call("GET", "/settings");
+    if (!prefs.group) prefs.group = (prefs.data.groups[0] || {}).id || "";
+    ui.settingsStatus.textContent = "";
+    drawPrefs();
+  } catch (error) {
+    ui.settingsStatus.className = "hint warn";
+    ui.settingsStatus.textContent = `Could not read the settings: `
+      + `${error.message || error}. If you have just updated, the API needs `
+      + "restarting.";
+  }
+}
+
+function closeSettings() {
+  ui.settingsModal.hidden = true;
+  watchSignins();
+  // 下次打开重新问一遍：账号可能在别处连上或断开了，缓存也可能变了。
+  signins.state = {};
+  upkeep.data = null;
+  upkeep.note = "";
+}
+
+function settingValue(id) {
+  return id in prefs.changes ? prefs.changes[id] : prefs.data.values[id];
+}
+
+function drawPrefs() {
+  ui.settingsNav.innerHTML = "";
+  for (const group of prefs.data.groups || []) {
+    const node = document.createElement("button");
+    node.type = "button";
+    node.textContent = group.label;
+    node.className = group.id === prefs.group ? "on" : "";
+    node.addEventListener("click", () => { prefs.group = group.id; drawPrefs(); });
+    ui.settingsNav.appendChild(node);
+  }
+  ui.settingsBody.innerHTML = "";
+  const group = (prefs.data.groups || []).find((one) => one.id === prefs.group);
+  if (!group) return;
+  if (group.note) {
+    const note = document.createElement("p");
+    note.className = "hint";
+    note.textContent = group.note;
+    ui.settingsBody.appendChild(note);
+  }
+  if ((group.fields || []).length) {
+    ui.settingsBody.appendChild(settingFields(group.fields));
+  }
+  // 这一组是动作不是填空，没有"保存"这回事。
+  ui.settingsSave.hidden = !!group.tools;
+  if (group.tools) {
+    ui.settingsBody.appendChild(upkeepBox());
+    return;
+  }
+  // 有"当前用哪一家"的那一组（语言模型四十来家）只展开被选中的那一家。
+  const active = group.panel_field ? String(settingValue(group.panel_field)) : null;
+  for (const panel of group.panels || []) {
+    if (active !== null && panel.id !== active) continue;
+    const box = document.createElement("details");
+    box.open = active !== null;
+    const head = document.createElement("summary");
+    head.textContent = panel.label;
+    const ready = (panel.fields || []).some((field) => {
+      const value = prefs.data.values[field.id];
+      return value && typeof value === "object" && value.set;
+    });
+    if (ready) {
+      const badge = document.createElement("span");
+      badge.className = "badge";
+      badge.textContent = "key saved";
+      head.appendChild(badge);
+    }
+    box.appendChild(head);
+    if (panel.note) {
+      const note = document.createElement("p");
+      note.className = "hint";
+      note.style.padding = "0 10px 8px";
+      note.textContent = panel.note;
+      box.appendChild(note);
+    }
+    if (panel.signin) box.appendChild(signinBox(panel.signin));
+    box.appendChild(settingFields(panel.fields || []));
+    ui.settingsBody.appendChild(box);
+  }
+}
+
+function settingFields(fields) {
+  const grid = document.createElement("div");
+  grid.className = "form-fields";
+  for (const field of fields) grid.appendChild(settingField(field));
+  return grid;
+}
+
+function settingField(field) {
+  const stored = prefs.data.values[field.id];
+  const secret = stored && typeof stored === "object";
+  if (!secret) {
+    // 普通的项直接借新片子表单的那一套画法。
+    const kind = field.kind === "keys" ? "text" : field.kind;
+    return formField({ ...field, kind, name: field.id }, settingValue(field.id),
+      (value, redraw) => {
+        prefs.changes[field.id] = value;
+        if (redraw) drawPrefs();
+      });
+  }
+  const box = document.createElement("div");
+  box.className = "field wide";
+  const label = document.createElement("label");
+  label.textContent = field.label;
+  box.appendChild(label);
+  const row = document.createElement("div");
+  row.className = "with-button";
+  const input = document.createElement("input");
+  input.type = "password";
+  input.autocomplete = "new-password";
+  const clearing = prefs.clear.has(field.id);
+  input.placeholder = clearing ? "Will be removed when you save"
+    : stored.set
+      ? (stored.count > 1 ? `Saved (${stored.count} keys) — type to replace`
+        : "Saved — type to replace")
+      : (field.kind === "keys" ? "Not set — several keys can be separated by commas"
+        : "Not set");
+  input.value = prefs.changes[field.id] || "";
+  input.addEventListener("input", () => {
+    prefs.clear.delete(field.id);
+    if (input.value) prefs.changes[field.id] = input.value;
+    else delete prefs.changes[field.id];
+  });
+  row.appendChild(input);
+  if (stored.set) {
+    const drop = document.createElement("button");
+    drop.type = "button";
+    drop.className = "btn small";
+    drop.textContent = clearing ? "Keep it" : "Remove";
+    drop.addEventListener("click", () => {
+      if (clearing) prefs.clear.delete(field.id);
+      else { prefs.clear.add(field.id); delete prefs.changes[field.id]; }
+      drawPrefs();
+    });
+    row.appendChild(drop);
+  }
+  box.appendChild(row);
+  return box;
+}
+
+/* ---------- 设置里的两样特别的东西 ----------
+
+   登录：三家语言模型不用 Key，而是去官网点一下授权。
+   备份和维护：不是填空，是几个动作——所以不走上面那套"改了再保存"。 */
+const signins = { state: {}, timer: 0 };
+
+function signinPath(provider, step) {
+  return `/settings/signin/${encodeURIComponent(provider)}${step ? "/" + step : ""}`;
+}
+
+async function signinStep(provider, step) {
+  try {
+    signins.state[provider] = await call(step ? "POST" : "GET",
+      signinPath(provider, step));
+  } catch (error) {
+    signins.state[provider] = {
+      provider, problem: String(error.message || error), failed: true,
+    };
+  }
+  if (!ui.settingsModal.hidden) drawPrefs();
+  watchSignins();
+}
+
+/** 有登录走到一半就每两秒问一次，没有就停。设置窗关了也停。 */
+function watchSignins() {
+  const waiting = Object.values(signins.state).filter((one) => one && one.pending);
+  if (!waiting.length || ui.settingsModal.hidden) {
+    clearTimeout(signins.timer);
+    signins.timer = 0;
+    return;
+  }
+  if (signins.timer) return;
+  signins.timer = setTimeout(async () => {
+    signins.timer = 0;
+    for (const one of waiting) await signinStep(one.provider, "poll");
+  }, 2000);
+}
+
+function signinBox(provider) {
+  const box = document.createElement("div");
+  box.className = "signin";
+  const state = signins.state[provider];
+  if (!state) {
+    box.textContent = "Checking the account…";
+    signinStep(provider, "");
+    return box;
+  }
+  const line = (text, kind) => {
+    const node = document.createElement("p");
+    node.className = "hint" + (kind ? " " + kind : "");
+    node.textContent = text;
+    box.appendChild(node);
+  };
+  const act = (label, step, primary) => {
+    const node = document.createElement("button");
+    node.type = "button";
+    node.className = "btn small" + (primary ? " primary" : "");
+    node.textContent = label;
+    node.addEventListener("click", () => {
+      node.disabled = true;
+      signinStep(provider, step);
+    });
+    return node;
+  };
+  if (state.connected) {
+    line(`Connected${state.account ? " as " + state.account : ""}.`, "ok");
+  } else if (state.signed_in) {
+    line(`Signed in${state.account ? " as " + state.account : ""}.`);
+  } else if (!state.pending) {
+    line("Not connected.");
+  }
+  if (state.problem) line(state.problem, "warn");
+  if (state.note) line(state.note.message, state.note.kind === "ok" ? "ok" : "warn");
+  const row = document.createElement("div");
+  row.className = "row-left";
+  if (state.pending) {
+    line(state.pending.message, "pending");
+    if (state.pending.code) {
+      const code = document.createElement("code");
+      code.className = "signin-code";
+      code.textContent = state.pending.code;
+      box.appendChild(code);
+    }
+    const open = document.createElement("a");
+    open.className = "btn small primary";
+    open.href = state.pending.url;
+    open.target = "_blank";
+    open.rel = "noopener";
+    open.textContent = "Open the sign-in page";
+    row.append(open, act("Cancel", "cancel"));
+  } else if (!state.connected) {
+    row.appendChild(act(state.signed_in ? "Allow plan usage" : "Sign in",
+      "begin", true));
+  }
+  if (state.connected || state.signed_in || state.broken) {
+    row.appendChild(act("Disconnect", "disconnect"));
+  }
+  box.appendChild(row);
+  if (state.detail) line(state.detail);
+  return box;
+}
+
+const upkeep = { data: null, days: 30, busy: false, note: "", noteKind: "" };
+
+function sizeText(bytes) {
+  const value = Number(bytes) || 0;
+  if (value >= 1 << 30) return `${(value / (1 << 30)).toFixed(1)} GB`;
+  if (value >= 1 << 20) return `${(value / (1 << 20)).toFixed(1)} MB`;
+  return `${Math.max(0, Math.round(value / 1024))} KB`;
+}
+
+/** 把服务端给的一份 JSON 存成文件。 */
+function saveAsFile(filename, payload) {
+  const link = document.createElement("a");
+  link.href = URL.createObjectURL(
+    new Blob([JSON.stringify(payload, null, 2)], { type: "application/json" }));
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+}
+
+/** 做一件维护的事，把结果（或者为什么没做成）写在那一组底下。 */
+async function upkeepRun(work) {
+  if (upkeep.busy) return;
+  upkeep.busy = true;
+  upkeep.note = "Working…";
+  upkeep.noteKind = "pending";
+  drawPrefs();
+  try {
+    upkeep.note = (await work()) || "";
+    upkeep.noteKind = "ok";
+  } catch (error) {
+    upkeep.note = String(error.message || error);
+    upkeep.noteKind = "warn";
+  } finally {
+    upkeep.busy = false;
+    drawPrefs();
+  }
+}
+
+function pickFile(accept, onFile) {
+  const input = document.createElement("input");
+  input.type = "file";
+  input.accept = accept;
+  input.addEventListener("change", () => {
+    if (input.files.length) onFile(input.files[0]);
+  });
+  input.click();
+}
+
+function upkeepBox() {
+  const wrap = document.createElement("div");
+  wrap.className = "upkeep";
+  if (!upkeep.data) {
+    wrap.textContent = "Reading…";
+    call("GET", "/settings/upkeep").then((data) => {
+      upkeep.data = data;
+      if (!ui.settingsModal.hidden) drawPrefs();
+    }).catch((error) => {
+      upkeep.note = String(error.message || error);
+      upkeep.noteKind = "warn";
+      upkeep.data = { cache: null, logging: null };
+      if (!ui.settingsModal.hidden) drawPrefs();
+    });
+    return wrap;
+  }
+  const section = (title, text) => {
+    const box = document.createElement("div");
+    box.className = "tool";
+    const head = document.createElement("strong");
+    head.textContent = title;
+    const note = document.createElement("p");
+    note.className = "hint";
+    note.textContent = text;
+    const row = document.createElement("div");
+    row.className = "row-left";
+    box.append(head, note, row);
+    wrap.appendChild(box);
+    return row;
+  };
+  const press = (label, onClick, extra) => {
+    const node = button(label, "small" + (extra ? " " + extra : ""), onClick);
+    node.disabled = upkeep.busy;
+    return node;
+  };
+
+  // 密钥
+  const keys = section("Your keys",
+    "A backup file holds every saved key in plain text. Keep it somewhere "
+    + "safe; anyone who has it can use your accounts.");
+  keys.append(
+    press("Download key backup", () => {
+      if (!window.confirm("Write every saved key into a file on this computer?")) {
+        return;
+      }
+      upkeepRun(async () => {
+        const data = await call("POST", "/settings/keys/export", { confirm: true });
+        saveAsFile(data.filename, data.payload);
+        return "Key backup downloaded.";
+      });
+    }),
+    press("Restore from a backup…", () => pickFile(".json,application/json",
+      (file) => upkeepRun(async () => {
+        const data = await upload("/settings/keys/restore", file);
+        prefs.data = await call("GET", "/settings");
+        fresh.form = null;
+        return `Restored ${data.restored} key${data.restored === 1 ? "" : "s"}.`
+          + (data.deferred ? " A video is being made, so they take effect "
+            + "when that finishes." : "");
+      }))),
+  );
+
+  // 预设
+  const preset = section("Video settings preset",
+    "The choices the New video form starts from, without any keys. Load one "
+    + "and the next new video starts from it.");
+  preset.append(
+    press("Download preset", () => upkeepRun(async () => {
+      const data = await call("POST", "/settings/preset/export", {});
+      saveAsFile(data.filename, data.payload);
+      return "Preset downloaded.";
+    })),
+    press("Load a preset…", () => pickFile(".json,application/json",
+      (file) => upkeepRun(async () => {
+        await upload("/settings/preset/import", file);
+        fresh.form = null;
+        return "Preset loaded. The next new video starts from it.";
+      }))),
+  );
+
+  // 素材缓存
+  const cache = upkeep.data.cache;
+  if (cache) {
+    const row = section("Downloaded stock material",
+      `${cache.files} file${cache.files === 1 ? "" : "s"}, ${sizeText(cache.bytes)}, in `
+      + `${cache.folder}. These are clips downloaded from stock sites; they `
+      + "are downloaded again when needed. Your videos are not touched.");
+    const range = document.createElement("select");
+    for (const days of cache.ranges || []) {
+      range.appendChild(option(days === null ? "all" : String(days),
+        days === null ? "Everything" : `Older than ${days} days`));
+    }
+    range.value = upkeep.days === null ? "all" : String(upkeep.days);
+    range.disabled = upkeep.busy;
+    range.addEventListener("change", () => {
+      upkeep.days = range.value === "all" ? null : Number(range.value);
+      upkeepRun(async () => {
+        const query = upkeep.days === null ? "" : `?days=${upkeep.days}`;
+        upkeep.data.cache = await call("GET", `/settings/cache${query}`);
+        return "";
+      });
+    });
+    const would = cache.would_delete || { files: 0, bytes: 0 };
+    const clean = press(
+      `Delete ${would.files} file${would.files === 1 ? "" : "s"} (${sizeText(would.bytes)})`,
+      () => {
+        if (!window.confirm(`Delete ${would.files} downloaded file(s)? This `
+            + "cannot be undone.")) return;
+        upkeepRun(async () => {
+          const data = await call("POST", "/settings/cache/clean",
+            { days: upkeep.days, confirm: true });
+          upkeep.data.cache = data;
+          const done = data.deleted || {};
+          return `Deleted ${done.files} file(s), ${sizeText(done.bytes)} freed.`
+            + (done.failed ? ` ${done.failed} could not be deleted.` : "");
+        });
+      }, "danger");
+    clean.disabled = upkeep.busy || !would.files;
+    row.append(range, clean);
+  }
+
+  // 日志
+  const logging = upkeep.data.logging;
+  if (logging) {
+    const row = section("Diagnostic logging",
+      "More detail in the window the app runs in. Takes effect at once.");
+    const level = document.createElement("select");
+    for (const one of logging.levels || []) level.appendChild(option(one, one));
+    level.value = logging.level;
+    const trace = document.createElement("label");
+    trace.className = "check";
+    const tick = document.createElement("input");
+    tick.type = "checkbox";
+    tick.checked = !!logging.log_requests;
+    trace.append(tick, document.createTextNode(" Trace API requests"));
+    row.append(level, trace, press("Apply", () => upkeepRun(async () => {
+      upkeep.data.logging = await call("PUT", "/settings/logging",
+        { level: level.value, log_requests: tick.checked });
+      return "Logging updated.";
+    })));
+  }
+
+  if (upkeep.note) {
+    const note = document.createElement("p");
+    note.className = "hint " + upkeep.noteKind;
+    note.textContent = upkeep.note;
+    wrap.appendChild(note);
+  }
+  return wrap;
+}
+
+async function saveSettings() {
+  if (prefs.saving || !prefs.data) return;
+  const changes = { ...prefs.changes };
+  const clear = [...prefs.clear];
+  if (!Object.keys(changes).length && !clear.length) {
+    ui.settingsStatus.className = "hint";
+    ui.settingsStatus.textContent = "Nothing was changed.";
+    return;
+  }
+  prefs.saving = true;
+  ui.settingsSave.disabled = true;
+  ui.settingsStatus.className = "hint pending";
+  ui.settingsStatus.textContent = "Saving…";
+  try {
+    const data = await call("PUT", "/settings", { changes, clear });
+    prefs.data = data;
+    prefs.changes = {};
+    prefs.clear = new Set();
+    ui.settingsStatus.className = "hint";
+    ui.settingsStatus.textContent = data.deferred
+      ? "Saved. A video is being made, so it takes effect when that finishes."
+      : "Saved.";
+    // 新片子表单的默认值和音色清单是照旧设置读的，下次打开重读。
+    fresh.form = null;
+    drawPrefs();
+  } catch (error) {
+    ui.settingsStatus.className = "hint warn";
+    ui.settingsStatus.textContent = String(error.message || error);
+  } finally {
+    prefs.saving = false;
+    ui.settingsSave.disabled = false;
+  }
+}
+
+ui.appSettings.addEventListener("click", openSettings);
+ui.newSettings.addEventListener("click", () => {
+  // 设置盖在表单上面打开；表单里填了一半的东西留着。
+  closeNewVideo();
+  openSettings();
+});
+ui.settingsClose.addEventListener("click", closeSettings);
+ui.settingsSave.addEventListener("click", saveSettings);
+document.addEventListener("keydown", (event) => {
+  if (event.key !== "Escape") return;
+  if (!ui.settingsModal.hidden && !prefs.saving) closeSettings();
+  else if (!ui.newModal.hidden && !fresh.writing) closeNewVideo();
 });
 
 /* ---------- thumbnails ---------- */
@@ -3430,8 +4650,8 @@ async function loadLibrary(page) {
     if (!data.total) {
       const empty = document.createElement("p");
       empty.className = "hint";
-      empty.textContent = "No videos yet. Generate one, then come back here to "
-        + "edit and re-render it.";
+      empty.textContent = "No videos yet. Press “+ New video” to make "
+        + "your first one.";
       ui.libraryGrid.appendChild(empty);
     }
     state.libraryPage = wanted;
@@ -4221,7 +5441,8 @@ ui.render.addEventListener("click", () => run("Submitting the render", async () 
 // 嵌在 WebUI 里时，提交类操作交给外面的 Streamlit 按钮（见 EMBEDDED）。
 // 任务 id 也由链接带过来，不需要再给一个输入框。
 if (EMBEDDED) {
-  for (const node of [ui.rerecord, ui.render, ui.task, ui.load]) node.hidden = true;
+  for (const node of [ui.rerecord, ui.render, ui.task, ui.load,
+    ui.newVideo, ui.libraryNew, ui.appSettings]) node.hidden = true;
   const hint = document.createElement("span");
   hint.className = "totals";
   hint.textContent = "Use the buttons below this editor to re-record or render.";
@@ -4237,6 +5458,7 @@ if (initial) {
   // 没带 task 进来就先给一张"做过的片子"：空编辑器加一个要粘 uuid 的输入框
   // 不是一个能开始工作的地方。
   loadLibrary(1);
+  resumeCreation();
 }
 
 /* 关页前的最后一次机会。``keepalive`` 让这一条在页面没了之后继续发完；

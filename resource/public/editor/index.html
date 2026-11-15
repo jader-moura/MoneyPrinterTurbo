@@ -12,6 +12,8 @@
   <input id="task" class="task" placeholder="task id" spellcheck="false" autocomplete="off">
   <button id="load" class="btn">Load</button>
   <button id="library-toggle" class="btn">My videos</button>
+  <button id="new-video" class="btn">+ New video</button>
+  <button id="app-settings" class="btn">Settings</button>
   <span id="totals" class="totals"></span>
   <span class="spacer"></span>
   <button id="script-toggle" class="btn" disabled>Script</button>
@@ -324,6 +326,7 @@
     <h2>My videos</h2>
     <span id="library-count" class="hint"></span>
     <span class="spacer"></span>
+    <button id="library-new" class="btn primary small">+ New video</button>
     <button id="library-close" class="btn small">Close</button>
   </div>
   <div id="library-grid" class="library-grid"></div>
@@ -369,6 +372,108 @@
       <span id="shelf-status" class="hint"></span>
       <span class="spacer"></span>
       <button id="shelf-close" class="btn small">Close</button>
+    </div>
+  </div>
+</div>
+
+<!-- 开一条新片子。
+
+     以前一条片子只能从另一个页面（WebUI，:8501）开始，做完了才跳到这里。
+     两个页面、两套界面——而开始和修改本来是同一件事的两头。这张表只放
+     "核心那几项"，没动过的用上次存下来的设置；各家服务商的 Key 之类仍然
+     在那一页，底下有一个链接过去。 -->
+<div id="new-modal" class="modal" hidden>
+  <div class="modal-box new-video">
+    <div class="new-head">
+      <h2>New video</h2>
+      <p class="hint">It stops before the final render, so you land in the
+        timeline to look at everything first. Whatever you leave alone is how
+        you had it last time.</p>
+    </div>
+    <div class="new-grid">
+      <section class="new-col">
+        <h3 class="new-step">What it says</h3>
+        <div class="field">
+          <label for="new-subject">What is the video about?</label>
+          <input id="new-subject" type="text" maxlength="2000" autocomplete="off"
+            placeholder="e.g. Why octopuses have three hearts">
+        </div>
+        <div class="field grow">
+          <label for="new-script">Script <span class="soft">— leave empty and
+            it is written for you</span></label>
+          <textarea id="new-script" spellcheck="true" maxlength="20000"
+            placeholder="Paste your own narration here, or press “Write the script” to read it before you start."></textarea>
+        </div>
+        <div class="new-script-row">
+          <button id="new-write" class="btn small">Write the script</button>
+          <span class="spacer"></span>
+          <label class="mini">Language
+            <select id="new-language"></select>
+          </label>
+          <label class="mini">Paragraphs
+            <input id="new-paragraphs" type="number" min="1" max="10" value="1">
+          </label>
+        </div>
+        <!-- 关键词、给模型的额外要求、换一个模型：都是"说什么"这一栏的事，
+             但十次里有九次用不上，所以收着。 -->
+        <details id="new-script-more" class="more-box">
+          <summary id="new-script-more-label">More script settings</summary>
+          <div id="new-script-fields" class="form-fields"></div>
+        </details>
+      </section>
+      <section class="new-col new-look">
+        <h3 class="new-step">How it looks and sounds</h3>
+        <!-- 右边这一栏不写死：有哪几页、每页有哪些项、哪些收在"更多设置"
+             后面，都是服务端说的（/new-video/options）。页面只负责照着画。 -->
+        <div id="new-tabs" class="tabs"></div>
+        <div id="new-fields" class="new-fields"></div>
+      </section>
+    </div>
+    <div class="modal-foot">
+      <button id="new-settings" class="btn small"
+        title="Providers, API keys and models.">Settings…</button>
+      <span id="new-status" class="hint"></span>
+      <span class="spacer"></span>
+      <button id="new-cancel" class="btn">Cancel</button>
+      <button id="new-create" class="btn primary">Create video</button>
+    </div>
+  </div>
+</div>
+
+<!-- 设置：各家服务商的地址、Key 和模型。以前只在另一个页面（WebUI）里，
+     表单底下的"更多设置"得把人送过去。现在就在这里，写的是同一份
+     config.toml。Key 存下之后不再显示——框是空的不代表没设，旁边会写。 -->
+<div id="settings-modal" class="modal" hidden>
+  <div class="modal-box wide settings">
+    <h2>Settings</h2>
+    <p class="hint">Providers, keys and models, saved on this computer. A key
+      is never shown again once saved: leave its box empty to keep it.</p>
+    <div class="settings-grid">
+      <nav id="settings-nav" class="settings-nav"></nav>
+      <div id="settings-body" class="settings-body"></div>
+    </div>
+    <div class="modal-foot">
+      <span id="settings-status" class="hint"></span>
+      <span class="spacer"></span>
+      <button id="settings-close" class="btn small">Close</button>
+      <button id="settings-save" class="btn primary">Save</button>
+    </div>
+  </div>
+</div>
+
+<!-- 新片子正在做。和渲染那个挡板分开：这时还没有时间线可看，说的话也不一样
+     （"在写脚本、在配音"，不是"在合成"）。 -->
+<div id="create-modal" class="modal" hidden>
+  <div class="modal-box">
+    <h2 id="create-title">Creating your video</h2>
+    <p id="create-note" class="hint">Starting…</p>
+    <div class="bar-track"><div id="create-bar" class="bar-fill waiting"></div></div>
+    <div class="modal-foot">
+      <span id="create-pct" class="pct"></span>
+      <span id="create-elapsed" class="hint"></span>
+      <span class="spacer"></span>
+      <button id="create-hide" class="btn small">Hide</button>
+      <button id="create-done" class="btn small" hidden>Close</button>
     </div>
   </div>
 </div>

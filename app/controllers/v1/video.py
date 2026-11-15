@@ -2,7 +2,7 @@ import mimetypes
 import os
 import pathlib
 import shutil
-from typing import Union
+from typing import Optional, Union
 from urllib.parse import quote
 
 from fastapi import BackgroundTasks, Depends, Path, Query, Request, UploadFile
@@ -236,8 +236,11 @@ def create_task(
     request: Request,
     body: Union[TaskVideoRequest, SubtitleRequest, AudioRequest],
     stop_at: str,
+    task_id: Optional[str] = None,
 ):
-    task_id = utils.get_uuid()
+    # 调用方可以自带 id：上传的配音必须先放进任务目录，而目录名就是这个 id。
+    # 不给的话和以前一样现生成一个。
+    task_id = task_id or utils.get_uuid()
     request_id = base.get_task_id(request)
     try:
         if (

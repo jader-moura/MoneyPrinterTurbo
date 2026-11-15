@@ -810,6 +810,111 @@ class ScenePromptSuggestResponse(BaseResponse):
     data: dict = {"prompt": "an exhausted nurse rubbing her eyes at 3am"}
 
 
+class NewVideoRequest(BaseModel):
+    """在编辑器里开一条新片子时表单交上来的东西。
+
+    每一项都可以不给：没给的用上次存下来的设置，见 ``app.services.new_video``。
+    表外的键一律拒绝——拼错一个名字就该当场知道，而不是悄悄用了默认值。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    # 说什么
+    video_subject: str = Field(default="", max_length=2000)
+    video_script: str = Field(default="", max_length=20000)
+    video_terms: Optional[str] = Field(default=None, max_length=4000)
+    video_language: Optional[str] = Field(default=None, max_length=20)
+    paragraph_number: Optional[int] = Field(default=None, ge=1, le=10)
+    video_script_prompt: Optional[str] = Field(default=None, max_length=2000)
+    custom_system_prompt: Optional[str] = Field(default=None, max_length=8000)
+    llm_provider: Optional[str] = Field(default=None, max_length=60)
+    llm_model: Optional[str] = Field(default=None, max_length=200)
+    # 画面
+    video_source: Optional[str] = Field(default=None, max_length=40)
+    confirm_charge: Optional[bool] = None
+    local_materials: Optional[list[str]] = Field(default=None, max_length=200)
+    video_aspect: Optional[str] = Field(default=None, max_length=10)
+    image_style: Optional[str] = Field(default=None, max_length=40)
+    image_motion: Optional[str] = Field(default=None, max_length=20)
+    video_clip_duration: Optional[int] = Field(default=None, ge=1, le=15)
+    one_picture_per_sentence: Optional[bool] = None
+    max_image_scene_duration: Optional[float] = Field(default=None, ge=0, le=60)
+    align_terms_to_narration: Optional[bool] = None
+    review_prompts: Optional[bool] = None
+    video_concat_mode: Optional[str] = Field(default=None, max_length=20)
+    match_materials_to_script: Optional[bool] = None
+    video_transition_mode: Optional[str] = Field(default=None, max_length=20)
+    video_fit_mode: Optional[str] = Field(default=None, max_length=20)
+    video_clip_speed: Optional[float] = Field(default=None, ge=0.5, le=2.0)
+    video_count: Optional[int] = Field(default=None, ge=1, le=5)
+    # 配音
+    voice_mode: Optional[str] = Field(default=None, max_length=10)
+    tts_server: Optional[str] = Field(default=None, max_length=40)
+    voice_name: Optional[str] = Field(default=None, max_length=300)
+    voice_rate: Optional[float] = Field(default=None, ge=0.25, le=4.0)
+    voice_volume: Optional[float] = Field(default=None, ge=0.0, le=5.0)
+    custom_audio: Optional[str] = Field(default=None, max_length=80)
+    # 字幕
+    subtitle_enabled: Optional[bool] = None
+    font_name: Optional[str] = Field(default=None, max_length=200)
+    font_size: Optional[int] = Field(default=None, ge=8, le=300)
+    text_fore_color: Optional[str] = Field(default=None, max_length=9)
+    stroke_color: Optional[str] = Field(default=None, max_length=9)
+    stroke_width: Optional[float] = Field(default=None, ge=0, le=20)
+    subtitle_position: Optional[str] = Field(default=None, max_length=30)
+    custom_position: Optional[float] = Field(default=None, ge=0, le=100)
+    subtitle_display_mode: Optional[str] = Field(default=None, max_length=20)
+    subtitle_animation: Optional[str] = Field(default=None, max_length=20)
+    subtitle_max_lines: Optional[int] = Field(default=None, ge=1, le=4)
+    subtitle_background_enabled: Optional[bool] = None
+    subtitle_background_color: Optional[str] = Field(default=None, max_length=9)
+    rounded_subtitle_background: Optional[bool] = None
+    # 配乐
+    music_type: Optional[str] = Field(default=None, max_length=20)
+    music_preset: Optional[str] = Field(default=None, max_length=300)
+    music_custom: Optional[str] = Field(default=None, max_length=300)
+    music_prompt: Optional[str] = Field(default=None, max_length=2000)
+    bgm_volume: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    transition_sound: Optional[str] = Field(default=None, max_length=300)
+    transition_sound_volume: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+
+
+class VoicePreviewRequest(BaseModel):
+    """念一小段给人听。``text`` 不给就念一句固定的样例。"""
+
+    voice_name: str = Field(max_length=300)
+    voice_rate: float = Field(default=1.0, ge=0.25, le=4.0)
+    voice_volume: float = Field(default=1.0, ge=0.0, le=5.0)
+    text: str = Field(default="", max_length=4000)
+
+
+class SettingsUpdateRequest(BaseModel):
+    """改设置。``changes`` 是 ``{"分区.键": 新值}``；凭据留空等于不动，
+    要清空得在 ``clear`` 里点名。"""
+
+    changes: dict[str, Any] = Field(default_factory=dict)
+    clear: list[str] = Field(default_factory=list, max_length=200)
+
+
+class CacheCleanRequest(BaseModel):
+    """清素材缓存。``days`` 是"比这更旧的"，不给就是全部；删了就没了，所以
+    要 ``confirm``。"""
+
+    days: Optional[int] = None
+    confirm: bool = False
+
+
+class LoggingOptionsRequest(BaseModel):
+    level: str = Field(max_length=20)
+    log_requests: bool = False
+
+
+class ConfirmRequest(BaseModel):
+    """要用户明说一次"是"的那种请求。"""
+
+    confirm: bool = False
+
+
 class SceneReplaceRequest(BaseModel):
     """用已上传的素材替换场景画面。``material`` 是上传接口返回的文件名。"""
 

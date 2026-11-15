@@ -38,6 +38,15 @@ async def application_lifespan(_: FastAPI):
             "API key authentication is misconfigured: app.api_key must be a string"
         )
 
+    # 没设过的时候默认用本机那几个服务。只补缺的，已经写了值的不动；出了
+    # 岔子也不挡启动——最坏不过是和以前一样，要用户自己去设置里填。
+    try:
+        from app.services import local_defaults
+
+        local_defaults.apply()
+    except Exception as exc:  # pragma: no cover
+        logger.warning(f"could not fill the local defaults: {exc}")
+
     # 跨平台发布由当前进程线程池执行，不会在服务重启后恢复。启动时把 Redis
     # 中确认已失去执行进程的活动状态收敛为失败，避免任务永久无法删除。
     from app.services import task as task_service

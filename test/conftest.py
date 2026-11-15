@@ -11,9 +11,7 @@ config.toml 的：写出去的只有当时内存里有的键，注释和没加�
 全部消失，而测试本身一个都不会失败。这件事真的发生过：跑完一轮测试之后，
 ``[app]`` 里只剩下 5 个 kimi 的键。
 
-所以这里加一道兜底：整轮测试开始前记下那个文件，结束时发现被改过就还回去，
-并且喊一声。它不替代"用例自己收拾干净"（泄漏的那个用例已经修好了），但
-下一次有人写出同样的泄漏时，赔上的不再是本机配置。
+所以测试期间的保存一律落在一份临时副本上，真文件不写。见下面那个 fixture。
 """
 
 from __future__ import annotations
@@ -32,37 +30,65 @@ def _config_path() -> str:
 
 
 @pytest.fixture(scope="session", autouse=True)
-def keep_the_real_config_intact():
-    """整轮测试跑完后，仓库里的 config.toml 必须和开跑前一模一样。"""
-    path = _config_path()
+def keep_the_real_config_intact(tmp_path_factory):
+    """整轮测试期间，保存配置写的是一份临时副本，不是仓库里的 config.toml。
+
+    以前这里的做法是"跑完发现被改过就还回去"。那有两个洞，而且都真的咬到
+    过人：
+
+    * 测试跑着的那几十秒里，真文件里是测试写进去的东西。这时启动应用，读到
+      的就是那几行假配置。
+    * 更糟的是"还回去"本身：用户在测试跑着的时候从界面里存了设置，测试一
+      结束，这里把文件还原成开跑前的样子——他刚存的东西没了，而且没有任何
+      提示。从他那边看就是"每次都得重新填一遍"。
+
+    所以改成根本不写真文件：把 ``config.config_file`` 指到一份临时副本上，
+    测试里的每一次保存都落在那里。真文件在这一轮里要是变了，那是用户自己
+    改的，不动它。
+
+    While the tests run, saving the config writes a temporary copy rather than
+    the repository's config.toml. The old approach (restore the file if it
+    changed) left the real file holding test data mid-run, and its restore
+    silently reverted anything the user saved from the app during the run.
+    """
+    try:
+        from app.config import config
+    except Exception:  # pragma: no cover - 配置模块本身坏了时不挡着测试
+        yield
+        return
+
+    real = _config_path()
     before = None
-    if path and os.path.isfile(path):
+    if real and os.path.isfile(real):
         try:
-            with open(path, "rb") as handle:
+            with open(real, "rb") as handle:
                 before = handle.read()
         except OSError:
             before = None
 
-    yield
+    scratch = tmp_path_factory.mktemp("config") / "config.toml"
+    scratch.write_bytes(before or b"")
+    config.config_file = str(scratch)
+    try:
+        yield
+    finally:
+        config.config_file = real
 
-    if before is None or not path:
+    if before is None or not real:
         return
     try:
-        with open(path, "rb") as handle:
+        with open(real, "rb") as handle:
             after = handle.read()
     except OSError:
         return
-    if after == before:
-        return
-    try:
-        with open(path, "wb") as handle:
-            handle.write(before)
-    except OSError as exc:  # pragma: no cover - 还不回去时至少要说清楚
-        pytest.exit(f"the test run rewrote {path} and it could not be restored: {exc}")
-        return
-    # 不让它悄悄过去：泄漏的那个用例还在，下一次仍然会写。
-    print(
-        f"\n!! a test rewrote {path} during this run; it has been restored.\n"
-        "   Something replaced a module-level config dict without putting it "
-        "back — see test/conftest.py.",
-    )
+    if after != before:
+        # 不还原：写它的可能是正在用应用的人。但要说一声——如果其实是某个
+        # 用例绕过了上面那一层自己去写的，这一行是唯一的线索。开跑前的那份
+        # 留在下面这个路径里。
+        keep = tmp_path_factory.mktemp("config-before") / "config.toml"
+        keep.write_bytes(before)
+        print(
+            f"\n!! {real} changed while the tests were running. It was "
+            f"left as it is now (the app may have saved it).\n"
+            f"   The copy from before the run is at {keep}",
+        )

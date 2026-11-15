@@ -1155,3 +1155,295 @@ body {
   );
   color: #e0c878;
 }
+
+/* ---------- 开一条新片子 / 设置 ----------
+
+   两栏：左边是"说什么"（主题和脚本），右边是分页的选项。右边那些项不是
+   手写的——服务端给一张表，页面照着排，所以这里的样式按"种类"写，不按
+   某一项写。窄屏叠成一栏。 */
+.modal-box.new-video, .modal-box.settings {
+  max-height: calc(100vh - 32px);
+  display: flex;
+  flex-direction: column;
+}
+/* 新片子这个窗比别的都宽、都高，而且高度是定的：换页签时窗口不该一会儿高
+   一会儿矮——那样"创建"按钮会在鼠标底下跑。项多的那一页自己滚。 */
+.modal-box.new-video {
+  width: min(1080px, 100%);
+  height: min(720px, calc(100vh - 32px));
+  padding: 0;
+  overflow: hidden;
+}
+.new-head { padding: 16px 20px 12px; border-bottom: 1px solid var(--line); }
+.new-head h2 { margin: 0 0 4px; font-size: 16px; }
+.new-head .hint { margin: 0; }
+.modal-box.new-video .modal-foot {
+  margin: 0;
+  padding: 12px 20px;
+  border-top: 1px solid var(--line);
+  background: var(--panel);
+}
+.new-grid {
+  flex: 1;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.1fr);
+  min-height: 0;
+}
+.new-col {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+  min-height: 0;
+  padding: 16px 20px;
+  overflow-y: auto;
+}
+.new-look { background: var(--panel); border-left: 1px solid var(--line); }
+@media (max-width: 800px) {
+  .modal-box.new-video { height: auto; overflow-y: auto; }
+  .new-grid { grid-template-columns: minmax(0, 1fr); }
+  .new-col { overflow: visible; }
+  .new-look { border-left: 0; border-top: 1px solid var(--line); }
+}
+.new-step {
+  margin: 0;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+.new-col .field.grow { flex: 1; min-height: 150px; }
+.new-col .field.grow textarea { flex: 1; resize: none; }
+.new-script-row { display: flex; align-items: center; gap: 10px; }
+.new-script-row .mini {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--muted);
+}
+.new-script-row .mini select, .new-script-row .mini input {
+  font: inherit;
+  font-size: 12px;
+  color: var(--text);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 4px 6px;
+}
+.new-script-row .mini input { width: 52px; }
+.soft { color: var(--muted); font-weight: 400; }
+
+/* "更多设置"。收的是屏幕不是功能：收起来的项照样生效。所以它得看得出
+   "这里还有东西"，又不能抢了上面那几项的位置。 */
+.more-box { border-top: 1px dashed var(--line); padding-top: 8px; }
+.more-box > summary, .more-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 0;
+  font: inherit;
+  font-size: 12px;
+  color: var(--accent);
+  background: none;
+  border: 0;
+  cursor: pointer;
+  list-style: none;
+}
+.more-box > summary::-webkit-details-marker { display: none; }
+.more-box > summary::before, .more-toggle::before {
+  content: "▸";
+  font-size: 10px;
+  transition: transform 0.12s;
+}
+.more-box[open] > summary::before, .more-toggle.open::before {
+  transform: rotate(90deg);
+}
+.more-box > .form-fields { margin-top: 10px; }
+.new-fields { display: flex; flex-direction: column; gap: 12px; }
+.new-fields .more-toggle { align-self: flex-start; }
+.new-fields .more-line {
+  border-top: 1px dashed var(--line);
+  padding-top: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+.new-look .field input, .new-look .field select, .new-look .field textarea,
+.new-look .choice button, .new-look .files .file { background: var(--bg); }
+.new-look .choice button.on { background: var(--accent-soft); }
+
+.tabs { display: flex; flex-wrap: wrap; gap: 4px; border-bottom: 1px solid var(--line); }
+.tabs button {
+  padding: 6px 10px;
+  font: inherit;
+  font-size: 12px;
+  color: var(--muted);
+  background: none;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  cursor: pointer;
+}
+.tabs button.on { color: var(--text); border-bottom-color: var(--accent); }
+
+.form-fields {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px 12px;
+  align-content: start;
+}
+.form-fields .field.wide { grid-column: 1 / -1; }
+.form-fields input[type="range"] { padding: 0; height: 30px; }
+.form-fields input[type="color"] { padding: 2px; height: 32px; cursor: pointer; }
+.form-fields .check {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  color: var(--text);
+  cursor: pointer;
+}
+.form-fields .check.warn { color: var(--warn); }
+.form-fields .field.switch { justify-content: center; min-height: 30px; }
+/* 表单里的输入框一律占满一行；勾选框不能跟着占满，否则那个小方块被拉到
+   中间，字被挤到最右边。 */
+.form-fields .check input {
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  margin: 0;
+  padding: 0;
+  accent-color: var(--accent);
+}
+.form-fields .with-button { display: flex; gap: 6px; }
+.form-fields .with-button > :first-child { flex: 1; min-width: 0; }
+.form-fields .with-button > .btn { flex: 0 0 auto; }
+.files { display: flex; flex-direction: column; gap: 4px; font-size: 12px; }
+.files .file {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+.files .file span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.files .file button {
+  border: 0; background: none; color: var(--muted); cursor: pointer; font-size: 14px;
+}
+.choice { display: flex; gap: 6px; }
+.choice button {
+  flex: 1;
+  padding: 7px 8px;
+  font: inherit;
+  font-size: 12px;
+  color: var(--text);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  cursor: pointer;
+}
+.choice button.on { border-color: var(--accent); background: var(--accent-soft); }
+
+.settings-grid {
+  display: grid;
+  grid-template-columns: 190px minmax(0, 1fr);
+  gap: 16px;
+  min-height: 0;
+  flex: 1;
+}
+@media (max-width: 760px) {
+  .settings-grid { grid-template-columns: minmax(0, 1fr); }
+}
+.settings-nav { display: flex; flex-direction: column; gap: 2px; }
+.settings-nav button {
+  text-align: left;
+  padding: 7px 10px;
+  font: inherit;
+  font-size: 13px;
+  color: var(--muted);
+  background: none;
+  border: 0;
+  border-radius: 6px;
+  cursor: pointer;
+}
+.settings-nav button.on { color: var(--text); background: var(--panel); }
+.settings-body {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  overflow-y: auto;
+  min-height: 300px;
+  max-height: min(64vh, 560px);
+  padding-right: 4px;
+}
+.settings-body details {
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+}
+.settings-body summary {
+  padding: 8px 10px;
+  font-size: 13px;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.settings-body summary .badge {
+  font-size: 11px;
+  color: #9fd8b8;
+  border: 1px solid #3d6350;
+  border-radius: 999px;
+  padding: 0 7px;
+}
+.settings-body details > .form-fields { padding: 4px 10px 12px; }
+
+/* 登录面板，和"备份和维护"那几块。它们是动作，不是填空。 */
+.row-left { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.row-left select {
+  font: inherit;
+  font-size: 13px;
+  color: var(--text);
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  padding: 5px 8px;
+}
+.row-left .check { display: flex; align-items: center; gap: 6px; font-size: 13px; }
+.row-left a.btn { text-decoration: none; }
+.hint.ok { color: #9fd8b8; }
+.signin {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin: 0 10px 10px;
+  padding: 10px;
+  border: 1px dashed var(--line);
+  border-radius: 8px;
+  font-size: 13px;
+}
+.signin-code {
+  align-self: flex-start;
+  padding: 6px 12px;
+  font-size: 18px;
+  letter-spacing: 0.15em;
+  background: var(--bg);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  user-select: all;
+}
+.upkeep { display: flex; flex-direction: column; gap: 10px; }
+.upkeep .tool {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  font-size: 13px;
+}
+.upkeep .tool .hint { margin: 0; overflow-wrap: anywhere; }
