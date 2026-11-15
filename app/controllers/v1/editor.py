@@ -63,6 +63,7 @@ from app.models.schema import (
 from app.controllers.manager.base_manager import TaskQueueFullError
 from app.services import bgm as bgm_service
 from app.services import transition_sound as transition_sound_service
+from app.services import picture_shelf
 from app.services import publish_metadata
 from app.services import reveal
 from app.services import scene_editor, scene_manifest, scene_regen_queue
@@ -940,6 +941,59 @@ def replace_scene_material(
         lambda: scene_editor.replace_material(task_id, index, body.material),
     )
     return utils.get_response(200, _scene_payload(task_id, index))
+
+
+@router.get(
+    "/tasks/{task_id}/pictures",
+    summary="Every picture this video has drawn, newest first",
+)
+def list_pictures(request: Request, task_id: str = Path(..., description="Task ID")):
+    """这条片子画过的每一张图，包括已经不在时间线上的那些。
+
+    为什么需要它：重生成是换掉，不是修改。用户点一次重出拿回一张更差的图，
+    上一张就不在任何界面上了——而那个文件一直在任务目录里。这个接口把目录
+    里的东西摆出来，顺便说清每一张现在有没有人用、当时是凭什么画的。
+    """
+    request_id = base.get_task_id(request)
+    _require_task(task_id, request_id)
+    pictures = _handle(
+        task_id,
+        request_id,
+        lambda: picture_shelf.shelf(task_id, _endpoint()),
+    )
+    return utils.get_response(200, {"pictures": pictures})
+
+
+@router.post(
+    "/tasks/{task_id}/scenes/{index}/restore",
+    response_model=SceneResponse,
+    summary="Put one of this video's earlier pictures back on a scene",
+)
+def restore_scene_material(
+    request: Request,
+    body: SceneReplaceRequest,
+    task_id: str = Path(..., description="Task ID"),
+    index: int = Path(..., ge=0, description="Scene index"),
+):
+    """把这一段换回它画过的某一张图。
+
+    这不是重画：那张图就在磁盘上，所以这里只改一个文件名——几秒钟，不排队，
+    不占显卡，不花钱。换下来的那一张同时记进 history，所以改主意还能再换
+    回来。``material`` 只收文件名，而且必须是这条片子自己画过的东西。
+    """
+    request_id = base.get_task_id(request)
+    _require_task(task_id, request_id)
+    scene = _handle(
+        task_id,
+        request_id,
+        lambda: scene_editor.restore_material(task_id, index, body.material),
+    )
+    payload = _scene_payload(task_id, index)
+    # 这一张当时是照哪句提示词画的。不自动盖掉用户正在写的那一句——界面把它
+    # 摆出来，由他决定要不要用。
+    if isinstance(scene, dict) and scene.get("restored_keyword"):
+        payload["restored_keyword"] = scene["restored_keyword"]
+    return utils.get_response(200, payload)
 
 
 @router.put(

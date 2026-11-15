@@ -53,7 +53,10 @@ const ui = {
   libraryGrid: el("library-grid"), libraryCount: el("library-count"),
   libraryClose: el("library-close"), libraryMore: el("library-more"),
   libraryMoreRow: el("library-more-row"),
-  renderModal: el("render-modal"), renderBox: document.querySelector(".modal-box"),
+  // 在这个挡板**里面**找那个盒子，不是找页面上第一个 .modal-box：页面上现在
+  // 有两个挡板，谁排在前面不该决定渲染进度画在哪个盒子上。
+  renderModal: el("render-modal"),
+  renderBox: el("render-modal").querySelector(".modal-box"),
   renderTitle: el("render-title"), renderNote: el("render-note"),
   renderBar: el("render-bar"), renderPct: el("render-pct"),
   renderElapsed: el("render-elapsed"), renderHide: el("render-hide"),
@@ -88,6 +91,9 @@ const ui = {
   publishTextApply: el("publish-text-apply"), publishTextNote: el("publish-text-note"),
   publishSave: el("publish-save"), publishClose: el("publish-close"),
   publishSaved: el("publish-saved"),
+  shelfModal: el("shelf-modal"), shelfTitle: el("shelf-title"),
+  shelfNote: el("shelf-note"), shelfGrid: el("shelf-grid"),
+  shelfStatus: el("shelf-status"), shelfClose: el("shelf-close"),
 };
 
 const state = {
@@ -1137,6 +1143,190 @@ function drawAddTile(offsets) {
   }
 }
 
+/* ---------- 画过的每一张图 ----------
+
+   为什么这一屏必须存在：重生成是**换掉**，不是修改。用户看着一张"还行但不是
+   最好"的图点一次重出，拿回来一张更差的——而上一张从此不在任何界面上。
+
+   它从来没丢。重生成只是把这一段的 ``material`` 指向新文件，旧文件一直躺在
+   任务目录里（服务端没有一处删除场景素材的代码）。所以这里不重画任何东西，
+   只是把目录里的东西摆出来让人点回去：几秒钟，不排队，不占显卡。
+
+   连带的好处是它对**老任务也有效**：历史记录是从今天起才记的，而目录里那些
+   被换下来的图早就在了。 */
+
+const shelf = { at: -1, pictures: [], loading: false, error: "" };
+
+function openPictureShelf(scene) {
+  shelf.at = scene.index;
+  shelf.pictures = [];
+  shelf.error = "";
+  ui.shelfTitle.textContent = `Pictures for scene ${scene.index + 1}`;
+  ui.shelfNote.textContent = "Every picture this video has drawn. Click one to "
+    + "put it on this scene — nothing is redrawn, so it is instant, and the "
+    + "picture you are replacing is kept here too.";
+  ui.shelfStatus.textContent = "";
+  ui.shelfGrid.innerHTML = "";
+  ui.shelfModal.hidden = false;
+  fetchPictures();
+}
+
+function closePictureShelf() {
+  ui.shelfModal.hidden = true;
+  shelf.at = -1;
+}
+
+async function fetchPictures() {
+  if (shelf.loading) return;
+  shelf.loading = true;
+  shelf.error = "";
+  ui.shelfStatus.textContent = "Looking through the folder…";
+  try {
+    const data = await call(
+      "GET", `/tasks/${encodeURIComponent(state.taskId)}/pictures`);
+    shelf.pictures = (data && data.pictures) || [];
+  } catch (error) {
+    // 读不出来和"一张都没有"是两回事。说成后者，用户会以为那些图真的没了。
+    shelf.pictures = [];
+    shelf.error = String(error.message || error);
+  } finally {
+    shelf.loading = false;
+    drawShelf();
+  }
+}
+
+function drawShelf() {
+  ui.shelfGrid.innerHTML = "";
+  if (!shelf.pictures.length) {
+    const empty = document.createElement("p");
+    empty.className = "shelf-empty";
+    empty.textContent = shelf.error
+      ? `Could not read this video's folder: ${shelf.error}`
+      : shelf.loading
+        ? "Looking through the folder…"
+        : "This video has no pictures on disk yet.";
+    ui.shelfStatus.textContent = "";
+    ui.shelfGrid.appendChild(empty);
+    return;
+  }
+
+  // 没人用的那几张排在前面：用户来这一屏就是为了找它们。当前这一段正用着的
+  // 那一张排在最前,它是"认出别的几张"的参照物。
+  const mine = shelf.pictures.filter((one) => one.in_use === shelf.at);
+  const free = shelf.pictures.filter((one) => one.in_use === null
+    || one.in_use === undefined);
+  const elsewhere = shelf.pictures.filter(
+    (one) => one.in_use !== null && one.in_use !== undefined
+      && one.in_use !== shelf.at);
+
+  for (const tile of [...mine, ...free, ...elsewhere]) {
+    ui.shelfGrid.appendChild(pictureTile(tile));
+  }
+
+  const spare = free.length;
+  ui.shelfStatus.textContent = spare
+    ? `${spare} picture${spare === 1 ? "" : "s"} not on the timeline.`
+    : "Every picture here is on the timeline.";
+}
+
+function pictureTile(tile) {
+  const here = tile.in_use === shelf.at;
+  const spare = tile.in_use === null || tile.in_use === undefined;
+  const node = document.createElement("button");
+  node.className = "shelf-tile " + (here ? "in-use" : spare ? "free" : "");
+  node.dataset.material = tile.material;
+
+  const shot = document.createElement("img");
+  shot.className = "shelf-shot";
+  shot.alt = "";
+  // 大一点的那一帧：72 像素放大到一格的宽度全是糊的，而这一屏的全部意义
+  // 就是让人认出画面。
+  requestThumb({ url: tile.url, trim_start: 0 }, shot, 160);
+  node.appendChild(shot);
+
+  const meta = document.createElement("div");
+  meta.className = "shelf-meta";
+
+  const where = document.createElement("span");
+  where.className = "shelf-where";
+  where.textContent = here
+    ? "On this scene now"
+    : spare
+      ? "Not used"
+      : `On scene ${tile.in_use + 1}`;
+  meta.appendChild(where);
+
+  const when = document.createElement("span");
+  when.className = "shelf-when";
+  when.textContent = madeWhen(tile)
+    + (tile.variants > 1 ? ` · ${tile.variants} camera moves` : "");
+  meta.appendChild(when);
+
+  if (tile.keyword) {
+    const prompt = document.createElement("span");
+    prompt.className = "shelf-prompt";
+    prompt.textContent = tile.keyword;
+    meta.appendChild(prompt);
+  }
+  node.appendChild(meta);
+
+  // 整段提示词和文件名在 tooltip 里：两张相似的图靠这个分得开，而把它排版
+  // 到格子里会把这面墙撑散。
+  node.title = [
+    tile.keyword || "",
+    tile.image_style ? `Style: ${tile.image_style}` : "",
+    tile.reference && tile.reference.page_url
+      ? `Drawn from a photo on ${host(tile.reference.page_url)}` : "",
+    tile.material,
+  ].filter(Boolean).join("\n");
+
+  if (here) {
+    node.disabled = true;
+  } else {
+    node.addEventListener("click", () => putPictureBack(tile));
+  }
+  return node;
+}
+
+/** 这一张是什么时候落地的。相对时间比时间戳好认："20 分钟前"就是刚才换掉的
+    那一张,而 "2026-11-14 19:03" 要用户自己去算。 */
+function madeWhen(tile) {
+  const seconds = Math.max(0, Date.now() / 1000 - Number(tile.made_at || 0));
+  if (seconds < 90) return "just now";
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes} min ago`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 36) return `${hours} hour${hours === 1 ? "" : "s"} ago`;
+  return `${Math.round(hours / 24)} days ago`;
+}
+
+function putPictureBack(tile) {
+  const at = shelf.at;
+  if (at < 0) return;
+  closePictureShelf();
+  run("Putting that picture back", async () => {
+    const scene = await call("POST", `${scenePath(at)}/restore`,
+      { material: tile.material });
+    // 这一张当时是照哪句提示词画的。不自动盖掉框里的字——那是用户正在写的
+    // 东西，而他要的只是那张图。说出来，让他自己决定。
+    const was = scene && scene.restored_keyword;
+    if (was && was !== (scene.keyword || "")) {
+      return `Scene ${at + 1} is back on that picture. It was drawn from: `
+        + `"${was}" — the prompt box still has what you had.`;
+    }
+    return `Scene ${at + 1} is back on that picture.`;
+  });
+}
+
+ui.shelfClose.addEventListener("click", closePictureShelf);
+// 点挡板的暗处关掉，和别处一样；点盒子里面不该关。
+ui.shelfModal.addEventListener("click", (event) => {
+  if (event.target === ui.shelfModal) closePictureShelf();
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && !ui.shelfModal.hidden) closePictureShelf();
+});
+
 /* ---------- thumbnails ---------- */
 
 /* 每段画面抓一帧存成静态图。
@@ -1153,12 +1343,17 @@ const thumbCache = new Map();
 const thumbQueue = [];
 let thumbWorking = false;
 
-function requestThumb(scene, img) {
+/** ``height`` 是存下来的那一帧有多高。
+
+    轨道上一格只有几十像素，72 就够；而"画过的每一张图"那一屏是用来认画面
+    的，72 像素放大到 150 宽全是糊的，挑不出来。尺寸进缓存键：同一个地址的
+    两种尺寸是两张图,共用一个键会让其中一边拿到错的那张。 */
+function requestThumb(scene, img, height = 72) {
   const at = Number(scene.trim_start || 0);
-  const key = `${scene.url}@${at.toFixed(2)}`;
+  const key = `${scene.url}@${at.toFixed(2)}@${height}`;
   const cached = thumbCache.get(key);
   if (cached) { img.src = cached; return; }
-  thumbQueue.push({ key, url: scene.url, at, img });
+  thumbQueue.push({ key, url: scene.url, at, img, height });
   if (!thumbWorking) drainThumbs();
 }
 
@@ -1170,7 +1365,7 @@ async function drainThumbs() {
       const cached = thumbCache.get(job.key);
       if (cached) { job.img.src = cached; continue; }
       try {
-        const dataUrl = await grabFrame(job.url, job.at);
+        const dataUrl = await grabFrame(job.url, job.at, job.height || 72);
         thumbCache.set(job.key, dataUrl);
         // 轨道可能已经重绘过，这个 img 未必还在页面上，赋值无害。
         job.img.src = dataUrl;
@@ -1183,7 +1378,7 @@ async function drainThumbs() {
   }
 }
 
-function grabFrame(url, at) {
+function grabFrame(url, at, height = 72) {
   return new Promise((resolve, reject) => {
     const video = document.createElement("video");
     video.muted = true;
@@ -1203,10 +1398,11 @@ function grabFrame(url, at) {
       clearTimeout(timer);
       try {
         const canvas = document.createElement("canvas");
-        // 轨道上只有几十像素高，按这个尺寸存就够了，也省内存。
-        canvas.height = 72;
+        // 按用处存，不按原分辨率存：轨道上一格几十像素，存一张 1080p 的
+        // data URL 是白占内存。
+        canvas.height = height;
         canvas.width = Math.max(
-          8, Math.round(72 * (video.videoWidth / video.videoHeight || 0.5625))
+          8, Math.round(height * (video.videoWidth / video.videoHeight || 0.5625))
         );
         canvas.getContext("2d").drawImage(video, 0, 0, canvas.width, canvas.height);
         done(resolve, canvas.toDataURL("image/jpeg", 0.6));
@@ -1923,6 +2119,18 @@ function drawInspector() {
       + "narration and prompt.";
     ui.inspBody.appendChild(fromPhoto);
   }
+
+  // 第三条路，而且是最该先试的那一条：这张图以前画过的某一个版本。
+  //
+  // 为什么它紧跟着那两个"重出"按钮：用户来这块面板最常做的事就是重出，而
+  // 重出一次就盖掉一张。看过新的才知道旧的更好是常事，所以"回到旧的"必须
+  // 和"再出一张"摆在一起——藏在别处的话，用户只会再点一次重出去赌。
+  const earlier = button("Earlier pictures…", "small",
+    () => openPictureShelf(scene));
+  earlier.title = "Every picture this video has drawn, including the ones no "
+    + "scene is using any more. Putting one back is instant — the file is "
+    + "already on disk, so nothing is redrawn.";
+  ui.inspBody.appendChild(earlier);
 
   // 这一段已经排着了就说出来。不说的话，用户点完看不出任何变化，只会
   // 再点一次——然后同一段画面被重出两遍。

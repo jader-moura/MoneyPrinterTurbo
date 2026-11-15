@@ -41,6 +41,7 @@ from __future__ import annotations
 import math
 import os
 import re
+import time
 import uuid
 from pathlib import Path
 from typing import Any, Iterable, Mapping
@@ -396,6 +397,18 @@ def _normalise_scene(raw: Any, index: int) -> dict:
             kept["strength"] = round(strength, 3)
         if kept:
             scene["reference"] = kept
+    # 这一段以前用过哪几张图。重生成是"换掉"而不是"修改"，换下来的那个文件
+    # 还在磁盘上（没有一处代码删场景素材），但文件名没人记过，于是用户点一次
+    # 重出就再也回不到上一张。这里记的就是那个文件名，外加它当时是凭什么画
+    # 出来的——顺序和来历只能记，目录本身答不出"这是上一张"。
+    #
+    # 同样"有才带"：没换过图的场景不该长出一个空列表。
+    #
+    # 注意这个函数读和写都跑：不在这里留下 ``history``，上面存进去的那一条
+    # 下一次 save 就被静静抹掉了。
+    history = _normalise_history(record.get("history"))
+    if history:
+        scene["history"] = history
     # 时间线字段只在用户真的设置过之后才出现，所以这里按"有才带"处理：
     # 这个函数同时跑在读和写两条路上，无条件补默认值会让每条老记录都长出
     # 两个新键,而无条件丢掉则会让拖好的入点存不进去。
@@ -409,6 +422,84 @@ def _normalise_scene(raw: Any, index: int) -> dict:
             # 坏值按"没设置过"处理，这与 scene_timing 的容错一致。
             continue
     return scene
+
+
+#: 一段画面最多记多少张旧图。清单是要整份读写的 json，无限长会让它慢慢
+#: 变成一个日志文件；而用户要找回的是"刚才那张"，不是三个月前那张。
+HISTORY_LIMIT = 24
+
+
+def _normalise_history(raw: Any) -> list[dict]:
+    """把换下来的那几张整理成一条条记录，坏的丢掉，不抛异常。
+
+    每条记的是一个文件名加"它当时是凭什么画出来的"。路径只留文件名：任务
+    目录会跟着机器搬，整条绝对路径存进清单之后换台机器就全是废话。
+    """
+    if not isinstance(raw, (list, tuple)):
+        return []
+    # 一个文件一条，而且以**最后**那一条为准。同一张图可以被换下来好几次
+    # （换回去，再换走），每次的提示词和画风都可能不同——最近那一次才是它
+    # 现在的来历。留第一条会让"换回上一张"连着拿回一条过时的记录。
+    #
+    # 顺序跟着最后那一次走：这个列表读起来是"它们各自是什么时候被换下来的"。
+    kept: dict = {}
+    for item in raw:
+        if not isinstance(item, Mapping):
+            continue
+        name = material_key(item.get("material"))
+        if not name:
+            continue
+        kept.pop(name, None)
+        entry = {"material": name}
+        for key in ("keyword", "image_style", "source"):
+            value = str(item.get(key) or "").strip()
+            if value:
+                entry[key] = value
+        reference = item.get("reference")
+        if isinstance(reference, Mapping) and reference:
+            # 借用场景那一套校验：history 里的来历和场景上的来历是同一种东西。
+            cleaned = _normalise_scene({"reference": reference}, 0).get("reference")
+            if cleaned:
+                entry["reference"] = cleaned
+        try:
+            at = float(item.get("at") or 0)
+        except (TypeError, ValueError):
+            at = 0.0
+        if at > 0:
+            entry["at"] = round(at, 3)
+        kept[name] = entry
+    return list(kept.values())[-HISTORY_LIMIT:]
+
+
+def remember_material(scene: dict) -> bool:
+    """把这一段**现在**用的那张图记进它的 history，再换掉之前调用。
+
+    就地改 ``scene``，返回有没有真的记下点什么。没有素材的场景（还没画过的
+    占位）没有东西可记。
+
+    为什么不在 ``save_scenes`` 里自动做：那样每一次存盘都会以为"图换了"，
+    而存盘的原因绝大多数是改了台词、拖了时长。只有真的要覆盖 ``material``
+    的那几处才该记。
+    """
+    if not isinstance(scene, dict):
+        return False
+    name = material_key(scene.get("material"))
+    if not name:
+        return False
+    entry: dict = {"material": name, "at": round(time.time(), 3)}
+    for key in ("keyword", "image_style", "source"):
+        value = str(scene.get(key) or "").strip()
+        if value:
+            entry[key] = value
+    reference = scene.get("reference")
+    if isinstance(reference, Mapping) and reference:
+        entry["reference"] = dict(reference)
+    # 去重和截断都归 ``_normalise_history``：这一张以前被换下来过（换回去、
+    # 又换走）的时候，留下的该是刚才这一条。规则放在一处，别在这里再写一遍。
+    scene["history"] = _normalise_history(
+        list(scene.get("history") or []) + [entry]
+    )
+    return True
 
 
 def load_raw(task_id: str) -> dict:

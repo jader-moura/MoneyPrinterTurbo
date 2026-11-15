@@ -45,8 +45,8 @@ from app.models.schema import (
     VideoParams,
     VideoTransitionMode,
 )
-from app.services import llm, material, reference_image, scene_manifest
-from app.services import task_artifacts, timeline
+from app.services import llm, material, picture_shelf, reference_image
+from app.services import scene_manifest, task_artifacts, timeline
 from app.services import bgm, transition_sound, voice
 from app.utils import subtitle_reader, subtitle_writer
 from app.services import state as sm
@@ -372,6 +372,21 @@ def regenerate_material(
         scenes = _scenes_or_fail(task_id)
         position = _locate_scene(scenes, position, anchor)
         scene = scenes[position]
+        # 换下来的那一张**先**记下来，这一句必须排在所有改写之前：它记的是
+        # "那个文件当时是凭什么画出来的"，而下面几行正在把画风、提示词、照片
+        # 来历改成这一张新图的。顺序错了，历史里就会是旧文件配新画风——换回去
+        # 的时候拿回一张图和一条假的来历。
+        #
+        # 为什么要记：重生成是"换掉"而不是"修改"。用户点一次，上一张就不在
+        # 时间线上了，而他常常是看过新的才知道旧的更好。文件一直都在磁盘上，
+        # 缺的只是那个文件名。
+        #
+        # 路径没变就不记（库存源的搜索带缓存，同一个关键词可能拿回同一个文件）：
+        # 把正在用的那一张也记成"旧的"会让界面上多出一格假的历史。
+        if scene_manifest.material_key(scene.get("material")) != (
+            scene_manifest.material_key(new_path)
+        ):
+            scene_manifest.remember_material(scene)
         if image_style is not None:
             if style:
                 scene["image_style"] = style
@@ -587,6 +602,12 @@ def replace_material(task_id: str, index: Any, material_path: str) -> dict:
         resolved = scene_manifest.resolve_material(task_id, material_path)
         resolved = _adopt_into_task(task_id, resolved)
         scene = scenes[position]
+        # 上传一个文件盖掉一张画好的图，损失和重生成盖掉它一样大。见
+        # ``regenerate_material`` 里同样这一段。
+        if scene_manifest.material_key(scene.get("material")) != (
+            scene_manifest.material_key(resolved)
+        ):
+            scene_manifest.remember_material(scene)
         scene["material"] = resolved
         scene["kind"] = scene_manifest.material_kind(resolved)
         scene["source"] = "local"
@@ -620,6 +641,91 @@ def _adopt_into_task(task_id: str, source: str) -> str:
             logger.info(f"adopted replacement material into task {task_id}: {name}")
             return target
     raise SceneError("too many replacement materials with the same name")
+
+
+def restore_material(task_id: str, index: Any, material: str) -> dict:
+    """把这一段换回它画过的某一张图。
+
+    为什么这是一次指针替换，几秒钟就完事：那张图从来没丢。重生成只是把
+    ``material`` 指向新文件，旧文件一直在任务目录里。所以"找回上一张"不用
+    重画、不用等显卡、不花一分钱——改一个文件名而已。
+
+    这一张同时也被记进 history，所以换回去之后还能再换回来：用户看过两张
+    之后改主意是常事，单向的"还原"只是把问题挪到另一边。
+
+    一起换回去的还有画风和"照着哪张照片画的"：清单里这两个字段说的是
+    **现在这张图**怎么来的（见 ``_normalise_scene``），图换了而它们不换就是
+    说谎。提示词不自动覆盖——那个框是用户正在写的东西，不是一条记录；它当时
+    用的那句话在返回值的 ``restored_keyword`` 里，界面请他自己决定要不要用。
+    """
+    _require_idle(task_id)
+    tile = picture_shelf.find(task_id, material)
+    if tile is None:
+        name = scene_manifest.material_key(material) or str(material)
+        raise SceneError(
+            f"{name} is not a picture of this video; only the pictures this "
+            f"video has drawn can be put back"
+        )
+    with _editing(task_id):
+        scenes = _scenes_or_fail(task_id)
+        position = _scene_at(scenes, index)
+        scene = scenes[position]
+        resolved = scene_manifest.resolve_material(task_id, tile["material"])
+        was = scene_manifest.material_key(scene.get("material"))
+        if was == scene_manifest.material_key(resolved):
+            raise SceneError(
+                f"scene {position} is already using {tile['material']}"
+            )
+
+        scene_manifest.remember_material(scene)
+        scene["material"] = resolved
+        scene["kind"] = scene_manifest.material_kind(resolved)
+        recorded = _recorded_about(scenes, position, tile["material"])
+        source = str(recorded.get("source") or "").strip()
+        if source:
+            scene["source"] = source
+        style = str(recorded.get("image_style") or "").strip()
+        if style:
+            scene["image_style"] = style
+        else:
+            scene.pop("image_style", None)
+        reference = recorded.get("reference")
+        if isinstance(reference, dict) and reference:
+            scene["reference"] = dict(reference)
+        else:
+            scene.pop("reference", None)
+        # 用户亲手挑的这一张，不该被后续批量操作盖掉。同 ``regenerate_material``。
+        scene["locked"] = True
+        scene_manifest.save_scenes(task_id, scenes)
+        logger.info(
+            f"scene {position} of task {task_id} put back {tile['material']} "
+            f"(was {was or 'nothing'})"
+        )
+        restored = dict(scene)
+        restored["restored_keyword"] = str(recorded.get("keyword") or "")
+        return restored
+
+
+def _recorded_about(scenes: list, position: int, material: str) -> dict:
+    """关于这个文件我们记下过什么：当时的提示词、画风、照着哪张照片。
+
+    先看这一段自己的 history（最可能就是它换下来的那一张），再看别的段落的
+    history 和它们正在用的素材——同一张图被另一段用着，那一段的字段说的也
+    是这个文件。老任务里被换下来的图没有任何记录，返回空，调用方照旧只换图。
+    """
+    wanted = scene_manifest.material_key(material)
+    here = scenes[position] if 0 <= position < len(scenes) else {}
+    ordered = [here] + [one for at, one in enumerate(scenes) if at != position]
+    for scene in ordered:
+        for entry in scene.get("history") or []:
+            if isinstance(entry, dict) and (
+                scene_manifest.material_key(entry.get("material")) == wanted
+            ):
+                return entry
+    for scene in ordered:
+        if scene_manifest.material_key(scene.get("material")) == wanted:
+            return scene
+    return {}
 
 
 def update_scene(

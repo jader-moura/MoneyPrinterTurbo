@@ -204,6 +204,68 @@ body {
 .modal-foot .pct { font-size: 13px; font-weight: 600; }
 .modal-box.failed .bar-fill { background: var(--danger); }
 
+/* ---------- 画过的每一张图 ----------
+
+   比渲染那个窗宽得多：这一屏是用**看**的。缩略图小到认不出画面，这一屏就
+   什么也没解决——用户要在两张相似的图里挑出"刚才那张"。 */
+.modal-box.wide { width: min(980px, 100%); }
+
+.shelf-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+  gap: 10px;
+  max-height: min(60vh, 520px);
+  overflow-y: auto;
+  padding: 2px;
+}
+
+.shelf-tile {
+  position: relative;
+  padding: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel);
+  color: var(--text);
+  cursor: pointer;
+  overflow: hidden;
+  text-align: left;
+  font: inherit;
+}
+.shelf-tile:hover { border-color: var(--accent); }
+.shelf-tile:disabled { cursor: default; opacity: 1; }
+/* 现在用着的那一张不是"可以换回去的东西"，但必须摆出来：用户得先认出
+   当前这张,才知道别的几张是哪几张。 */
+.shelf-tile.in-use { border-color: var(--clip-sel); }
+
+.shelf-shot {
+  display: block;
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  object-fit: cover;
+  background: #0d0f13;
+}
+
+.shelf-meta {
+  padding: 6px 8px 7px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+.shelf-where { font-size: 12px; font-weight: 600; }
+.shelf-tile.in-use .shelf-where { color: var(--clip-sel); }
+.shelf-tile.free .shelf-where { color: var(--accent); }
+.shelf-when { font-size: 11px; color: var(--muted); }
+/* 提示词可能有两三行长。两行足够认出是哪一张，再长就把这面墙撑散了。 */
+.shelf-prompt {
+  font-size: 11px;
+  color: var(--muted);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.shelf-empty { padding: 18px 4px; color: var(--muted); font-size: 13px; }
+
 /* ---------- 做过的片子 ----------
 
    盖住整个舞台而不是浮一个小窗：挑片子是进编辑器之前的那一步，这时候底下
