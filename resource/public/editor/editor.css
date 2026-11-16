@@ -1656,6 +1656,65 @@ body {
 .files .file button {
   border: 0; background: none; color: var(--muted); cursor: pointer; font-size: 14px;
 }
+/* 画风卡片：样图在上，名字在下。 */
+.style-cards {
+  display: grid;
+  /* 两列：样图要大到看得出画风。 */
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+.style-card {
+  display: flex;
+  flex-direction: column;
+  padding: 0;
+  font: inherit;
+  color: var(--text);
+  background: var(--bg);
+  border: 2px solid var(--line);
+  border-radius: 8px;
+  overflow: hidden;
+  cursor: pointer;
+  text-align: left;
+}
+.style-card:hover { border-color: var(--muted); }
+.style-card.on { border-color: var(--accent); background: var(--accent-soft); }
+.style-card:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.style-thumb {
+  position: relative;
+  display: block;
+  aspect-ratio: 16 / 9;
+  background: var(--panel);
+}
+/* 有几张样图就几个点，停上去的时候才出现，亮的那个是正在看的那张。 */
+.style-dots {
+  position: absolute;
+  left: 0; right: 0; bottom: 6px;
+  display: flex;
+  justify-content: center;
+  gap: 5px;
+  opacity: 0;
+  transition: opacity .15s;
+  pointer-events: none;
+}
+.style-card.looking .style-dots { opacity: 1; }
+.style-dots i {
+  width: 6px; height: 6px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, .45);
+  box-shadow: 0 0 2px rgba(0, 0, 0, .6);
+}
+.style-dots i.on { background: #fff; }
+.style-thumb img { display: block; width: 100%; height: 100%; object-fit: cover; }
+.style-name {
+  padding: 7px 9px 8px;
+  font-size: 13px;
+  line-height: 1.25;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.style-card.on .style-name { font-weight: 600; }
+
 .choice { display: flex; gap: 6px; }
 .choice button {
   flex: 1;

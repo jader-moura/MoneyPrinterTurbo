@@ -80,6 +80,10 @@ SOURCE_IDS = tuple(row[0] for row in SOURCES)
 PAID_SOURCES = tuple(row[0] for row in SOURCES if row[3])
 STOCK_SOURCES = ("pexels", "pixabay", "coverr")
 IMAGE_SOURCES = tuple(image_style_model.IMAGE_STYLE_SOURCES)
+
+#: 表单里每种画风配几张样图：``styles/<id>.jpg``、``<id>-2.jpg``、……
+#: 每一张都是同一个画面按各个画风各画一遍，所以卡片之间比的只有画风。
+STYLE_SAMPLES = 3
 STILL_SOURCES = IMAGE_SOURCES + ("local",)
 
 ASPECTS = (
@@ -477,11 +481,20 @@ def form() -> dict:
             _field("local_materials", "Your videos and pictures", "materials",
                    show={"video_source": ["local"]}),
             _field("video_aspect", "Format", "choice", options=_options(ASPECTS)),
-            _field("image_style", "Picture style", "select", show=drawn,
+            # "styles"：一排带样图的卡片，而不是一个只有名字的下拉框——画风
+            # 是要看的，名字说不清"水彩"和"油画"差在哪。挑出来的值和原来
+            # 一样（画风 id，或者空串＝照设置里的）。``settings_style`` 让
+            # "照设置"那一张也有图可看。
+            _field("image_style", "Picture style", "styles", show=drawn,
                    options=[{"id": "", "label": "As in settings"}] + [
                        {"id": one, "label": one}
                        for one in image_style_model.image_style_ids()],
-                   style_labels=True),
+                   style_labels=True,
+                   # 每种画风有几张样图（同样的几个画面，各画风各画一遍）。
+                   samples=STYLE_SAMPLES,
+                   settings_style=(
+                       "" if style == image_style_model.IMAGE_STYLE_CUSTOM
+                       else str(style or ""))),
             _field("image_motion", "Camera move on a still", "select",
                    show={"video_source": list(STILL_SOURCES)},
                    options=_options((("zoom", "Slow zoom"), ("static", "Still")))),

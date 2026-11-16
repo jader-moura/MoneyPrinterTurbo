@@ -1468,10 +1468,104 @@ function optionValue(field, text) {
 
 /** 按种类画一项。``changed(value, redraw)``：redraw 为真表示别的项的显隐
     可能跟着变，整页要重画；打字和拖滑块不重画，否则焦点会丢。 */
+/** 一种画风的第 n 张样图。第一张没有后缀，早先只有它一张。 */
+function styleSample(id, n) {
+  return `styles/${encodeURIComponent(id)}${n > 1 ? "-" + n : ""}.jpg`;
+}
+
+const STYLE_SAMPLE_MS = 1200;
+/* 随页面带着的样图，每种画风几张。 */
+const STYLE_SAMPLES = 3;
+
+/** 卡片上的样图。平时是第一张；鼠标停上去（或者键盘聚焦）就一张张换下去，
+    让人多看几个例子，移开回到第一张。哪张图没有：第一张没有就只剩名字，
+    后面的没有就不换了——卡片照样能点。 */
+function showStyleSamples(card, frame, id, count) {
+  const picture = document.createElement("img");
+  picture.alt = "";
+  picture.loading = "lazy";
+  picture.src = styleSample(id, 1);
+  frame.appendChild(picture);
+
+  const dots = document.createElement("span");
+  dots.className = "style-dots";
+  for (let n = 0; n < count; n += 1) dots.appendChild(document.createElement("i"));
+  if (count > 1) frame.appendChild(dots);
+
+  let at = 1;
+  let timer = null;
+  const show = (n) => {
+    at = n;
+    picture.src = styleSample(id, n);
+    [...dots.children].forEach((dot, i) => dot.classList.toggle("on", i === n - 1));
+  };
+  const stop = () => {
+    if (timer) clearInterval(timer);
+    timer = null;
+    card.classList.remove("looking");
+    if (at !== 1) show(1);
+  };
+  const start = () => {
+    if (timer || count < 2) return;
+    // 先取回来，换的时候才不闪。
+    for (let n = 2; n <= count; n += 1) new Image().src = styleSample(id, n);
+    card.classList.add("looking");
+    // 一停上去就换到第二张：等上一秒多才动，人会以为没有别的例子。
+    show(2);
+    timer = setInterval(() => {
+      // 表单重画过，这张卡片已经不在页面上了。
+      if (!card.isConnected) { clearInterval(timer); timer = null; return; }
+      show(at % count + 1);
+    }, STYLE_SAMPLE_MS);
+  };
+  picture.addEventListener("error", () => {
+    if (at === 1) { picture.remove(); dots.remove(); count = 1; }
+    else { count = 1; dots.remove(); stop(); }
+  });
+  card.addEventListener("mouseenter", start);
+  card.addEventListener("mouseleave", stop);
+  card.addEventListener("focus", start);
+  card.addEventListener("blur", stop);
+}
+
+/** 画风：一张样图一个名字，点哪张用哪张。样图是同一个画面按每种画风各画
+    的一张（``styles/<id>.jpg``），所以卡片之间比的只有画风。"照设置"那张
+    用设置里那个画风的图；哪张图没有，就只剩名字，照样能点。 */
+function styleCards(field, value, changed) {
+  const grid = document.createElement("div");
+  grid.className = "style-cards";
+  grid.setAttribute("role", "radiogroup");
+  for (const one of field.options || []) {
+    const card = document.createElement("button");
+    card.type = "button";
+    card.className = "style-card" + (one.id === String(value ?? "") ? " on" : "");
+    card.setAttribute("role", "radio");
+    card.setAttribute("aria-checked", one.id === String(value ?? "") ? "true" : "false");
+    const shown = one.id || field.settings_style || "";
+    const name = one.id ? styleLabel(one.id) : one.label;
+    card.title = one.id || !shown ? name : `${name}: ${styleLabel(shown)}`;
+    const frame = document.createElement("span");
+    frame.className = "style-thumb";
+    // 服务端没说有几张（还没重启的旧进程）就按随页面带的那几张算；哪张
+    // 真的没有，``showStyleSamples`` 自己会停。
+    if (shown) {
+      showStyleSamples(card, frame, shown, Number(field.samples) || STYLE_SAMPLES);
+    }
+    const label = document.createElement("span");
+    label.className = "style-name";
+    label.textContent = name;
+    card.append(frame, label);
+    card.addEventListener("click", () => changed(one.id, true));
+    grid.appendChild(card);
+  }
+  return grid;
+}
+
 function formField(field, value, changed) {
   const box = document.createElement("div");
   box.className = "field";
-  const wide = ["textarea", "choice", "materials", "audio", "music", "voice"];
+  const wide = ["textarea", "choice", "materials", "audio", "music", "voice",
+    "styles"];
   if (wide.includes(field.kind) || field.wide) box.classList.add("wide");
 
   if (field.kind === "bool") {
@@ -1501,6 +1595,8 @@ function formField(field, value, changed) {
     input.addEventListener("change",
       () => changed(optionValue(field, input.value), true));
     box.appendChild(input);
+  } else if (field.kind === "styles") {
+    box.appendChild(styleCards(field, value, changed));
   } else if (field.kind === "choice") {
     const row = document.createElement("div");
     row.className = "choice";
