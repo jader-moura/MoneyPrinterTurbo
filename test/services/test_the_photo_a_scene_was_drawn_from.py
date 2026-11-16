@@ -162,7 +162,7 @@ class TestDrawingFromItAgain:
 
     def test_the_button_uses_the_choice_above_it(self):
         place = JS.split('button("Redraw from this same photo"')[1][:520]
-        assert "Number(keep.input.value) || photoKeep" in place
+        assert "photoKeepOf(keep.input)" in place
         assert "{ photo_kept: kept," in place
         # 只有存下来的照片才有这个按钮。
         before = JS.split('button("Redraw from this same photo"')[0][-160:]

@@ -582,6 +582,10 @@ function pendingJobs(index) {
  */
 const KEEP_THE_PHOTO = 0.55;
 const KEEP_MY_STYLE = 0.95;
+/* 第三种，不在那条曲线上：把照片本身交给一个改图模型，只告诉它换成哪种
+ * 画风。照片里每样东西都在原位，画出来的是我的画风——上面那两个值给不了
+ * 的"两样都要"。这一段的画面提示词在这里不用：画面就是那张照片。 */
+const SAME_PICTURE = "picture";
 
 // 上一次选的那个。整个编辑器记着：连着重画好几段的时候，用户的意图通常
 // 是同一个，每一段都要重选一遍是白费的点击。
@@ -597,6 +601,7 @@ function photoKeepPicker() {
   const choices = [
     [KEEP_THE_PHOTO, "Keep the photograph — the real subject and framing"],
     [KEEP_MY_STYLE, "Loosely inspired — my style exactly"],
+    [SAME_PICTURE, "Same picture — redrawn in my style"],
   ];
   for (const [value, label] of choices) {
     const option = document.createElement("option");
@@ -606,10 +611,17 @@ function photoKeepPicker() {
   }
   input.value = String(photoKeep);
   input.addEventListener("change", () => {
-    photoKeep = Number(input.value) || KEEP_THE_PHOTO;
+    photoKeep = input.value === SAME_PICTURE
+      ? SAME_PICTURE : (Number(input.value) || KEEP_THE_PHOTO);
   });
   wrap.append(caption, input);
   return { wrap, input };
+}
+
+/** 下拉框现在选的是哪一种：一个数（保留多少），或者"同一张图"。 */
+function photoKeepOf(input) {
+  return input.value === SAME_PICTURE
+    ? SAME_PICTURE : (Number(input.value) || photoKeep);
 }
 
 /** 队列行上那半句："这一张是照着照片画的，还是只借了个意思"。 */
@@ -625,7 +637,8 @@ async function queueRegeneration(index, keyword, imageStyle, fromPhoto, strength
     if (fromPhoto) {
       body.from_photo = true;
       // 没选就不发：由服务端用配置里那个值，而不是在这里硬写一个默认。
-      if (strength) body.strength = strength;
+      if (strength === SAME_PICTURE) body.follow = SAME_PICTURE;
+      else if (strength) body.strength = strength;
       // 用户自己挑的那一张（搜索结果里的地址，或者传上来的那张的名字）。
       Object.assign(body, photo || {});
     }
@@ -730,6 +743,7 @@ function drawQueue() {
         // 选的是哪一头也要写上：同一段重画两次、两次选得不一样，事后得看
         // 得出来哪一张是怎么来的。
         + keptLabel(job.strength)
+        + (job.follow ? " · same picture, my style" : "")
       : "";
     // 写提示词那种活说的是另一件事。两种活排同一条队（它们抢同一块显卡），
     // 所以这一行要分得出来是哪一种，否则"正在出图"会盖在一个根本没在出图
@@ -4002,7 +4016,9 @@ function usedPhotoNote(scene) {
   words.appendChild(head);
   const lines = [];
   if (used.width && used.height) lines.push(`${used.width} × ${used.height}`);
-  if (used.strength) {
+  if (used.follow) {
+    lines.push("same picture, in your style");
+  } else if (used.strength) {
     lines.push(used.strength <= 0.7 ? "kept the photograph" : "loosely inspired by it");
   }
   if (used.query) lines.push(`searched: ${used.query}`);
@@ -4161,7 +4177,7 @@ function drawInspector() {
     keep.wrap.title = "Measured on this model: keeping the photograph gives you "
       + "the real subject and framing but a photographic picture, and loosely "
       + "inspired gives your style exactly while the photograph only hints at "
-      + "the subject. There is no setting that gives both.";
+      + "the subject. Same picture gives both; it ignores the prompt.";
     const photoBox = inspectorGroup("Draw it from a photo");
     photoBox.appendChild(keep.wrap);
 
@@ -4172,7 +4188,7 @@ function drawInspector() {
         scene,
         keyword.input.value || null,
         style ? style.input.value : null,
-        Number(keep.input.value) || photoKeep
+        photoKeepOf(keep.input)
       );
     });
     fromPhoto.title = "Search the web for photographs of this and choose the "
@@ -4195,7 +4211,7 @@ function drawInspector() {
           keyword.input.value || null,
           style ? style.input.value : null,
           true,
-          Number(keep.input.value) || photoKeep,
+          photoKeepOf(keep.input),
           { photo_kept: kept, ...(words ? { search: words } : {}) }
         );
       });

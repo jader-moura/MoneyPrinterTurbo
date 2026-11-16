@@ -397,6 +397,10 @@ def _normalise_scene(raw: Any, index: int) -> dict:
             kept["strength"] = round(strength, 3)
         # 那张照片本身存在任务目录里的哪个文件（见 scene_editor 的
         # ``keep_used_photo``）。只认它自己起的那种名字：这个值会被拼进路径。
+        # 这一张是只跟着照片的轮廓、按画风从头画的（而不是从照片改出来的）。
+        # "picture"：改图模型看着照片本身重画；"outlines"：只跟轮廓。
+        if str(reference.get("follow") or "").strip() in ("outlines", "picture"):
+            kept["follow"] = str(reference.get("follow")).strip()
         used = str(reference.get("file") or "").strip()
         if re.fullmatch(r"[0-9a-f]{16}\.png", used):
             kept["file"] = used

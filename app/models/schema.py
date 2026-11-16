@@ -794,6 +794,9 @@ class SceneRegenerateRequest(BaseModel):
     # 这条片子里已经照着画过、存下来的那一张（场景 ``reference.file``）。
     # 同一张照片换一种"留多少"再画一次，不用重新去找它。
     photo_kept: Optional[str] = Field(default=None, max_length=40)
+    # "outlines"：同一张照片，换成我的画风——只跟着照片的轮廓，按画风从头
+    # 画。给了它就不看 ``strength``。
+    follow: Optional[str] = Field(default=None, pattern="^(outlines|picture)$")
 
 
 class ScenePromptSuggestRequest(BaseModel):

@@ -1520,6 +1520,36 @@ def _openai_image_prompt(search_term: str, prompt_template: str = "") -> str:
         return search_term
 
 
+def _restyle_instruction(prompt_template: str = "") -> str:
+    """"同一张图，换成我的画风"时交给改图模型的那句话。
+
+    改图模型看得见照片本身，所以这句话不描述画面——画面就是那张照片——只
+    说要换成什么画风。画风取自这次出图的模板，去掉 ``{term}`` 剩下的那部分
+    （"comic book art, bold ink outlines, ..."）。这一段的画面提示词在这里
+    完全不用：它描述的往往不是用户挑的这张照片，掺进去只会把画面带偏。
+
+    没有画风可说的时候直接报错，不退回成别的画法。
+
+    The instruction for an editing model. It is shown the photograph itself,
+    so the sentence names only the style, taken from the style template with
+    its ``{term}`` removed. The scene's own picture prompt is not used.
+    """
+    template = str(prompt_template or "").strip() or str(
+        config.app.get("openai_image_prompt_template", "") or ""
+    ).strip()
+    words = [part.strip() for part in template.replace("{term}", "").split(",")]
+    style = ", ".join(part for part in words if part)
+    if not style:
+        raise ValueError(
+            "there is no style to redraw the photo in: the image style template "
+            "is empty. Pick an image style and try again."
+        )
+    return (
+        f"Redraw this exact image in this style: {style}. "
+        "Keep the same composition, subjects and poses."
+    )
+
+
 def _response_json_safely(response: Any) -> Any:
     """读取响应 JSON；测试替身或异常响应解析失败时返回 None。"""
     try:
@@ -1867,6 +1897,7 @@ def generate_images_openai(
     prompt_template: str = "",
     reference_image: str = "",
     reference_strength: float | None = None,
+    reference_follow: str = "",
 ) -> List[MaterialInfo]:
     """
     用 OpenAI 兼容文生图接口为一个脚本关键词生成一张图片并保存到本地。
@@ -1901,7 +1932,15 @@ def generate_images_openai(
     starting_from = str(reference_image or "").strip()
     if starting_from:
         payload["image"] = starting_from
-        if reference_strength is not None:
+        # 两种照着画的办法只能选一种。``follow`` 是"同一张图，换成我的画风"：
+        # 服务端只看照片的轮廓，从头画，所以没有"保留多少"这回事。
+        following = str(reference_follow or "").strip()
+        if following:
+            payload["follow"] = following
+            if following == "picture":
+                # 改图模型：提示词是一句"把这张图换成某某画风"，不是画面描述。
+                payload["prompt"] = _restyle_instruction(prompt_template)
+        elif reference_strength is not None:
             payload["strength"] = float(reference_strength)
     logger.info(
         f"generating image via openai-compatible endpoint: model={model}, "
@@ -2368,6 +2407,7 @@ def _download_videos_openai_image_on_demand(
     continue_unfinished: bool = False,
     reference_image: str = "",
     reference_strength: float | None = None,
+    reference_follow: str = "",
 ) -> List[str]:
     """
     按脚本片段顺序逐张生成 OpenAI 兼容文生图素材，凑够所需总时长立即停止。
@@ -2455,6 +2495,8 @@ def _download_videos_openai_image_on_demand(
         generation_options["reference_image"] = starting_from
         if reference_strength is not None:
             generation_options["reference_strength"] = float(reference_strength)
+        if str(reference_follow or "").strip():
+            generation_options["reference_follow"] = str(reference_follow).strip()
     if provider == "codex_image":
         try:
             codex_image_context = (
@@ -2882,6 +2924,7 @@ def download_videos(
     continue_unfinished: bool = False,
     reference_image: str = "",
     reference_strength: float | None = None,
+    reference_follow: str = "",
 ) -> List[str]:
     """
     搜索并下载覆盖配音时长所需的素材，返回本地文件路径。
@@ -3019,6 +3062,7 @@ def download_videos(
             continue_unfinished=continue_unfinished,
             reference_image=str(reference_image or ""),
             reference_strength=reference_strength,
+            reference_follow=str(reference_follow or ""),
             **image_options,
         )
 

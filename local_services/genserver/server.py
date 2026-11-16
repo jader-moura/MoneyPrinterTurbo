@@ -58,7 +58,7 @@ from typing import Any, Optional
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from registry import REGISTRY, ModelSpec, as_json, parse_size, spec_for  # noqa: E402
+from registry import EDITORS, OUTLINES, REGISTRY, ModelSpec, as_json, parse_size, spec_for  # noqa: E402
 
 # Importing torch must not take the server down: `/health` reporting a broken
 # install is the whole point of `doctor` asking this process rather than
@@ -478,6 +478,11 @@ class Resident:
         self.model_id: Optional[str] = None
         self.pipe: Any = None
         self.image_pipe: Any = None
+        # The ControlNet pipeline, for redrawing a picture along its outlines.
+        self.outline_pipe: Any = None
+        # The handle of the hook that arranges the card each time the
+        # ControlNet is called. See `following_outlines`.
+        self.outline_hook: Any = None
         # How much commit charge building it cost, the last time it was built.
         self.image_pipe_grew_mb = 0
         self.loaded_at: float = 0.0
@@ -497,6 +502,9 @@ class Resident:
         # VAE. Left behind it would keep all three alive after the unload and
         # the next load would find the card still full.
         self.image_pipe = None
+        # Same for the ControlNet pipeline, plus the ControlNet it alone holds.
+        self.outline_pipe = None
+        self.outline_hook = None
         self.model_id = None
         self.loaded_at = 0.0
         gc.collect()
@@ -550,6 +558,8 @@ class Resident:
 
         self.pipe = pipe
         self.image_pipe = None
+        self.outline_pipe = None
+        self.outline_hook = None
         self.model_id = spec.id
         self.loaded_at = time.time()
         return {
@@ -643,6 +653,136 @@ class Resident:
         self.image_pipe = built
         return self.image_pipe
 
+
+    def following_outlines(self, spec: ModelSpec) -> Any:
+        """The ControlNet pipeline over the weights that are already resident.
+
+        Built like the img2img one: `from_pipe`, so the transformer, the text
+        encoder and the VAE are shared, and with the dtype named so nothing is
+        rebuilt as float32 (see `starting_from_image`).
+
+        The ControlNet itself is the one new thing: 1.55 GB as bf16. It is not
+        in the pipeline's offload order, so nothing would ever move it. It gets
+        a pre-forward hook here that arranges the card each time it is called,
+        and `generate` clears the card again when the picture is done, so a
+        plain generation never pays for it.
+
+        **Why the hook moves the transformer too, and not just the ControlNet.**
+        The ControlNet does not own all of its layers: `from_transformer` hands
+        it the transformer's own embedders and refiners, the very same modules.
+        Moving the ControlNet therefore moves *part of the transformer*. And
+        accelerate's offload hook decides whether the transformer still needs
+        moving by looking at its first parameter only:
+
+            current_device = next(module.parameters()).device
+            if current_device == self.execution_device:
+                return args, kwargs
+
+        That first parameter is one of the shared ones. Measured, twice: with
+        only the ControlNet moved, the transformer's hook saw "already on
+        cuda", skipped the move, and the first main layer failed with
+        "Expected all tensors to be on the same device ... cuda:0 ... cpu".
+        So the whole transformer goes to the card together with it - after the
+        text encoder has been taken off, because the three do not fit at once.
+        """
+        outline = OUTLINES.get(spec.id)
+        if outline is None:
+            raise ValueError(
+                f"{spec.id} cannot follow a picture's outlines: the registry "
+                f"declares no ControlNet for it."
+            )
+        if self.model_id != spec.id or self.pipe is None:
+            raise RuntimeError(
+                f"{spec.id} is not resident, so there is nothing to build a "
+                f"ControlNet pipeline from."
+            )
+        if self.outline_pipe is not None:
+            return self.outline_pipe
+
+        import diffusers
+        from huggingface_hub import hf_hub_download
+
+        cls = getattr(diffusers, outline.pipeline, None)
+        net_cls = getattr(diffusers, outline.model, None)
+        if cls is None or net_cls is None:
+            raise RuntimeError(
+                f"diffusers {diffusers.__version__} has no {outline.pipeline} / "
+                f"{outline.model}. Upgrade it: pip install -U diffusers"
+            )
+        dtype = getattr(torch, spec.dtype)
+        before = own_commit_mb()
+        net = net_cls.from_single_file(
+            hf_hub_download(outline.repo, filename=outline.filename),
+            torch_dtype=dtype,
+        )
+        built = cls.from_pipe(self.pipe, controlnet=net, torch_dtype=dtype)
+        after = own_commit_mb()
+        if before is not None and after is not None:
+            print(
+                f"[genserver] ControlNet pipeline built: commit charge "
+                f"{before // 1024} GB -> {after // 1024} GB (+{after - before} MB)",
+                flush=True,
+            )
+            if after > MAX_OWN_COMMIT_MB:
+                del built, net
+                give_back_what_we_can()
+                raise Leaking(
+                    f"building the ControlNet pipeline took this process from "
+                    f"{before // 1024} GB to {after // 1024} GB of commit "
+                    f"charge, past the {MAX_OWN_COMMIT_MB // 1024} GB ceiling. "
+                    f"The picture was not drawn; restart this server."
+                )
+        # **The two take turns on the card.** With both resident the first
+        # picture took 576 s - a minute a step - at a peak of 15779 MB on a
+        # 16283 MB card: the transformer's 12 GB, the ControlNet's 1.55 GB and
+        # the desktop's 2.6 GB do not fit, and the driver spills to host
+        # memory. Each step calls the ControlNet and then the transformer,
+        # never both at once, so while the ControlNet runs the last few of the
+        # transformer's main layers (which it does not use) wait on the CPU,
+        # and while the transformer runs the ControlNet's own layers do.
+        parked = list(built.transformer.layers)[-OUTLINE_PARKED_LAYERS:]
+        own = [
+            child for name, child in built.controlnet.named_children()
+            if name not in OUTLINE_SHARED_MODULES
+        ]
+
+        def make_room(module: Any, args: Any) -> None:
+            encoder = built.text_encoder
+            if next(encoder.parameters()).device.type != "cpu":
+                encoder.to("cpu")
+            for layer in parked:
+                layer.to("cpu")
+            torch.cuda.empty_cache()
+            # Its own layers and the ones it borrows from the transformer.
+            module.to("cuda")
+
+        def give_it_back(module: Any, args: Any, output: Any) -> None:
+            for child in own:
+                child.to("cpu")
+            torch.cuda.empty_cache()
+            # Everything that is not there yet: all of it before the first
+            # step, the parked layers before every later one. After this the
+            # transformer's own hook finds it on the card and does nothing.
+            built.transformer.to("cuda")
+
+        self.outline_hook = (
+            built.controlnet.register_forward_pre_hook(make_room),
+            built.controlnet.register_forward_hook(give_it_back),
+        )
+        self.outline_pipe = built
+        return self.outline_pipe
+
+
+# What the ControlNet borrows from the transformer (`from_transformer`): the
+# same modules, so moving them moves part of the transformer.
+OUTLINE_SHARED_MODULES = frozenset({
+    "t_embedder", "all_x_embedder", "cap_embedder", "rope_embedder",
+    "noise_refiner", "context_refiner",
+})
+# How many of the transformer's main layers step off the card while the
+# ControlNet runs. Each is about 0.35 GB as bf16; the ControlNet needs 1.55 GB
+# for itself plus what it works in.
+OUTLINE_PARKED_LAYERS = int(os.environ.get("GEN_OUTLINE_PARKED_LAYERS", "6"))
 
 RESIDENT = Resident()
 
@@ -969,6 +1109,46 @@ def fit_reference(image: Any, width: int, height: int) -> Any:
     return grown.crop((left, top, left + width, top + height))
 
 
+def outlines_of(image: Any, keep: float = 0.12) -> Any:
+    """The picture's outlines: thin white lines on black, as a Canny map looks.
+
+    This is what the ControlNet is shown instead of the photograph. Colour,
+    texture and lighting are gone — those are exactly what the style is meant
+    to replace — and what is left is where every shape is.
+
+    Written out with numpy rather than taken from OpenCV: it is forty lines,
+    and it spares this interpreter a dependency whose only job would be this.
+    Gradient strength from a Sobel pair, thinned along its own direction, and
+    the strongest `keep` of the picture kept.
+    """
+    import numpy as np
+    from PIL import Image, ImageFilter
+
+    grey = np.asarray(
+        image.convert("L").filter(ImageFilter.GaussianBlur(1.4)), dtype=np.float32
+    )
+    pad = np.pad(grey, 1, mode="edge")
+    gx = (pad[:-2, 2:] + 2 * pad[1:-1, 2:] + pad[2:, 2:]
+          - pad[:-2, :-2] - 2 * pad[1:-1, :-2] - pad[2:, :-2])
+    gy = (pad[2:, :-2] + 2 * pad[2:, 1:-1] + pad[2:, 2:]
+          - pad[:-2, :-2] - 2 * pad[:-2, 1:-1] - pad[:-2, 2:])
+    strength = np.hypot(gx, gy)
+    angle = (np.rad2deg(np.arctan2(gy, gx)) + 180.0) % 180.0
+    m = np.pad(strength, 1)
+    here = m[1:-1, 1:-1]
+    across = (angle < 22.5) | (angle >= 157.5)
+    falling = (angle >= 22.5) & (angle < 67.5)
+    down = (angle >= 67.5) & (angle < 112.5)
+    ahead = np.where(across, m[1:-1, 2:], np.where(falling, m[2:, 2:],
+                     np.where(down, m[2:, 1:-1], m[2:, :-2])))
+    behind = np.where(across, m[1:-1, :-2], np.where(falling, m[:-2, :-2],
+                      np.where(down, m[:-2, 1:-1], m[:-2, 2:])))
+    thin = np.where((here >= ahead) & (here >= behind), here, 0.0)
+    cut = float(np.quantile(strength, 1.0 - keep))
+    lines = ((thin >= cut) & (thin > 0)).astype(np.uint8) * 255
+    return Image.fromarray(lines).convert("RGB")
+
+
 def generate(body: dict) -> dict:
     if LOST is not None:
         raise CardLost(
@@ -1005,7 +1185,57 @@ def generate(body: dict) -> dict:
     # the same text-to-image call it always was.
     reference = body.get("image")
     strength = None
-    if reference is not None:
+    # Following the picture's outlines instead of starting from it. Named, so a
+    # caller that sends only `image` gets exactly what it always got.
+    follow = body.get("follow")
+    follow = None if follow is None or str(follow).strip() == "" else str(follow).strip()
+    follow_scale = None
+    control = None
+    # The model that redraws a picture on instruction, when that is what was
+    # asked for. A different model from `spec`: see `EDITORS`.
+    editor = None
+    if follow is not None:
+        if follow not in ("outlines", "picture"):
+            raise ValueError(
+                f'follow must be "outlines" or "picture", not {follow!r}.'
+            )
+        if reference is None:
+            raise ValueError("follow needs an image: there is nothing to follow.")
+    if follow == "picture":
+        editor = EDITORS.get(spec.id)
+        if editor is None:
+            raise ValueError(
+                f"{spec.id} cannot redraw a picture on instruction: the "
+                f"registry declares no editing model for it."
+            )
+        if body.get("negativePrompt") not in (None, ""):
+            raise ValueError(
+                f"{editor.id} takes no negative prompt; say what is wanted in "
+                f"the instruction instead."
+            )
+        reference = fit_reference(decode_reference(reference), width, height)
+        if body.get("steps") is None:
+            steps = editor.steps
+        if body.get("guidance") is None:
+            guidance = editor.guidance
+    elif follow is not None:
+        outline = OUTLINES.get(spec.id)
+        if outline is None:
+            raise ValueError(
+                f"{spec.id} cannot follow a picture's outlines: the registry "
+                f"declares no ControlNet for it."
+            )
+        follow_scale = body.get("followScale")
+        follow_scale = outline.scale if follow_scale is None else float(follow_scale)
+        if not 0.0 < follow_scale <= 2.0:
+            raise ValueError(
+                f"followScale must be above 0 and at most 2, not {follow_scale}."
+            )
+        reference = fit_reference(decode_reference(reference), width, height)
+        control = outlines_of(reference)
+        if body.get("steps") is None:
+            steps = outline.steps
+    elif reference is not None:
         # Refused before anything is decoded: a 16 MB picture is not worth
         # reading to find out the entry could never have used it.
         if not spec.img2img:
@@ -1041,22 +1271,25 @@ def generate(body: dict) -> dict:
             + (TORCH_IMPORT_ERROR or "torch reports no GPU; check the venv's wheel.")
         )
 
+    # The model that will actually be on the card for this picture.
+    drawing = editor or spec
+
     # A generation waits its turn rather than being refused: the Node side
     # queues at one in flight, so a second arrival is a caller that meant it.
     global LAST_USED
     with RESIDENT.lock:
-        RESIDENT.generating = spec.id
+        RESIDENT.generating = drawing.id
         try:
             # Before every generation, not just before the load: Ollama can
             # come back between two images, and the transformer needs the whole
             # card either way.
             unloaded_ollama = unload_ollama()
             loaded = None
-            if RESIDENT.model_id != spec.id:
+            if RESIDENT.model_id != drawing.id:
                 # Both sides of the load, so "what does a resident model
                 # cost?" stops being a guess.
                 commit_before_load = own_commit_mb()
-                loaded = RESIDENT.load(spec, offload_wanted(spec))
+                loaded = RESIDENT.load(drawing, offload_wanted(drawing))
                 loaded["commitMbBefore"] = commit_before_load
                 loaded["commitMbAfter"] = own_commit_mb()
 
@@ -1079,13 +1312,31 @@ def generate(body: dict) -> dict:
             if negative is not None:
                 kwargs["negative_prompt"] = negative
             pipe = RESIDENT.pipe
-            if reference is not None:
+            if editor is not None:
+                # Shown the picture itself; the prompt is what to do with it.
+                kwargs["image"] = reference
+            elif control is not None:
+                pipe = RESIDENT.following_outlines(spec)
+                kwargs["control_image"] = control
+                kwargs["controlnet_conditioning_scale"] = follow_scale
+            elif reference is not None:
                 # Built from the resident pipeline, not loaded again: same
                 # weights, same offload hooks, no second 12 GB.
                 pipe = RESIDENT.starting_from_image(spec)
                 kwargs["image"] = reference
                 kwargs["strength"] = strength
-            image = pipe(**kwargs).images[0]
+            if control is not None:
+                try:
+                    image = pipe(**kwargs).images[0]
+                finally:
+                    # Off the card again, the transformer with it: the two
+                    # share modules, and a transformer left half on the card
+                    # is exactly what `following_outlines` describes.
+                    pipe.transformer.to("cpu")
+                    pipe.controlnet.to("cpu")
+                    torch.cuda.empty_cache()
+            else:
+                image = pipe(**kwargs).images[0]
             seconds = round(time.monotonic() - started, 2)
             peak = int(torch.cuda.max_memory_allocated() // MB)
 
@@ -1105,14 +1356,20 @@ def generate(body: dict) -> dict:
     # reconstructed afterwards from the one that failed.
     print(
         f"[genserver] drew {width}x{height} in {seconds}s"
-        + (" from a photograph" if reference is not None else "")
+        + (f" from a photograph, on instruction, with {drawing.id}"
+           if editor is not None
+           else " along a photograph's outlines" if control is not None
+           else " from a photograph" if reference is not None else "")
         + f"; peak VRAM {peak} MB, commit charge {(own_commit_mb() or 0) // 1024} GB",
         flush=True,
     )
     return {
         "model": spec.id,
-        "repo": spec.repo,
-        "license": spec.license,
+        # The model that drew it, which is another one when the picture was
+        # redrawn on instruction. Its repo and licence, for the credit.
+        "drawnBy": drawing.id,
+        "repo": drawing.repo,
+        "license": drawing.license,
         "prompt": prompt,
         "negativePrompt": negative,
         "width": width,
@@ -1123,6 +1380,9 @@ def generate(body: dict) -> dict:
         # So a caller (and a log) can tell a redraw from a fresh picture.
         "fromImage": reference is not None,
         "strength": strength,
+        # "outlines" when the picture was held in place by its outlines.
+        "follow": follow,
+        "followScale": follow_scale,
         "seconds": seconds,
         "peakAllocatedMb": peak,
         "freeMbBefore": before,
@@ -1130,11 +1390,13 @@ def generate(body: dict) -> dict:
         # In every answer, so growth shows up in a log that is already kept.
         "commitMb": own_commit_mb(),
         "img2imgCommitMb": RESIDENT.image_pipe_grew_mb if reference is not None else 0,
-        "offload": offload_wanted(spec),
+        "offload": offload_wanted(drawing),
         "load": loaded,
         "unloadedOllama": unloaded_ollama,
         "pngBase64": base64.b64encode(buffer.getvalue()).decode("ascii"),
     }
+
+
 class BadRequestBody(ValueError):
     """A body this server will not even try to generate from.
 
@@ -1263,6 +1525,10 @@ def openai_images(body: dict) -> dict:
             request["image"] = reference
             if body.get("strength") is not None:
                 request["strength"] = body.get("strength")
+            # Same extension, one more word: redraw along the outlines.
+            for key in ("follow", "followScale", "steps"):
+                if body.get(key) is not None:
+                    request[key] = body.get(key)
         result = generate(request)
         data.append({"b64_json": result["pngBase64"], "revised_prompt": prompt})
 

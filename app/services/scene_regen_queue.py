@@ -88,6 +88,7 @@ class _Job:
         "from_photo",
         "search",
         "strength",
+        "follow",
         "kind",
         "direction",
         "prompt",
@@ -106,6 +107,7 @@ class _Job:
         from_photo: bool = False,
         search: str = "",
         strength: Optional[float] = None,
+        follow: str = "",
         kind: str = MATERIAL,
         direction: str = "",
         photo: Any = None,
@@ -135,6 +137,8 @@ class _Job:
         self.search = str(search or "")
         # 这一张要保留多少照片。None = 用配置里那个。
         self.strength = None if strength is None else float(strength)
+        # "outlines" = 同一张图，换成我的画风（只跟照片的轮廓）。
+        self.follow = str(follow or "")
         # 这个活是"写提示词"还是"出图"。两种活排同一条队，因为它们抢同一块
         # 显卡：写提示词要让 ollama 把模型装进显存，而出图那边 16 GB 已经被
         # 占着——同时跑就是两边都变慢，或者直接 OOM。
@@ -185,6 +189,7 @@ class _Job:
             "from_photo": self.from_photo,
             "search": self.search,
             "strength": self.strength,
+            "follow": self.follow,
             "kind": self.kind,
             "direction": self.direction,
             "prompt": self.prompt,
@@ -225,6 +230,7 @@ def enqueue(
     search: str = "",
     strength: Optional[float] = None,
     photo: Any = None,
+    follow: str = "",
 ) -> dict:
     """把一次重生成排进队列，立刻返回。
 
@@ -246,6 +252,7 @@ def enqueue(
         search=search,
         strength=strength,
         photo=photo,
+        follow=follow,
     )
     with _LOCK:
         _QUEUE.append(job)
@@ -269,6 +276,7 @@ def _material_job(
     search: str = "",
     strength: Optional[float] = None,
     photo: Any = None,
+    follow: str = "",
 ) -> _Job:
     """一个出图的活，验过的。入队由调用方做——写提示词那条路要把"入队"和
     "这个活完成了"放进同一次加锁里。"""
@@ -286,6 +294,7 @@ def _material_job(
         search=search,
         strength=strength,
         photo=photo,
+        follow=follow,
     )
 
 
@@ -654,6 +663,7 @@ def _run_material(job: _Job) -> None:
             expect_scene=job.anchor,
             reference=reference,
             strength=job.strength,
+            follow=job.follow,
         )
     except SceneError as exc:
         # 场景层的错误本来就是给人看的（哪个源失败了、下标越界多少），

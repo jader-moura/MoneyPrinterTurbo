@@ -145,6 +145,95 @@ ZIMAGE_TURBO = ModelSpec(
 REGISTRY: Dict[str, ModelSpec] = {ZIMAGE_TURBO.id: ZIMAGE_TURBO}
 
 
+@dataclass(frozen=True)
+class OutlineSpec:
+    """How one model redraws a picture while *following its outlines*.
+
+    Starting from a picture with a strength (`ModelSpec.img2img`) is one dial:
+    turn it down and the photograph survives, photographic look included; turn
+    it up and the style arrives but the model redraws the scene its own way.
+    No position gives "this exact picture, in that style".
+
+    A ControlNet does. The photograph is reduced to its outlines, the picture
+    is drawn from noise in whatever style the prompt names, and the outlines
+    hold every shape where it was.
+
+    Kept out of `ModelSpec` on purpose: `GET /models` is compared field by
+    field by its other reader, and this is nothing that reader asks about.
+    """
+
+    pipeline: str
+    """A `diffusers` class taking `control_image`, built with `from_pipe`."""
+
+    model: str
+    """The `diffusers` ControlNet class, loaded with `from_single_file`."""
+
+    repo: str
+    filename: str
+    """Where the ControlNet weights are. One file, fetched on first use."""
+
+    steps: int
+    """Steps when the caller names none."""
+
+    scale: float
+    """How hard the outlines hold, when the caller names none."""
+
+    license: str
+
+
+OUTLINES: Dict[str, OutlineSpec] = {
+    ZIMAGE_TURBO.id: OutlineSpec(
+        # Both verified against the diffusers in the interpreter that runs this
+        # server (0.41.0), whose own example loads exactly this file.
+        pipeline="ZImageControlNetPipeline",
+        model="ZImageControlNetModel",
+        # The first Union release: 3.1 GB on disk, 1.55 GB as bf16. The 2.x
+        # files are 6.7 GB, which does not fit beside a 12 GB transformer on a
+        # 16 GB card, and this diffusers cannot read the small "lite" ones.
+        repo="alibaba-pai/Z-Image-Turbo-Fun-Controlnet-Union",
+        filename="Z-Image-Turbo-Fun-Controlnet-Union.safetensors",
+        steps=9,
+        scale=0.75,
+        license="Apache-2.0",
+    ),
+}
+
+
+FLUX2_KLEIN = ModelSpec(
+    id="flux2-klein-4b",
+    repo="black-forest-labs/FLUX.2-klein-4B",
+    # Verified against the diffusers in the interpreter that runs this server
+    # (0.41.0): `Flux2KleinPipeline.__call__` takes `image` and `prompt`, and
+    # the prompt is an instruction about that image ("redraw this as ...").
+    pipeline="Flux2KleinPipeline",
+    emits="image",
+    # The distilled 4B: four steps at guidance 1, from its model card.
+    steps=4,
+    guidance=1.0,
+    dtype="bfloat16",
+    sizes=list(ZIMAGE_TURBO.sizes),
+    granularity=16,
+    # Measured on an RTX 5060 Ti with CPU offload: 9266 MiB peak at 1280x720,
+    # 16 to 24 seconds a picture.
+    vram_floor_mb=9500,
+    license="Apache-2.0",
+    offload=True,
+    notes="4B, distilled. Takes a picture and an instruction about it.",
+)
+
+#: Which model redraws a picture *on instruction* for callers of each entry.
+#:
+#: `OUTLINES` holds a picture's shapes and still needs the prompt to say what
+#: the shapes are. An editing model is shown the picture itself, so "redraw
+#: this as comic book art" is the whole prompt.
+#:
+#: Not in `REGISTRY`, for the reason `OutlineSpec` is not in `ModelSpec`:
+#: `GET /models` is compared against its other reader's own list. It is a
+#: second model all the same, and the card holds one: asking for it swaps the
+#: resident model out, and the next plain generation swaps it back.
+EDITORS: Dict[str, ModelSpec] = {ZIMAGE_TURBO.id: FLUX2_KLEIN}
+
+
 def spec_for(model_id: str) -> ModelSpec:
     """The entry for `model_id`, or an error naming every id there is."""
     spec = REGISTRY.get(model_id)

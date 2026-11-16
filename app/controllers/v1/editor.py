@@ -1402,6 +1402,7 @@ def queue_scene_material(
             search=str(body.search or ""),
             # 每一张自己选保留多少照片。不给就用配置里那个。
             strength=body.strength,
+            follow=str(body.follow or ""),
         ),
     )
     return utils.get_response(200, job)
@@ -1432,6 +1433,7 @@ def regenerate_scene_material(
             keyword=body.keyword,
             image_style=body.image_style,
             strength=body.strength,
+            follow=str(body.follow or ""),
             reference=(
                 scene_editor.find_reference_photo(
                     task_id,

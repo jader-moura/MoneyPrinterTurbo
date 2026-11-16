@@ -510,6 +510,7 @@ def regenerate_material(
     expect_scene: str | None = None,
     reference: Any = None,
     strength: float | None = None,
+    follow: str = "",
 ) -> dict:
     """重新取这一个场景的素材。
 
@@ -557,8 +558,19 @@ def regenerate_material(
     # 什么都改不了。
     # 一次算清楚，出图和记在场景上的是同一个数：日后回头看"这张是怎么来
     # 的"，答案必须是真的那一个。
+    # 照着照片画有两种办法，一次只用一种：
+    #   * 从照片出发，改掉一部分（``strength`` 说改多少）；
+    #   * 只留照片的轮廓，按我的画风从头画（``follow``）——同一张图，换了画风。
+    follow = str(follow or "").strip()
+    if follow and follow not in FOLLOW_WAYS:
+        raise SceneError(
+            f"unknown way of following a photo {follow!r}; pick one of: "
+            f"{', '.join(FOLLOW_WAYS)}"
+        )
+    if follow and reference is None:
+        raise SceneError("redrawing a photo in your style needs a photo")
     kept = None
-    if reference is not None:
+    if reference is not None and not follow:
         kept = float(strength) if strength else reference_image.strength()
 
     new_path, source = _produce_material(
@@ -568,6 +580,7 @@ def regenerate_material(
         image_style=style,
         reference=reference,
         strength=kept,
+        follow=follow,
     )
     # 照着画的那张照片留一份（锁外面：只是写一个文件）。
     used_photo = keep_used_photo(task_id, reference) if reference is not None else ""
@@ -605,7 +618,11 @@ def regenerate_material(
         # 这一张是照着哪张照片画的，或者不再是了。记的是**现在这张图**怎么
         # 来的，所以普通重生成要把旧的那条抹掉——留着它就是说谎。
         if reference is not None:
-            scene["reference"] = {**reference.payload(), "strength": kept}
+            scene["reference"] = {**reference.payload()}
+            if follow:
+                scene["reference"]["follow"] = follow
+            else:
+                scene["reference"]["strength"] = kept
             if used_photo:
                 scene["reference"]["file"] = used_photo
         else:
@@ -629,6 +646,9 @@ def regenerate_material(
 # 的图。文件名是内容的摘要，所以同一张照片画几段也只存一份。
 
 USED_PHOTO_DIR = "references"
+
+#: 照着照片画时"跟着它的什么走"。现在只有一种：轮廓。
+FOLLOW_WAYS = ("outlines", "picture")
 _USED_PHOTO_NAME = re.compile(r"[0-9a-f]{16}\.png")
 
 
@@ -731,6 +751,7 @@ def _produce_material(
     image_style: str | None = None,
     reference: Any = None,
     strength: float | None = None,
+    follow: str = "",
 ) -> tuple[str, str]:
     """按关键词取一份素材，返回 ``(文件路径, 素材源)``。
 
@@ -762,6 +783,9 @@ def _produce_material(
                 float(strength) if strength else reference_image.strength()
             ),
         }
+        if follow:
+            starting_from.pop("reference_strength", None)
+            starting_from["reference_follow"] = follow
     logger.info(
         f"generating {what} of task {task_id} "
         f"from source {source!r} with keyword {term!r}"
