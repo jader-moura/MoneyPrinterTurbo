@@ -33,6 +33,7 @@ const ui = {
   musicClose: el("music-close"), musicNote: el("music-note"),
   musicLane: el("music-lane"), musicBed: el("music-bed"),
   subs: el("subs"), subsText: el("subs-text"),
+  yt: el("yt"), subsYt: el("subs-yt"), subsSafe: el("subs-safe"),
   captionPanel: el("caption-panel"), captionText: el("caption-text"),
   captionWhen: el("caption-when"), captionSave: el("caption-save"),
   captionClose: el("caption-close"), captionNote: el("caption-note"),
@@ -4783,6 +4784,7 @@ function subtitleSettings() {
 }
 
 function drawSubtitle() {
+  drawYouTube();
   const style = subtitleSettings();
   const cue = style && style.enabled ? activeCue() : null;
   if (!cue || !String(cue.text || "").trim()) {
@@ -4819,6 +4821,7 @@ function drawSubtitle() {
     : "0";
 
   placeSubtitle(style, frameHeight);
+  noteCaptionClash();
 }
 
 /** 字幕的纵向位置，照抄渲染器那几条规则（见 video.py 的 subtitle_position）。 */
@@ -5796,6 +5799,135 @@ ui.publishDraw.addEventListener("click", () =>
     call("POST", `/tasks/${encodeURIComponent(state.taskId)}/publish/thumbnail`,
       { prompt: ui.publishPrompt.value })));
 
+/* ---------- YouTube 会盖住哪里 ----------
+
+   字幕"放对了没有"光看成片的画面是看不出来的：片子传上去以后，YouTube 还
+   要在上面压自己的东西——Shorts 的频道名、标题、右边那一列按钮，正好压在
+   默认的"底部"字幕上。所以调字幕时把那一层的样子画出来，字幕压在它底下
+   就直说。
+
+   它只是一张示意图：尺寸是照着手机上的样子估的，不同手机、不同版本会差一
+   点。它不进成片。 */
+const YT_PREF = "mpt-editor-youtube-guide";
+
+function drawYouTube() {
+  const open = !ui.subsPanel.hidden;
+  ui.subs.classList.toggle("movable", open);
+  const show = open && ui.subsYt.checked;
+  ui.yt.hidden = !show;
+  if (!show) {
+    ui.subs.classList.remove("clash");
+    return;
+  }
+  const settings = (state.data && state.data.render_settings) || {};
+  const width = Number(settings.frame_width) || 1080;
+  const height = Number(settings.frame_height) || 1920;
+  // 竖的按 Shorts 画，横的和方的按普通播放器画。
+  const shape = height > width ? "shorts" : "wide";
+  if (ui.yt.dataset.shape !== shape) ui.yt.dataset.shape = shape;
+  const title = (state.data && state.data.subject) || "Your video title";
+  for (const node of ui.yt.querySelectorAll(".yt-title")) {
+    if (node.textContent !== title) node.textContent = title;
+  }
+}
+
+/** 此刻这行字压在 YouTube 的哪几样东西底下。量的就是画出来的那几块，所以
+    说的和看到的是一回事。 */
+function captionClashes() {
+  if (ui.yt.hidden || ui.subs.hidden) return [];
+  const box = ui.subsText.getBoundingClientRect();
+  const under = [];
+  for (const zone of ui.yt.querySelectorAll(".yt-zone")) {
+    const area = zone.getBoundingClientRect();
+    if (!area.width || !area.height) continue;
+    if (box.left < area.right && box.right > area.left
+        && box.top < area.bottom && box.bottom > area.top) {
+      under.push(zone.dataset.covers);
+    }
+  }
+  return under;
+}
+
+function noteCaptionClash() {
+  if (ui.subsPanel.hidden) return;
+  if (ui.yt.hidden) {
+    ui.subsSafe.textContent = "";
+    return;
+  }
+  if (ui.subs.hidden) return;
+  const under = captionClashes();
+  ui.subs.classList.toggle("clash", under.length > 0);
+  let text;
+  if (!under.length) {
+    text = "Clear: nothing of YouTube's covers the caption here.";
+  } else if (ui.yt.dataset.shape === "wide") {
+    text = `Here the caption is under ${under.join(" and ")} whenever the `
+      + "viewer pauses or moves the mouse. Drag it clear if that matters to you.";
+  } else {
+    text = `Here the caption is under ${under.join(" and ")} on YouTube Shorts, `
+      + "so viewers cannot read it. Drag it clear, or pick another position.";
+  }
+  if (ui.subsSafe.textContent !== text) ui.subsSafe.textContent = text;
+  ui.subsSafe.className = under.length ? "hint warn" : "hint";
+}
+
+try { ui.subsYt.checked = localStorage.getItem(YT_PREF) !== "off"; }
+catch { /* 记不住就每次都开着 */ }
+ui.subsYt.addEventListener("change", () => {
+  try { localStorage.setItem(YT_PREF, ui.subsYt.checked ? "on" : "off"); }
+  catch { /* 同上 */ }
+  drawSubtitle();
+  drawYouTube();
+  noteCaptionClash();
+});
+
+/* 把画面上那行字上下拖到想要的地方。
+
+   拖出来的就是"离顶部百分之几"那一种位置，和面板里那个数是同一个值，算法
+   也和渲染器一样：百分比乘的是"画面高减去字幕高"。只在字幕面板开着时能
+   拖；平时点它还是改这一条的字。 */
+const captionDrag = { on: false, moved: false, startY: 0, startTop: 0, justMoved: false };
+
+ui.subsText.addEventListener("pointerdown", (event) => {
+  if (ui.subsPanel.hidden || event.button !== 0) return;
+  if (![...ui.subsPosition.options].some((option) => option.value === "custom")) return;
+  Object.assign(captionDrag, {
+    on: true, moved: false, startY: event.clientY, startTop: ui.subs.offsetTop,
+  });
+  try { ui.subsText.setPointerCapture(event.pointerId); } catch { /* 不要紧 */ }
+  event.preventDefault();
+});
+
+ui.subsText.addEventListener("pointermove", (event) => {
+  if (!captionDrag.on) return;
+  const moved = event.clientY - captionDrag.startY;
+  if (!captionDrag.moved && Math.abs(moved) < 4) return;
+  captionDrag.moved = true;
+  const room = (ui.frame.clientHeight || 0) - (ui.subs.offsetHeight || 0);
+  if (room <= 0) return;
+  const top = Math.max(0, Math.min(room, captionDrag.startTop + moved));
+  ui.subsPosition.value = "custom";
+  ui.subsCustom.value = String(Math.round((top / room) * 1000) / 10);
+  previewSubtitleStyle();
+});
+
+function endCaptionDrag() {
+  if (!captionDrag.on) return;
+  captionDrag.on = false;
+  if (!captionDrag.moved) return;
+  // 松手会跟着来一次 click；那一下不是"我要改这条字幕的字"。
+  captionDrag.justMoved = true;
+  setTimeout(() => { captionDrag.justMoved = false; }, 300);
+}
+ui.subsText.addEventListener("pointerup", endCaptionDrag);
+ui.subsText.addEventListener("pointercancel", endCaptionDrag);
+ui.subs.addEventListener("click", (event) => {
+  if (!captionDrag.justMoved) return;
+  captionDrag.justMoved = false;
+  event.stopPropagation();
+  event.preventDefault();
+}, true);
+
 /* ---------- 字幕的样子 ----------
 
    改的时候画面上那行字立刻跟着变："这个颜色压在这张图上看不看得清"只能这样
@@ -5884,6 +6016,7 @@ function fillSubtitlePanel(style) {
 
 async function openSubtitles() {
   ui.subsPanel.hidden = false;
+  drawYouTube();
   ui.subsNote.textContent = "Loading…";
   try {
     const style = await call("GET",
@@ -5897,6 +6030,7 @@ async function openSubtitles() {
 
 function closeSubtitles() {
   ui.subsPanel.hidden = true;
+  drawYouTube();
   // 面板关了就把预览恢复成磁盘上那一份，免得没保存的改动留在画面上骗人。
   refresh().catch(() => {});
 }

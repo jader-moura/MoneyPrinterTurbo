@@ -144,6 +144,102 @@ body {
   paint-order: stroke fill;
 }
 
+/* 字幕面板开着时，画面上那行字可以上下拖。 */
+.subs.movable span { cursor: ns-resize; touch-action: none; user-select: none; }
+.subs.clash span { outline: 1px dashed var(--warn); outline-offset: 2px; }
+
+/* ---------- YouTube 会盖住哪里（示意） ----------
+
+   压在字幕上面（YouTube 的界面本来就压在视频上面），半透明，鼠标穿透。
+   尺寸全用容器单位：预览框多大，这张示意图就按比例多大。 */
+.yt {
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  pointer-events: none;
+  container-type: size;
+  color: #fff;
+  font-family: Roboto, Arial, sans-serif;
+  text-shadow: 0 0 0.8cqw rgba(0, 0, 0, 0.75);
+  overflow: hidden;
+  opacity: 0.92;
+}
+.yt[data-shape="shorts"] .yt-wide,
+.yt[data-shape="wide"] .yt-shorts { display: none; }
+.yt-gap { flex: 1; }
+.yt-avatar {
+  flex: none;
+  border-radius: 50%;
+  background: linear-gradient(135deg, #ff7a59, #b03a8c);
+  border: 0.3cqw solid rgba(255, 255, 255, 0.85);
+  box-sizing: border-box;
+}
+.yt-progress { height: 0.5cqh; background: rgba(255, 255, 255, 0.3); }
+.yt-progress i { display: block; width: 12%; height: 100%; background: #f03; }
+
+/* 竖版：Shorts */
+.yt-shorts .yt-top {
+  position: absolute; top: 0; left: 0; right: 0; height: 7.5cqh;
+  display: flex; align-items: center; gap: 4cqw; padding: 0 4cqw;
+  font-size: 5.5cqw;
+  background: linear-gradient(rgba(0, 0, 0, 0.45), transparent);
+}
+.yt-shorts .yt-side {
+  position: absolute; right: 2cqw; bottom: 3cqh; width: 13cqw;
+  display: flex; flex-direction: column; align-items: center; gap: 2.2cqh;
+  font-size: 2.8cqw;
+}
+.yt-act { display: flex; flex-direction: column; align-items: center; gap: 0.4cqh; }
+.yt-act i {
+  width: 10.5cqw; height: 10.5cqw; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(0, 0, 0, 0.5); font-style: normal; font-size: 4.6cqw;
+}
+.yt-disc {
+  width: 9.5cqw; height: 9.5cqw; border-radius: 1.6cqw;
+  background: linear-gradient(135deg, #555, #222);
+  border: 0.4cqw solid #fff; box-sizing: border-box;
+}
+.yt-shorts .yt-meta {
+  position: absolute; left: 3.5cqw; right: 18cqw; bottom: 2.6cqh;
+  display: flex; flex-direction: column; gap: 1cqh;
+  font-size: 3.5cqw; line-height: 1.3;
+}
+.yt-channel { display: flex; align-items: center; gap: 2cqw; }
+.yt-shorts .yt-avatar { width: 8.5cqw; height: 8.5cqw; }
+.yt-subscribe {
+  padding: 1cqw 3cqw; border-radius: 5cqw; background: #fff; color: #0f0f0f;
+  font-weight: 600; font-size: 3.1cqw; text-shadow: none;
+}
+.yt-shorts .yt-title {
+  display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+.yt-sound { font-size: 3cqw; opacity: 0.9; }
+.yt-shorts > .yt-progress { position: absolute; left: 0; right: 0; bottom: 0; height: 0.25cqh; }
+
+/* 横版：播放器（鼠标移上去或暂停时才出现的那一层） */
+.yt-wide .yt-top {
+  position: absolute; top: 0; left: 0; right: 0; height: 13cqh;
+  display: flex; align-items: center; gap: 1.4cqw; padding: 0 2cqw;
+  font-size: 2.1cqw;
+  background: linear-gradient(rgba(0, 0, 0, 0.6), transparent);
+}
+.yt-wide .yt-avatar { width: 4.4cqw; height: 4.4cqw; }
+.yt-wide .yt-title { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.yt-wide .yt-controls {
+  position: absolute; left: 0; right: 0; bottom: 0; height: 14cqh;
+  display: flex; flex-direction: column; justify-content: flex-end;
+  padding: 0 1.6cqw; box-sizing: border-box;
+  background: linear-gradient(transparent, rgba(0, 0, 0, 0.7));
+}
+.yt-buttons {
+  display: flex; align-items: center; gap: 2cqw;
+  height: 8.5cqh; font-size: 2.2cqw;
+}
+.yt-time { font-size: 1.5cqw; }
+.yt-cc { font-size: 1.4cqw; font-weight: 700; border: 0.2cqw solid #fff; border-radius: 0.4cqw; padding: 0 0.5cqw; }
+
 /* ---------- 渲染中 ---------- */
 
 .modal {
