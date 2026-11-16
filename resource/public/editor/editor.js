@@ -109,6 +109,9 @@ const ui = {
   settingsStatus: el("settings-status"), settingsClose: el("settings-close"),
   settingsSave: el("settings-save"),
   dock: el("dock"), projectTitle: el("project-title"),
+  deleteVideo: el("delete-video"), deleteModal: el("delete-modal"),
+  deleteWhat: el("delete-what"), deleteNote: el("delete-note"),
+  deleteCancel: el("delete-cancel"), deleteConfirm: el("delete-confirm"),
   photoModal: el("photo-modal"), photoTitle: el("photo-title"),
   photoSearch: el("photo-search"), photoFind: el("photo-find"),
   photoNote: el("photo-note"), photoGrid: el("photo-grid"),
@@ -2793,6 +2796,12 @@ function drawProjectTitle() {
   const name = (state.data && state.data.subject) || "";
   ui.projectTitle.textContent = name;
   ui.projectTitle.title = name;
+  // 开着一条片子时，"我的视频"是往回走的那个按钮，删除也才有东西可删。
+  const inVideo = !!state.taskId && !EMBEDDED;
+  ui.libraryToggle.textContent = inVideo ? "\u2190 My videos" : "My videos";
+  ui.libraryToggle.title = inVideo
+    ? "Leave this video and go back to the list of your videos" : "";
+  ui.deleteVideo.hidden = !inVideo;
 }
 
 // "按 id 打开"现在在"我的视频"那一屏里：打开之后那一屏得让开。
@@ -5187,6 +5196,19 @@ function libraryCard(row) {
   }
 
   card.appendChild(body);
+
+  const remove = document.createElement("button");
+  remove.type = "button";
+  remove.className = "card-delete";
+  remove.textContent = "Delete";
+  remove.title = "Delete this video permanently";
+  remove.addEventListener("click", (event) => {
+    // 卡片本身是"打开这条片子"；删除不该顺带把它打开。
+    event.stopPropagation();
+    askDeleteVideo(row.task_id, row.subject || row.task_id, card);
+  });
+  card.appendChild(remove);
+
   card.addEventListener("click", () => {
     closeLibrary();
     ui.task.value = row.task_id;
@@ -5253,8 +5275,93 @@ function closeLibrary() {
   ui.library.hidden = true;
 }
 
+/** 回到"我的视频"那一页：编辑器里不再开着任何一条片子。
+
+    是真的换页，不是在这一条上面盖一层：盖一层的话地址栏里还是这条片子，
+    刷新一下又回到它里面，"关闭"也还是它——那不叫回到列表。没存完的提示词
+    由 pagehide 那一下发出去。 */
+function backToLibrary() {
+  window.location.assign(window.location.pathname);
+}
+
 ui.libraryToggle.addEventListener("click", () => {
+  // 嵌在 WebUI 里时这一页就是为那一条片子开的，没有"列表页"可回。
+  if (state.taskId && !EMBEDDED) { backToLibrary(); return; }
   if (ui.library.hidden) loadLibrary(1); else closeLibrary();
+});
+
+/* ---------- 永久删除一条片子 ----------
+
+   编辑器里别的改动都能撤销，这一件不能，所以它先问。列表里每张卡片上有
+   一个，打开的那条片子顶栏里也有一个。 */
+const deleting = { id: "", card: null, busy: false };
+
+function askDeleteVideo(taskId, name, card) {
+  Object.assign(deleting, { id: taskId, card: card || null, busy: false });
+  ui.deleteWhat.textContent = name || taskId;
+  ui.deleteNote.textContent = "";
+  ui.deleteNote.className = "hint";
+  ui.deleteConfirm.disabled = false;
+  ui.deleteModal.hidden = false;
+  // 焦点落在"取消"上：手快按了回车，什么都不会没。
+  ui.deleteCancel.focus();
+}
+
+function closeDeleteVideo() {
+  if (deleting.busy) return;
+  ui.deleteModal.hidden = true;
+  deleting.id = "";
+}
+
+async function deleteVideoForGood() {
+  if (deleting.busy || !deleting.id) return;
+  const { id, card } = deleting;
+  deleting.busy = true;
+  ui.deleteConfirm.disabled = true;
+  ui.deleteNote.className = "hint pending";
+  ui.deleteNote.textContent = "Deleting…";
+  const open = id === state.taskId;
+  if (open) {
+    // 正在播的预览占着文件，Windows 上占着就删不掉。先放手。
+    for (const player of document.querySelectorAll("video, audio")) {
+      try { player.pause(); player.removeAttribute("src"); player.load(); }
+      catch { /* 放不掉就让服务端说 */ }
+    }
+  }
+  try {
+    await call("DELETE", `/library/${encodeURIComponent(id)}`);
+  } catch (error) {
+    deleting.busy = false;
+    ui.deleteConfirm.disabled = false;
+    ui.deleteNote.className = "hint warn";
+    ui.deleteNote.textContent = String(error.message || error);
+    return;
+  }
+  deleting.busy = false;
+  ui.deleteModal.hidden = true;
+  deleting.id = "";
+  if (open) {
+    // 这条片子没了，编辑器里不能还开着它。
+    promptEdit = null;
+    backToLibrary();
+    return;
+  }
+  if (card) card.remove();
+  // 数字和"再来一页"都按少了一条重算。
+  if (!ui.library.hidden) loadLibrary(1);
+}
+
+ui.deleteCancel.addEventListener("click", closeDeleteVideo);
+ui.deleteConfirm.addEventListener("click", deleteVideoForGood);
+ui.deleteModal.addEventListener("click", (event) => {
+  if (event.target === ui.deleteModal) closeDeleteVideo();
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && !ui.deleteModal.hidden) closeDeleteVideo();
+});
+ui.deleteVideo.addEventListener("click", () => {
+  if (!state.taskId) return;
+  askDeleteVideo(state.taskId, (state.data && state.data.subject) || state.taskId);
 });
 ui.libraryClose.addEventListener("click", closeLibrary);
 ui.libraryMore.addEventListener("click", () =>

@@ -304,6 +304,25 @@ body {
   flex-direction: column;
 }
 .card:hover { border-color: var(--accent); }
+/* 删除藏在卡片角上，鼠标移上去（或键盘聚焦）才出来：它不该和"打开"抢。 */
+.card { position: relative; }
+.card .card-delete {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  padding: 3px 8px;
+  font: inherit;
+  font-size: 11px;
+  color: #fff;
+  background: rgba(0, 0, 0, 0.72);
+  border: 1px solid var(--danger);
+  border-radius: 5px;
+  cursor: pointer;
+  opacity: 0;
+}
+.card:hover .card-delete, .card .card-delete:focus-visible { opacity: 1; }
+.card .card-delete:hover { background: var(--danger); }
+.delete-what { font-weight: 600; margin: 4px 0 8px; overflow-wrap: anywhere; }
 
 /* 封面按成片比例留出来，图没读出来时也不会把卡片塌掉。 */
 .card .shot {

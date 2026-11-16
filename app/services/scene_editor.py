@@ -1850,6 +1850,86 @@ def _subtitle_file(task_id: str) -> str:
     return path
 
 
+def delete_video(task_id: str) -> dict:
+    """把一条片子从磁盘上永久删掉：画过的图、配音、字幕、成片，全部。
+
+    为什么不用 ``DELETE /tasks/{id}``：那一条只认进程内存里的任务表，API 一
+    重启表就空了，于是"我的视频"里的每一条旧片子都删不掉（404）。这里和
+    ``library`` 一样，以磁盘为准。
+
+    正在跑的不删：流水线和出图队列会接着往这个目录里写，删到一半的目录比
+    不删更糟。
+
+    先把整个目录改名挪走、再删。改名是一步到位的：有文件正被占用（Windows
+    上浏览器还在播它）时改名整个失败，什么都没动，而不是删掉一半剩一半。
+    """
+    name = str(task_id or "").strip()
+    root = os.path.abspath(utils.task_dir())
+    folder = os.path.abspath(os.path.join(root, name))
+    # 只认任务目录下的一级子目录。``..``、带斜杠的、空的，都不是一条片子。
+    if (
+        not name
+        or name in (".", "..")
+        or name != os.path.basename(name)
+        or os.path.dirname(folder) != root
+    ):
+        raise SceneError("that is not the id of a video")
+    if not os.path.isdir(folder) or os.path.islink(folder):
+        raise SceneError("that video is not on this computer any more")
+
+    task = sm.state.get_task(name)
+    if task and tm.is_task_busy(task):
+        raise SceneBusyError(
+            "this video is still being made; wait for it to finish (or stop "
+            "it) before deleting it"
+        )
+    from app.services import scene_regen_queue
+
+    if scene_regen_queue.snapshot(name).get("busy"):
+        raise SceneBusyError(
+            "pictures of this video are still being drawn; wait for them to "
+            "finish (or cancel them) before deleting it"
+        )
+
+    files = 0
+    size = 0
+    for parent, _, names in os.walk(folder):
+        for one in names:
+            files += 1
+            try:
+                size += os.path.getsize(os.path.join(parent, one))
+            except OSError:
+                pass
+
+    import uuid
+
+    # 挪到任务目录的上一层：同一块盘（改名才是一步到位的），又不在列表里。
+    trash = os.path.join(
+        os.path.dirname(root), f".deleting-{name}-{uuid.uuid4().hex[:8]}"
+    )
+    with _editing(name):
+        try:
+            os.rename(folder, trash)
+        except OSError as exc:
+            raise SceneError(
+                "this video could not be deleted because one of its files is "
+                "in use (a preview that is still playing, or a folder window "
+                f"open on it). Nothing was deleted; close it and try again. ({exc})"
+            ) from exc
+    try:
+        shutil.rmtree(trash)
+    except OSError as exc:
+        # 已经不在"我的视频"里了；剩下的是一个占地方的目录，不是一条片子。
+        logger.warning(f"could not finish removing {trash}: {exc}")
+
+    sm.state.delete_task(name)
+    scene_regen_queue.dismiss(name)
+    with _PHOTO_LOCK:
+        _OFFERED.pop(name, None)
+    logger.success(f"video deleted for good: {name} ({files} files, {size} bytes)")
+    return {"task_id": name, "files": files, "bytes": size}
+
+
 def library(endpoint: str = "", *, page: int = 1, page_size: int = 24) -> dict:
     """磁盘上所有做过的片子，最近动过的排在前面。
 

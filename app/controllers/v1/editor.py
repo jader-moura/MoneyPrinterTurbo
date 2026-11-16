@@ -898,6 +898,23 @@ def list_library(
     return utils.get_response(200, data)
 
 
+@router.delete(
+    "/library/{task_id}",
+    summary="Delete one video and everything made for it, permanently",
+)
+def delete_library_video(
+    request: Request,
+    task_id: str = Path(..., description="Task ID"),
+):
+    """永久删除一条片子。以磁盘为准，所以 API 重启之前做的片子也删得掉
+    （``DELETE /tasks/{id}`` 只认内存里的任务表）。正在跑的返回 409。"""
+    request_id = base.get_task_id(request)
+    data = _handle(
+        task_id, request_id, lambda: scene_editor.delete_video(task_id)
+    )
+    return utils.get_response(200, data)
+
+
 @router.get("/cut-sound/{name}", summary="Play one transition sound")
 def stream_cut_sound(request: Request, name: str = Path(..., description="Sound file name")):
     """让编辑器能先听一下那一声再决定用不用。
