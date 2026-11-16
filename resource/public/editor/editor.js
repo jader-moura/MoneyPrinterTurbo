@@ -118,8 +118,10 @@ const ui = {
   photoNote: el("photo-note"), photoGrid: el("photo-grid"),
   photoUpload: el("photo-upload"), photoAuto: el("photo-auto"),
   photoClose: el("photo-close"),
+  photoGoogle: el("photo-google"), photoGoogleNote: el("photo-google-note"),
   undo: el("undo"), redo: el("redo"), split: el("split"),
   duplicate: el("duplicate"), deleteScene: el("delete-scene"),
+  pace: el("pace"),
   createModal: el("create-modal"), createTitle: el("create-title"),
   createNote: el("create-note"), createBar: el("create-bar"),
   createPct: el("create-pct"), createElapsed: el("create-elapsed"),
@@ -627,7 +629,8 @@ async function queueRegeneration(index, keyword, imageStyle, fromPhoto, strength
       // 用户自己挑的那一张（搜索结果里的地址，或者传上来的那张的名字）。
       Object.assign(body, photo || {});
     }
-    const chose = !!(photo && (photo.photo_url || photo.photo_upload));
+    const chose = !!(photo
+      && (photo.photo_url || photo.photo_upload || photo.photo_kept));
     const job = await call(
       "POST",
       `${scenePath(index)}/material/queue`,
@@ -2615,6 +2618,7 @@ function drawEditBar() {
   ui.duplicate.disabled = !ready || !picked;
   // 最后一段不能删：一条片子至少要有一段。
   ui.deleteScene.disabled = !ready || !picked || state.scenes.length < 2;
+  ui.pace.disabled = !ready || !state.scenes.length;
 }
 
 async function syncHistory() {
@@ -2709,6 +2713,12 @@ ui.undo.addEventListener("click", () => stepHistory("undo"));
 ui.redo.addEventListener("click", () => stepHistory("redo"));
 ui.split.addEventListener("click", splitAtPlayhead);
 ui.duplicate.addEventListener("click", duplicateSelected);
+// 每张画面跟着它那句旁白走。新片子打开时已经是这样；挪过、删过之后用它
+// 再对一次。对不上的时候服务端会点名是哪一段。
+ui.pace.addEventListener("click", () => run("Matching the pictures to the narration", async () => {
+  await call("POST", `/tasks/${encodeURIComponent(state.taskId)}/timeline/pace`);
+  return "";
+}));
 ui.deleteScene.addEventListener("click", deleteSelected);
 
 /** 这一下键盘是打给时间线的，还是打给一个输入框的。
@@ -2983,12 +2993,17 @@ function openPhotoPicker(scene, keyword, style, strength) {
   const before = photoPick.words[photoPick.key]
     || ((scene.reference && scene.reference.query) || "").trim();
   ui.photoSearch.value = before;
-  if (before) findPhotos(before);
+  // 有词就马上开 Google 图片的小窗口；没词等模型写出来再开（见下）。
+  // 图库那一遍不再自己搜：用户是在 Google 的窗口里挑的，再搜一遍只是多
+  // 一次会失败的请求。想用图库，"Search" 按钮还在。
+  googleNote("");
+  photoNote("");
+  if (before) browseGoogle(before);
   else writePhotoWords();
 }
 
-/** 让模型写搜索词，写完填进框里再搜。词先落框、后搜索：搜索失败（图库
-    抽风是常事）的时候，框里不能是空的。 */
+/** 让模型写搜索词，写完填进框里，再开 Google 图片的窗口去搜。词先落框、
+    后搜索：窗口开不了的时候，框里不能是空的。 */
 async function writePhotoWords() {
   const at = photoPick.at;
   ui.photoFind.disabled = true;
@@ -3006,11 +3021,19 @@ async function writePhotoWords() {
   if (photoPick.at !== at) return;
   ui.photoFind.disabled = false;
   ui.photoSearch.value = words;
-  // 有词就照词搜；没有就让搜索那一步自己写（空词 = "你来写"）。
-  findPhotos(words);
+  if (words) {
+    photoNote("");
+    browseGoogle(words);
+  } else {
+    // 词没写出来（模型没应答）。不停在一个空框和一句"正在想"上。
+    photoNote("Could not work out what to search for. Type it above and "
+      + "click Search on Google.", "warn");
+    ui.photoSearch.focus();
+  }
 }
 
 function closePhotoPicker() {
+  closePhotoBrowser();
   ui.photoModal.hidden = true;
   photoPick.at = -1;
 }
@@ -3132,6 +3155,151 @@ ui.photoModal.addEventListener("click", (event) => {
 });
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape" && !ui.photoModal.hidden) closePhotoPicker();
+});
+
+/* ---------- 在 Google 图片里自己挑 ----------
+
+   点"照着照片重画"，这个程序就在本机上开一个小浏览器窗口，里面是 Google
+   图片搜这一段的词。用户在那里点一张图把它放大，再点那张大图——就是它了，
+   这边直接开画。不需要任何搜索 API、不需要密钥，也没有额度。
+
+   窗口是服务端开的（一张网页读不到别的网站的窗口里点了什么），所以这里
+   做的只有三件事：叫它开、每秒问一次"点了没有"、关窗时叫它关。
+
+   粘贴和拖进来也收：从别处复制来的一张图，按 Ctrl+V 就用它。 */
+const browsing = { on: false, timer: 0, session: "" };
+
+const GOOGLE_HOW = ui.photoGoogleNote.innerHTML;
+
+function googleNote(text, kind) {
+  ui.photoGoogleNote.className = "hint" + (kind ? " " + kind : "");
+  if (text) ui.photoGoogleNote.textContent = text;
+  else ui.photoGoogleNote.innerHTML = GOOGLE_HOW;
+}
+
+function photoBrowserPath() {
+  return `/tasks/${encodeURIComponent(state.taskId)}/photos/browse`;
+}
+
+function stopWatchingPhotoBrowser() {
+  browsing.on = false;
+  clearTimeout(browsing.timer);
+}
+
+/** 开那个窗口去搜 ``words``。开不了就说是什么开不了——不悄悄换成别的。 */
+async function browseGoogle(words) {
+  if (photoPick.at < 0 || !words) return;
+  const at = photoPick.at;
+  stopWatchingPhotoBrowser();
+  ui.photoGoogle.disabled = true;
+  googleNote("Opening a browser window on Google Images…", "pending");
+  try {
+    const data = await call("POST",
+      `${scenePath(at)}/photos/browse?search=${encodeURIComponent(words)}`);
+    if (photoPick.at !== at) { closePhotoBrowser(); return; }
+    browsing.session = (data && data.session) || "";
+    browsing.on = true;
+    googleNote("");
+    watchPhotoBrowser(at);
+  } catch (error) {
+    if (photoPick.at !== at) return;
+    googleNote(String(error.message || error), "warn");
+  } finally {
+    ui.photoGoogle.disabled = false;
+  }
+}
+
+function watchPhotoBrowser(at) {
+  clearTimeout(browsing.timer);
+  browsing.timer = setTimeout(async () => {
+    if (!browsing.on || photoPick.at !== at) return;
+    let data = null;
+    try {
+      data = await call("GET", photoBrowserPath());
+    } catch {
+      // 问不到一次不算什么，下一秒再问。
+    }
+    if (!browsing.on || photoPick.at !== at) return;
+    if (data && data.session === browsing.session) {
+      if (data.state === "picked" && data.file) {
+        stopWatchingPhotoBrowser();
+        redrawFromPhoto({ photo_upload: data.file });
+        return;
+      }
+      if (data.state === "closed" || data.state === "none") {
+        stopWatchingPhotoBrowser();
+        googleNote("The browser window was closed without choosing a picture. "
+          + "Click Search on Google to open it again.");
+        return;
+      }
+    }
+    watchPhotoBrowser(at);
+  }, 1000);
+}
+
+function closePhotoBrowser() {
+  const was = browsing.on;
+  stopWatchingPhotoBrowser();
+  if (!was || !state.taskId) return;
+  call("DELETE", photoBrowserPath()).catch(() => {});
+}
+
+ui.photoGoogle.addEventListener("click", () => {
+  const words = ui.photoSearch.value.trim();
+  if (!words) {
+    googleNote("Type what to search for first.", "warn");
+    return;
+  }
+  if (photoPick.key) photoPick.words[photoPick.key] = words;
+  browseGoogle(words);
+});
+
+/** 粘贴或拖进来的一张图：和"传一张自己的"一样，收下就开画。 */
+async function takeCopiedPhoto(blob) {
+  if (photoPick.at < 0) return;
+  const at = photoPick.at;
+  googleNote("Getting that picture…", "pending");
+  try {
+    const kind = (blob.type.split("/")[1] || "png").replace("jpeg", "jpg")
+      .replace(/[^a-z0-9]/g, "") || "png";
+    const file = blob instanceof File && blob.name
+      ? blob : new File([blob], `copied-photo.${kind}`, { type: blob.type });
+    const data = await upload(
+      `/tasks/${encodeURIComponent(state.taskId)}/photos`, file);
+    if (photoPick.at !== at) return;
+    redrawFromPhoto({ photo_upload: data.file });
+  } catch (error) {
+    if (photoPick.at !== at) return;
+    const why = String(error.message || error);
+    // 服务端不收太小的图。从网页上带回来的小图几乎总是缩略图。
+    googleNote(/long edge/.test(why)
+      ? "That picture is too small to draw from — it is a small preview. Open "
+        + "the picture large first and copy that one."
+      : why, "warn");
+  }
+}
+
+document.addEventListener("paste", (event) => {
+  if (ui.photoModal.hidden || !event.clipboardData) return;
+  const file = [...event.clipboardData.files].find((one) => one.type.startsWith("image/"));
+  if (!file) return;
+  event.preventDefault();
+  takeCopiedPhoto(file);
+});
+
+const photoBox = ui.photoModal.querySelector(".modal-box");
+ui.photoModal.addEventListener("dragover", (event) => {
+  event.preventDefault();
+  photoBox.classList.add("dropping");
+});
+ui.photoModal.addEventListener("dragleave", () => photoBox.classList.remove("dropping"));
+ui.photoModal.addEventListener("drop", (event) => {
+  event.preventDefault();
+  photoBox.classList.remove("dropping");
+  const file = event.dataTransfer
+    && [...event.dataTransfer.files].find((one) => one.type.startsWith("image/"));
+  if (file) takeCopiedPhoto(file);
+  else googleNote("Only a picture file can be dropped here.", "warn");
 });
 
 /* ---------- thumbnails ---------- */
@@ -3810,6 +3978,89 @@ function drawPromptAssist(scene, input) {
 }
 
 
+/** 检查器里的一块：一个小标题，下面是这条路自己的选项和按钮。 */
+function inspectorGroup(title) {
+  const box = document.createElement("div");
+  box.className = "insp-group";
+  const head = document.createElement("div");
+  head.className = "insp-group-title";
+  head.textContent = title;
+  box.appendChild(head);
+  return box;
+}
+
+/** 这一段现在这张图是照着哪张照片画的。照片本身存在任务目录里，所以这里
+    摆的是它，不是一个可能已经失效的地址：画得好不好，对着照片一眼就知道
+    是照片的事还是画的事。 */
+function usedPhotoNote(scene) {
+  const used = scene.reference;
+  if (!used || typeof used !== "object") return null;
+  const box = document.createElement("div");
+  box.className = "used-photo";
+  const words = document.createElement("div");
+  const head = document.createElement("b");
+  words.appendChild(head);
+  const lines = [];
+  if (used.width && used.height) lines.push(`${used.width} × ${used.height}`);
+  if (used.strength) {
+    lines.push(used.strength <= 0.7 ? "kept the photograph" : "loosely inspired by it");
+  }
+  if (used.query) lines.push(`searched: ${used.query}`);
+  if (used.file) {
+    head.textContent = "Drawn from this photo";
+    const address = `${API}/tasks/${encodeURIComponent(state.taskId)}`
+      + `/photos/used/${encodeURIComponent(used.file)}`;
+    const shot = document.createElement("img");
+    shot.alt = "The photo this scene was drawn from";
+    shot.loading = "lazy";
+    shot.src = address;
+    shot.title = "Open the photo full size";
+    shot.addEventListener("click", () => window.open(address, "_blank", "noopener"));
+    box.appendChild(shot);
+  } else {
+    // 存照片这件事是后来才有的：以前画的那些只记了地址。
+    head.textContent = "Drawn from a photo";
+    // 没存下来的那些，照片还在它原来的网站上就从那里显示。那边撤了图、或者
+    // 不许别的页面引用，这一格就摘掉，只剩下面那个链接。
+    const remote = String(used.source_url || "");
+    if (/^https?:\/\//i.test(remote)) {
+      head.textContent = "Drawn from this photo";
+      const shot = document.createElement("img");
+      shot.alt = "The photo this scene was drawn from";
+      shot.loading = "lazy";
+      // 不把"我从哪个页面来的"告诉图床。
+      shot.referrerPolicy = "no-referrer";
+      shot.src = remote;
+      shot.title = "Open the photo full size";
+      shot.addEventListener("click", () => window.open(remote, "_blank", "noopener"));
+      shot.addEventListener("error", () => {
+        shot.remove();
+        head.textContent = "Drawn from a photo";
+      });
+      box.appendChild(shot);
+      lines.push("Shown from its website; no copy was kept.");
+    } else {
+      lines.push("The photo itself was not kept — redraw from a photo to keep it.");
+    }
+  }
+  for (const line of lines) {
+    const row = document.createElement("span");
+    row.textContent = line;
+    words.append(row, document.createElement("br"));
+  }
+  const source = String(used.page_url || used.source_url || "");
+  if (/^https?:\/\//i.test(source)) {
+    const link = document.createElement("a");
+    link.href = source;
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+    link.textContent = `from ${host(source)}`;
+    words.appendChild(link);
+  }
+  box.appendChild(words);
+  return box;
+}
+
 /* ---------- inspector ---------- */
 
 function drawInspector() {
@@ -3869,7 +4120,9 @@ function drawInspector() {
   const style = state.imageStyles.length
     ? stylePicker(scene.image_style || "")
     : null;
-  if (style) ui.inspBody.append(style.wrap);
+  // 画一张的两条路各占一块，各自的选项紧挨着各自的按钮。
+  const drawBox = inspectorGroup(isGenerated(scene) ? "Draw it from the prompt" : "Find another clip");
+  if (style) drawBox.append(style.wrap);
 
   // 生成新画面是这个面板里最常用的动作：画面不对时要改的通常就是关键词，
   // 改完紧接着就要重出一张。所以它紧贴在关键词下面，而不是和锁定、删除
@@ -3891,7 +4144,8 @@ function drawInspector() {
       style ? style.input.value : null
     );
   });
-  ui.inspBody.appendChild(regenerate);
+  drawBox.appendChild(regenerate);
+  ui.inspBody.appendChild(drawBox);
 
   // 第二条画法：先去网上搜一张真实照片，再照着它画。
   //
@@ -3908,7 +4162,8 @@ function drawInspector() {
       + "the real subject and framing but a photographic picture, and loosely "
       + "inspired gives your style exactly while the photograph only hints at "
       + "the subject. There is no setting that gives both.";
-    ui.inspBody.appendChild(keep.wrap);
+    const photoBox = inspectorGroup("Draw it from a photo");
+    photoBox.appendChild(keep.wrap);
 
     const fromPhoto = button("Redraw from a photo", "", async () => {
       await savePromptEdit();
@@ -3924,7 +4179,32 @@ function drawInspector() {
       + "one to draw this scene from, or upload your own. The search words "
       + "are written from this scene's narration and prompt, and you can "
       + "change them.";
-    ui.inspBody.appendChild(fromPhoto);
+    photoBox.appendChild(fromPhoto);
+    // 现在这张图是照着哪张照片画的，就摆在这条路下面。
+    const used = usedPhotoNote(scene);
+    if (used) photoBox.appendChild(used);
+    // 同一张照片，换一档"留多少"再画一次。看了结果才知道该留多少是常事，
+    // 不该为此重新去搜、去点。只有存下来的照片才行：服务端手里得有它。
+    const kept = scene.reference && scene.reference.file;
+    if (kept) {
+      const again = button("Redraw from this same photo", "small", async () => {
+        await savePromptEdit();
+        const words = scene.reference.query || "";
+        queueRegeneration(
+          scene.index,
+          keyword.input.value || null,
+          style ? style.input.value : null,
+          true,
+          Number(keep.input.value) || photoKeep,
+          { photo_kept: kept, ...(words ? { search: words } : {}) }
+        );
+      });
+      again.title = "Draw this scene again from the photo shown here, using "
+        + "the choice in \"How much of the photo\" above. Change that choice "
+        + "first to try the other one — nothing is searched for again.";
+      photoBox.appendChild(again);
+    }
+    ui.inspBody.appendChild(photoBox);
   }
 
   // 第三条路，而且是最该先试的那一条：这张图以前画过的某一个版本。
@@ -3937,7 +4217,11 @@ function drawInspector() {
   earlier.title = "Every picture this video has drawn, including the ones no "
     + "scene is using any more. Putting one back is instant — the file is "
     + "already on disk, so nothing is redrawn.";
-  ui.inspBody.appendChild(earlier);
+  // 不画图的两个小按钮并排成一行，和上面两块分开。
+  const pair = document.createElement("div");
+  pair.className = "insp-pair";
+  pair.appendChild(earlier);
+  ui.inspBody.appendChild(pair);
 
   // 这一段已经排着了就说出来。不说的话，用户点完看不出任何变化，只会
   // 再点一次——然后同一段画面被重出两遍。
@@ -3985,7 +4269,7 @@ function drawInspector() {
     () => run("Saving", () =>
       call("PUT", scenePath(scene.index), { keyword: keyword.input.value })),
   );
-  ui.inspBody.appendChild(save);
+  pair.appendChild(save);
 
   // 这一段怎么出场。放在时长前面：先决定它长什么样，再决定它停多久。
   inspectorSection("Effects");

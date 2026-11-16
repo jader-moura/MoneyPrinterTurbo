@@ -791,6 +791,9 @@ class SceneRegenerateRequest(BaseModel):
     # 给了其中一个就照它画，不再自动搜。
     photo_url: Optional[str] = Field(default=None, max_length=2000)
     photo_upload: Optional[str] = Field(default=None, max_length=80)
+    # 这条片子里已经照着画过、存下来的那一张（场景 ``reference.file``）。
+    # 同一张照片换一种"留多少"再画一次，不用重新去找它。
+    photo_kept: Optional[str] = Field(default=None, max_length=40)
 
 
 class ScenePromptSuggestRequest(BaseModel):

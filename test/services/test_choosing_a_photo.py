@@ -471,8 +471,10 @@ class TestTheEditorOffersIt:
             "scene.reference.query"
         )
         assert "ui.photoSearch.value = before;" in body
-        assert "if (before) findPhotos(before);" in body
+        # 打开时搜的是 Google 图片的窗口；图库那一遍不再自己跑。
+        assert "if (before) browseGoogle(before);" in body
         assert "else writePhotoWords();" in body
+        assert "findPhotos(" not in body
 
     def test_the_words_are_remembered_per_scene_even_if_never_searched(self):
         script = self._script()
@@ -488,20 +490,23 @@ class TestTheEditorOffersIt:
         body = self._body(self._script(), "writePhotoWords")
         assert "/photos/words`" in body
         assert body.index("ui.photoSearch.value = words;") < body.index(
-            "findPhotos(words);"
+            "browseGoogle(words);"
         )
 
     def test_clicking_the_button_always_ends_in_a_search(self):
-        """点"照着照片重画"就会自己搜一遍——以前一直是这样。写词那一步是后
-        加的；它没成的时候（接口没重启、模型没应答）不能停在一个空框上，
-        得退回让搜索自己写词。"""
+        """点"照着照片重画"就会自己搜一遍。现在搜的是 Google 图片的窗口
+        （用户说了：有它就不用再让图库搜一遍）。写词那一步没成的时候
+        （接口没重启、模型没应答）不能停在一个空框和一句"正在想"上：
+        说清楚，让用户自己打词。"""
         body = self._body(self._script(), "writePhotoWords")
         failed = body[body.index("} catch (error) {"):]
         failed = failed[:failed.index("\n  }\n")]
         # 写词失败不 return、不停下来。
         assert "return" not in failed
-        # 不管有没有词，最后都去搜；空词由服务端来写。
-        assert body.rstrip().endswith("findPhotos(words);\n}")
+        assert "browseGoogle(words);" in body
+        assert "Could not work out what to search for." in body
+        # 图库的搜索还在，只是要自己点。
+        assert "findPhotos(" not in body
         find = self._body(self._script(), "findPhotos")
         assert "ui.photoSearch.value = (data && data.query) || search;" in find
 

@@ -438,6 +438,61 @@ def keep_uploaded_photo(raw: bytes, name: str = "") -> dict:
             "name": str(name or "")}
 
 
+def browse_for_photo(task_id: str, index: Any, *, search: str = "") -> dict:
+    """开一个小浏览器窗口，在 Google 图片里搜这一段的词，让用户自己点一张。
+
+    不走任何搜索 API。用户点中的那一张和"传一张自己的"是同一条路：同一套
+    检查（尺寸、类型、重新编码），排队时凭同一种凭据来用。区别只是它记得
+    自己是哪来的，这样别的段再挑到同一张时能标出来。
+    """
+    from app.services import photo_browser
+
+    scenes = scene_manifest.load(task_id)["scenes"]
+    _scene_at(scenes, index)
+    words = " ".join(str(search or "").split())
+    if not words:
+        words = reference_photo_words(task_id, index)["query"]
+
+    def keep(raw: bytes, chosen: dict) -> dict:
+        import dataclasses
+        import uuid
+
+        reference = reference_image.uploaded(raw, "it")
+        source = str(chosen.get("src") or "")
+        if not source.lower().startswith(("http://", "https://")):
+            source = ""
+        reference = dataclasses.replace(
+            reference, query=words, source_url=source,
+            page_url=source or str(chosen.get("page") or ""),
+        )
+        token = uuid.uuid4().hex
+        with _PHOTO_LOCK:
+            _UPLOADED[token] = reference
+            for stale in list(_UPLOADED)[:-_UPLOADED_KEPT]:
+                _UPLOADED.pop(stale, None)
+        return {"file": token, "width": reference.width, "height": reference.height}
+
+    try:
+        return photo_browser.start(
+            task_id, words, keep, min_edge=reference_image.MIN_LONG_EDGE
+        )
+    except photo_browser.PhotoBrowserError as exc:
+        raise SceneError(str(exc)) from exc
+
+
+def photo_browser_state(task_id: str) -> dict:
+    """那个窗口现在怎么样：还开着、点了一张、被关了。"""
+    from app.services import photo_browser
+
+    return photo_browser.status(task_id)
+
+
+def close_photo_browser(task_id: str) -> dict:
+    from app.services import photo_browser
+
+    return photo_browser.close(task_id)
+
+
 def uploaded_reference_photo(token: str) -> Any:
     with _PHOTO_LOCK:
         reference = _UPLOADED.get(str(token or "").strip())
@@ -514,6 +569,8 @@ def regenerate_material(
         reference=reference,
         strength=kept,
     )
+    # 照着画的那张照片留一份（锁外面：只是写一个文件）。
+    used_photo = keep_used_photo(task_id, reference) if reference is not None else ""
 
     # 重新读一遍清单：刚才那几分钟里用户完全可能改过别的场景，拿出图之前
     # 那份内存里的旧清单写回去会把那些改动全盖掉。
@@ -549,12 +606,97 @@ def regenerate_material(
         # 来的，所以普通重生成要把旧的那条抹掉——留着它就是说谎。
         if reference is not None:
             scene["reference"] = {**reference.payload(), "strength": kept}
+            if used_photo:
+                scene["reference"]["file"] = used_photo
         else:
             scene.pop("reference", None)
         # 用户亲手重生成过的结果，不应该被后续批量操作再覆盖掉。
         scene["locked"] = True
         scene_manifest.save_scenes(task_id, scenes)
         return scene
+
+
+# ---------------------------------------------------------------------------
+# 照着画的那张照片，留一份
+# ---------------------------------------------------------------------------
+#
+# 以前只记了照片的地址。可地址说明不了什么：用户想知道的是"这张图为什么画
+# 成这样"，答案是那张照片长什么样——而地址会失效，粘贴和上传的根本没有地
+# 址。所以把照片本身（已经重新编码过的那份 PNG）存进任务目录，和画出来的图
+# 放在一起看。
+#
+# 放在子目录里：任务目录本身是"画过的图"那面墙要扫的地方，照片不是画出来
+# 的图。文件名是内容的摘要，所以同一张照片画几段也只存一份。
+
+USED_PHOTO_DIR = "references"
+_USED_PHOTO_NAME = re.compile(r"[0-9a-f]{16}\.png")
+
+
+def keep_used_photo(task_id: str, reference: Any) -> str:
+    """把这张照片存进任务目录，返回文件名。存不下不该连累那张已经画了几
+    分钟的图：记一条日志，返回空串，这一段就只记得住地址。"""
+    import hashlib
+
+    data = getattr(reference, "data", b"") or b""
+    if not data:
+        return ""
+    name = hashlib.sha256(data).hexdigest()[:16] + ".png"
+    folder = os.path.join(utils.task_dir(), str(task_id), USED_PHOTO_DIR)
+    path = os.path.join(folder, name)
+    try:
+        if not os.path.isfile(path):
+            os.makedirs(folder, exist_ok=True)
+            partial = path + ".part"
+            with open(partial, "wb") as handle:
+                handle.write(data)
+            os.replace(partial, path)
+    except OSError as exc:
+        logger.warning(f"could not keep the photo a scene was drawn from: {exc}")
+        return ""
+    return name
+
+
+def used_photo_path(task_id: str, name: str) -> str:
+    """某一段照着画的那张照片在磁盘上的位置。"""
+    wanted = str(name or "").strip()
+    if not _USED_PHOTO_NAME.fullmatch(wanted):
+        raise SceneError("that is not the name of a kept photo")
+    path = os.path.join(utils.task_dir(), str(task_id), USED_PHOTO_DIR, wanted)
+    if not os.path.isfile(path):
+        raise SceneError("that photo is not kept for this video")
+    return path
+
+
+def kept_reference_photo(task_id: str, name: str) -> Any:
+    """存下来的那张照片，拿来再画一次。
+
+    用户常常是看了结果才知道该留多少：照片留得太多，画风没了；留得太少，
+    认不出是那张照片。同一张照片换一档再画，不该让他重新去搜、去点。
+
+    来历（搜的词、照片的地址）从记着这个文件的那一段上抄回来——这一张新
+    图照的还是同一张照片。
+    """
+    import dataclasses
+
+    path = used_photo_path(task_id, name)
+    try:
+        with open(path, "rb") as handle:
+            raw = handle.read()
+        reference = reference_image.uploaded(raw, "the kept photo")
+    except (OSError, reference_image.ReferenceImageError) as exc:
+        raise SceneError(f"the kept photo could not be used again: {exc}") from exc
+    for scene in scene_manifest.load(task_id)["scenes"]:
+        recorded = scene.get("reference")
+        if isinstance(recorded, dict) and recorded.get("file") == name:
+            return dataclasses.replace(
+                reference,
+                query=str(recorded.get("query") or ""),
+                source_url=str(recorded.get("source_url") or ""),
+                page_url=str(recorded.get("page_url") or ""),
+                licence=str(recorded.get("license") or ""),
+                creator=str(recorded.get("creator") or ""),
+            )
+    return reference
 
 
 def _image_prompt_template(params: VideoParams, image_style: str | None) -> str:
@@ -1379,6 +1521,11 @@ def describe(task_id: str, endpoint: str = "", *, with_timing: bool = False) -> 
         realign_narration(task_id)
     except Exception as exc:  # pragma: no cover - 补配对失败不该挡住审片
         logger.warning(f"cannot re-pair narration for {task_id}: {exc}")
+    # 再让每张画面跟上它那句话（只对刚做出来、没人动过的片子，只做一次）。
+    try:
+        _pace_new_video(task_id)
+    except Exception as exc:  # pragma: no cover - 对不上不该挡住审片
+        logger.warning(f"cannot time {task_id} to its narration: {exc}")
     manifest = scene_manifest.load(task_id)
     params = None
     try:
@@ -2616,6 +2763,206 @@ def update_timing(
     scene["clamped"] = timing["clamped"]
     scene["source_duration"] = timing["source_duration"]
     return scene
+
+
+# ---------------------------------------------------------------------------
+# 每张画面停多久：跟着它那句旁白走
+# ---------------------------------------------------------------------------
+#
+# 提示词是一句旁白写一条的，所以第 i 张图画的就是第 i 句话。可每一段默认都
+# 停同样长（``video_clip_duration``，比如 4 秒），而每句话念多久并不一样：
+# "Fact one" 不到一秒，一个长句五秒多。于是时间线上所有画面一样宽，画面
+# 越往后越和它那句话对不上——第 10 张图出来的时候，旁白早念到第 14 句了。
+# 用户只能一段一段手拖。
+#
+# 这里把每一段的时长定成"它那句话开始，到下一段那句话开始"。念到哪句话，
+# 屏幕上就是为那句话画的图。
+
+_PACED_KEY = "paced_to_narration"
+
+
+def _spoken_key(text: Any) -> str:
+    """只留字母数字，用来比"这是不是同一句话"。字幕和脚本的标点、大小写、
+    空白常常不一样。"""
+    return re.sub(r"[\W_]+", "", str(text or "").lower())
+
+
+def narration_paced_durations(task_id: str, manifest: dict | None = None) -> list:
+    """每一段该停多久，才能和它那句旁白同时出现、同时换走。
+
+    按文字认：每一段的台词是若干条连着的字幕。中间没有哪一段要的字幕（那
+    一段被删了）归前一段——那几句话念着的时候，前一张图接着停。
+
+    对不上就报错并点名是哪一段，不猜：猜错的结果是整条时间线悄悄错位。
+    """
+    if manifest is None:
+        manifest = scene_manifest.load(task_id)
+    scenes = manifest["scenes"]
+    if not scenes:
+        raise SceneError("this video has no scenes yet")
+    if manifest.get("audio_stale"):
+        raise SceneError(
+            "the narration was changed and not re-recorded yet, so there is "
+            "no timing to match; re-record the narration first"
+        )
+    cues = scene_manifest.narration_segments(task_id)
+    if not cues:
+        raise SceneError(
+            "this video has no subtitle timing to tell when each line is "
+            "spoken, so the pictures cannot be matched to the narration"
+        )
+    keys = [_spoken_key(cue.get("text")) for cue in cues]
+
+    starts: list[float] = []
+    at = 0
+    for position, scene in enumerate(scenes):
+        wanted = _spoken_key(scene.get("narration"))
+        if not wanted:
+            raise SceneError(
+                f"scene {position + 1} has no narration, so there is no line "
+                "to time it to"
+            )
+        found = -1
+        for first in range(at, len(cues)):
+            if not keys[first] or not wanted.startswith(keys[first]):
+                continue
+            joined = ""
+            last = first
+            while last < len(cues) and len(joined) < len(wanted):
+                joined += keys[last]
+                last += 1
+            if joined == wanted:
+                found = first
+                at = last
+                break
+        if found < 0:
+            raise SceneError(
+                f"the narration of scene {position + 1} is not in the recorded "
+                "narration in this order (it was edited or moved), so the "
+                "pictures cannot be matched to it automatically"
+            )
+        starts.append(float(cues[found]["start"]))
+
+    end = max(
+        float(manifest.get("audio_duration") or 0.0), float(cues[-1]["end"])
+    )
+    # 第一段从 0 开始：开头那一点静音里也得有画面。
+    starts[0] = 0.0
+    edges = starts[1:] + [end]
+    return [
+        round(max(timeline.MIN_CLIP_DURATION, stop - start), 3)
+        for start, stop in zip(starts, edges)
+    ]
+
+
+def _planned_spoken_durations(task_id: str, manifest: dict) -> list | None:
+    """没人动过的片子，出片时每张画面本来就会停多久。
+
+    渲染器早就是按旁白逐句铺的（``timeline.plan_windows``），只是时间线界面
+    画的不是这组数字，而是每段素材自己的长度——所以看上去每张图一样宽；而且
+    用户一拖任何一段，整条片子就从"按句铺"切到"各按各的长度"，全部变成一样
+    长。把渲染器那组数字原样写成每段的时长，界面和成片就是同一回事了。
+
+    用渲染器自己的那两个函数，不另算一套：分组（一张图配几条字幕）的账只能
+    有一本。没有逐句时间、或者账对不上时返回 ``None``。
+    """
+    scenes = manifest["scenes"]
+    cues = scene_manifest.narration_segments(task_id)
+    if not cues or not scenes:
+        return None
+    target = max(0.0, float(manifest.get("audio_duration") or 0.0))
+    if len(cues) == len(scenes):
+        windows = timeline._windows_from_cues(cues, target)
+    else:
+        windows = timeline._windows_from_grouped_cues(task_id, cues, scenes, target)
+    if not windows or len(windows) != len(scenes):
+        return None
+    return [
+        round(max(timeline.MIN_CLIP_DURATION,
+                  float(window["end"]) - float(window["start"])), 3)
+        for window in windows
+    ]
+
+
+def pace_to_narration(task_id: str, *, automatic: bool = False) -> dict:
+    """把每一段的时长定成它那句旁白的时长。
+
+    ``automatic`` 是打开片子时程序自己做的那一次：不算一步编辑。用户点按钮
+    的那一次算，可以撤销。
+    """
+    _require_idle(task_id)
+    params = load_params(task_id)
+    speed = max(float(getattr(params, "video_clip_speed", 1.0) or 1.0), 1e-6)
+    with _editing(task_id):
+        manifest = scene_manifest.load(task_id)
+        scenes = manifest["scenes"]
+        durations = None
+        if automatic and not scene_manifest.has_timing_edits(scenes):
+            durations = _planned_spoken_durations(task_id, manifest)
+        if durations is None:
+            durations = narration_paced_durations(task_id, manifest)
+        short = 0
+        for scene, wanted in zip(scenes, durations):
+            material = str(scene.get("material") or "").strip()
+            # 图片停多久都行（出片时按需要的长度重新烘）。下载来的视频拉不过
+            # 它自己的长度。
+            if material and not timeline.baked_from_an_image(material) \
+                    and scene_manifest.material_kind(material) == "video":
+                try:
+                    source = timeline.probe_duration(
+                        scene_manifest.resolve_material(task_id, material)
+                    )
+                except Exception:
+                    source = 0.0
+                trim = scene_manifest.scene_timing(scene)["trim_start"]
+                room = (source - trim) / speed
+                if room > 0 and wanted > room + 1e-6:
+                    wanted = round(max(timeline.MIN_CLIP_DURATION, room), 3)
+                    short += 1
+            scene["duration"] = wanted
+        extra = {_PACED_KEY: True}
+        if automatic:
+            with edit_history.automatic():
+                scene_manifest.save_scenes(task_id, scenes, **extra)
+        else:
+            with edit_history.labelled("Match narration"):
+                scene_manifest.save_scenes(task_id, scenes, **extra)
+    logger.info(
+        f"timed {len(scenes)} scenes to their narration lines"
+        f"{' (automatic)' if automatic else ''}, task_id: {task_id}"
+    )
+    return {"scenes": len(scenes), "held_short": short}
+
+
+def _pace_new_video(task_id: str) -> None:
+    """刚做出来、还没人动过的片子，打开时自动对一次。
+
+    只做一次，而且只在"还没人碰过"的时候：
+      * 拖过任何一段的不动——那是用户定的；
+      * 出过片的不动——不该让一条已经做完的片子下次打开变了样；
+      * 对过一次的不再对——用户之后拖成什么样就是什么样；
+      * 不是"一句话一张图"的（旧的按关键词取材）对不上，也就不动。
+    """
+    raw = scene_manifest.load_raw(task_id)
+    if raw.get(_PACED_KEY) or raw.get("audio_stale"):
+        return
+    scenes = raw.get("scenes") or []
+    if not scenes or scene_manifest.has_timing_edits(scenes):
+        return
+    directory = os.path.join(utils.task_dir(), str(task_id))
+    try:
+        if any(name.startswith("final-") and name.endswith(".mp4")
+               for name in os.listdir(directory)):
+            return
+    except OSError:
+        return
+    task = sm.state.get_task(task_id)
+    if task and tm.is_task_busy(task):
+        return
+    try:
+        pace_to_narration(task_id, automatic=True)
+    except SceneError as exc:
+        logger.debug(f"not timing {task_id} to its narration: {exc}")
 
 
 def fit_to_narration(task_id: str) -> dict:

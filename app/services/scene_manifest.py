@@ -395,6 +395,11 @@ def _normalise_scene(raw: Any, index: int) -> dict:
             strength = 0.0
         if 0 < strength <= 1:
             kept["strength"] = round(strength, 3)
+        # 那张照片本身存在任务目录里的哪个文件（见 scene_editor 的
+        # ``keep_used_photo``）。只认它自己起的那种名字：这个值会被拼进路径。
+        used = str(reference.get("file") or "").strip()
+        if re.fullmatch(r"[0-9a-f]{16}\.png", used):
+            kept["file"] = used
         if kept:
             scene["reference"] = kept
     # 这一段以前用过哪几张图。重生成是"换掉"而不是"修改"，换下来的那个文件

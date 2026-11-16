@@ -1264,6 +1264,69 @@ def scene_photo_words(
     return utils.get_response(200, data)
 
 
+@router.get(
+    "/tasks/{task_id}/photos/used/{name}",
+    summary="The photograph a scene was drawn from",
+)
+def used_scene_photo(
+    request: Request,
+    task_id: str = Path(..., description="Task ID"),
+    name: str = Path(..., max_length=40),
+):
+    """照着画的那张照片本身，存在任务目录里的那一份。"""
+    request_id = base.get_task_id(request)
+    _require_task(task_id, request_id)
+    path = _handle(
+        task_id, request_id, lambda: scene_editor.used_photo_path(task_id, name)
+    )
+    return FileResponse(path, media_type="image/png")
+
+
+@router.post(
+    "/tasks/{task_id}/scenes/{index}/photos/browse",
+    summary="Open a small browser window on Google Images to click a photograph in",
+)
+def browse_scene_photos(
+    request: Request,
+    task_id: str = Path(..., description="Task ID"),
+    index: int = Path(..., ge=0, description="Scene index"),
+    search: str = Query("", max_length=200),
+):
+    """在跑着这个程序的电脑上开一个浏览器窗口。用户点中的那一张之后用
+    ``photo_upload`` 来排重画，和自己传的一样。不用任何搜索 API。"""
+    request_id = base.get_task_id(request)
+    _require_task(task_id, request_id)
+    data = _handle(
+        task_id, request_id,
+        lambda: scene_editor.browse_for_photo(task_id, index, search=search),
+    )
+    return utils.get_response(200, data)
+
+
+@router.get(
+    "/tasks/{task_id}/photos/browse",
+    summary="What happened in the photo browser window so far",
+)
+def scene_photo_browser(
+    request: Request, task_id: str = Path(..., description="Task ID")
+):
+    request_id = base.get_task_id(request)
+    _require_task(task_id, request_id)
+    return utils.get_response(200, scene_editor.photo_browser_state(task_id))
+
+
+@router.delete(
+    "/tasks/{task_id}/photos/browse",
+    summary="Close the photo browser window",
+)
+def close_scene_photo_browser(
+    request: Request, task_id: str = Path(..., description="Task ID")
+):
+    request_id = base.get_task_id(request)
+    _require_task(task_id, request_id)
+    return utils.get_response(200, scene_editor.close_photo_browser(task_id))
+
+
 @router.post(
     "/tasks/{task_id}/photos",
     summary="Upload a photograph to redraw a scene from",
@@ -1318,6 +1381,8 @@ def queue_scene_material(
         # 排三分钟队之后才说。
         if body.photo_upload:
             return scene_editor.uploaded_reference_photo(body.photo_upload)
+        if body.photo_kept:
+            return scene_editor.kept_reference_photo(task_id, body.photo_kept)
         if body.photo_url:
             return scene_editor.chosen_reference_photo(task_id, body.photo_url)
         return None
@@ -1565,6 +1630,21 @@ def reveal_file(
         ),
     )
     return utils.get_response(200, answer)
+
+
+@router.post(
+    "/tasks/{task_id}/timeline/pace",
+    response_model=SceneListResponse,
+    summary="Hold each scene for as long as its narration line is spoken",
+)
+def pace_timeline(request: Request, task_id: str = Path(..., description="Task ID")):
+    """每张画面跟着它那句旁白走：那句话开始时出现，下一段的话开始时换走。"""
+    request_id = base.get_task_id(request)
+    _require_task(task_id, request_id)
+    _handle(task_id, request_id, lambda: scene_editor.pace_to_narration(task_id))
+    return utils.get_response(
+        200, scene_editor.describe(task_id, _endpoint(), with_timing=True)
+    )
 
 
 @router.post(

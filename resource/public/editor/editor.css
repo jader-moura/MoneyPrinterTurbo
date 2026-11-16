@@ -913,6 +913,41 @@ body {
 .insp-section > :not(summary) { margin-bottom: 8px; }
 /* 抽屉里不是弹性布局，按钮会缩成字那么宽。照原来的样子铺满一行。 */
 .insp-section > .btn { display: block; width: 100%; }
+/* "画一张"的两条路各占一块：各自的选项和按钮在一起，和别的按钮分得开。 */
+.insp-group {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+}
+.insp-section > .insp-group { margin: 4px 0 12px; }
+.insp-group > .btn { display: block; width: 100%; }
+.insp-group-title {
+  font-size: 11px;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+/* 不画图的那两个小按钮并排，离上面那两块远一点。 */
+.insp-pair { display: flex; gap: 8px; }
+.insp-section > .insp-pair { margin: 14px 0 8px; }
+.insp-pair .btn { flex: 1; }
+/* 这一段是照着哪张照片画的。 */
+.used-photo { display: flex; gap: 9px; align-items: flex-start; }
+.used-photo img {
+  flex: none;
+  width: 88px;
+  height: 88px;
+  object-fit: cover;
+  border-radius: 6px;
+  background: #000;
+  cursor: zoom-in;
+}
+.used-photo div { font-size: 11px; line-height: 1.45; color: var(--muted); overflow-wrap: anywhere; }
+.used-photo b { display: block; color: var(--text); font-weight: 600; }
+.used-photo a { color: var(--accent); }
 
 /* 挑照片那一屏。格子借的是"画过的图"那一套；照片比例不一，所以图按
    原比例缩进格子里，不裁——裁掉的那一块可能正是要看的。 */
@@ -930,6 +965,7 @@ body {
 .photo-search-row .btn { flex: 0 0 auto; }
 .photo-grid .shelf-shot { object-fit: contain; background: #000; }
 .photo-grid .shelf-tile.used { opacity: 0.6; }
+.modal-box.dropping { outline: 2px dashed var(--accent); outline-offset: -6px; }
 
 /* "?"：说明收在里面，鼠标移上去才出来。见 editor.js 的 helpTip。 */
 .help {

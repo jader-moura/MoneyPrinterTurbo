@@ -401,8 +401,16 @@
     <div class="row photo-search-row">
       <input id="photo-search" type="text" maxlength="200" autocomplete="off"
         placeholder="What to search for">
-      <button id="photo-find" class="btn">Search</button>
+      <button id="photo-find" class="btn"
+        title="Search the configured photo library instead and list what it finds here. Not needed when you choose on Google.">Search library</button>
+      <button id="photo-google" class="btn primary"
+        title="Open Google Images in a small browser window with these words, and click the picture you want. Needs no API key.">Search on Google</button>
     </div>
+    <!-- 自己在 Google 图片里挑：不用任何 API。窗口是这个程序开的，所以在
+         里面点哪张，这里就拿到哪张。 -->
+    <p id="photo-google-note" class="hint">A small browser window opens on
+      Google Images. There, click a picture to open it large, then <b>click the
+      large picture</b> — it is drawn from straight away.</p>
     <p id="photo-note" class="hint"></p>
     <div id="photo-grid" class="shelf-grid photo-grid"></div>
     <div class="modal-foot">
@@ -636,6 +644,8 @@
     title="Duplicate the selected scene (Ctrl+D)">Duplicate</button>
   <button id="delete-scene" class="btn small" disabled
     title="Delete the selected scene (Delete)">Delete</button>
+  <button id="pace" class="btn small" disabled
+    title="Hold every picture for exactly as long as its narration line is spoken, so each picture is on screen while its own line is read. New videos start this way; use this after moving or deleting scenes.">Match narration</button>
   <span class="spacer"></span>
   <span class="keys">Space play · ← → move · ↑ ↓ scene · S split ·
     Del delete · Ctrl+Z undo</span>
