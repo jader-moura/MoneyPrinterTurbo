@@ -92,6 +92,7 @@ class _Job:
         "direction",
         "prompt",
         "reference",
+        "photo",
     )
 
     def __init__(
@@ -107,6 +108,7 @@ class _Job:
         strength: Optional[float] = None,
         kind: str = MATERIAL,
         direction: str = "",
+        photo: Any = None,
     ) -> None:
         self.id = uuid.uuid4().hex[:12]
         self.task_id = task_id
@@ -143,6 +145,12 @@ class _Job:
         # 真的找到的那一张（``reference_image.Reference.payload()``）。找到之后
         # 才有，界面拿它显示"搜的是什么词、照片来自哪个网站"。
         self.reference: Optional[dict] = None
+        # 用户自己挑的（或者传的）那张照片，已经下载、验过了。有它就不再搜。
+        # 不进 ``payload``：那是几 MB 的字节。
+        self.photo = photo
+        if photo is not None:
+            self.from_photo = True
+            self.reference = photo.payload()
 
     def payload(self, position: int = 0) -> dict:
         now = time.time()
@@ -216,6 +224,7 @@ def enqueue(
     from_photo: bool = False,
     search: str = "",
     strength: Optional[float] = None,
+    photo: Any = None,
 ) -> dict:
     """把一次重生成排进队列，立刻返回。
 
@@ -236,6 +245,7 @@ def enqueue(
         from_photo=from_photo,
         search=search,
         strength=strength,
+        photo=photo,
     )
     with _LOCK:
         _QUEUE.append(job)
@@ -258,6 +268,7 @@ def _material_job(
     from_photo: bool = False,
     search: str = "",
     strength: Optional[float] = None,
+    photo: Any = None,
 ) -> _Job:
     """一个出图的活，验过的。入队由调用方做——写提示词那条路要把"入队"和
     "这个活完成了"放进同一次加锁里。"""
@@ -274,6 +285,7 @@ def _material_job(
         from_photo=from_photo,
         search=search,
         strength=strength,
+        photo=photo,
     )
 
 
@@ -619,7 +631,10 @@ def _run_material(job: _Job) -> None:
     global _RUNNING
     try:
         reference = None
-        if job.from_photo:
+        if job.photo is not None:
+            # 用户已经挑好了：就是这一张，不再搜、不换别的。
+            reference = job.photo
+        elif job.from_photo:
             # 找照片放在出图之前，而且在同一个活里：找不到就不该出图——凭空
             # 画一张交给用户，而他按的按钮是"照一张照片画"。
             #

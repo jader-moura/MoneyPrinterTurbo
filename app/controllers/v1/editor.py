@@ -63,6 +63,7 @@ from app.models.schema import (
     SceneReorderRequest,
     SceneReplaceRequest,
     SceneResponse,
+    SceneSplitRequest,
     SceneTimingRequest,
     SceneUpdateRequest,
     TaskResponse,
@@ -74,6 +75,7 @@ from app.services import transition_sound as transition_sound_service
 from app.services import app_settings
 from app.services import new_video
 from app.services import picture_shelf
+from app.services import reference_image
 from app.services import publish_metadata
 from app.services import reveal
 from app.services import scene_editor, scene_manifest, scene_regen_queue
@@ -314,6 +316,72 @@ def save_settings(request: Request, body: SettingsUpdateRequest):
             task_id=request_id, status_code=400, message=f"{request_id}: {exc}"
         ) from exc
     return utils.get_response(200, data)
+
+
+@router.post(
+    "/tasks/{task_id}/scenes/{index}/split",
+    summary="Split one scene in two at a point in time",
+)
+def split_scene(
+    request: Request,
+    body: SceneSplitRequest,
+    task_id: str = Path(..., description="Task ID"),
+    index: int = Path(..., ge=0),
+):
+    request_id = base.get_task_id(request)
+    _require_task(task_id, request_id)
+    _handle(task_id, request_id,
+            lambda: scene_editor.split_scene(task_id, index, body.at))
+    return utils.get_response(200, {"selected": index + 1})
+
+
+@router.post(
+    "/tasks/{task_id}/scenes/{index}/duplicate",
+    summary="Put a copy of one scene right after it",
+)
+def duplicate_scene(
+    request: Request,
+    task_id: str = Path(..., description="Task ID"),
+    index: int = Path(..., ge=0),
+):
+    request_id = base.get_task_id(request)
+    _require_task(task_id, request_id)
+    _handle(task_id, request_id,
+            lambda: scene_editor.duplicate_scene(task_id, index))
+    return utils.get_response(200, {"selected": index + 1})
+
+
+@router.get(
+    "/tasks/{task_id}/history",
+    summary="How many timeline edits can be undone and redone",
+)
+def read_history(request: Request, task_id: str = Path(..., description="Task ID")):
+    request_id = base.get_task_id(request)
+    _require_task(task_id, request_id)
+    return utils.get_response(200, scene_editor.history_state(task_id))
+
+
+@router.post(
+    "/tasks/{task_id}/history/{direction}",
+    summary="Undo or redo the last timeline edit",
+)
+def step_history(
+    request: Request,
+    task_id: str = Path(..., description="Task ID"),
+    direction: str = Path(..., max_length=10),
+):
+    request_id = base.get_task_id(request)
+    _require_task(task_id, request_id)
+    if direction not in ("undo", "redo"):
+        raise HttpException(
+            task_id=task_id, status_code=404,
+            message=f"{request_id}: unknown history step {direction!r}",
+        )
+    step = scene_editor.undo if direction == "undo" else scene_editor.redo
+    data = _handle(task_id, request_id, lambda: step(task_id))
+    return utils.get_response(
+        200, {"label": data["label"], "history": data["history"]}
+    )
 
 
 @router.get(
@@ -1141,6 +1209,63 @@ def queue_scene_prompt(
     return utils.get_response(200, job)
 
 
+@router.get(
+    "/tasks/{task_id}/scenes/{index}/photos",
+    summary="Search for photographs to redraw one scene from; nothing is drawn",
+)
+def search_scene_photos(
+    request: Request,
+    task_id: str = Path(..., description="Task ID"),
+    index: int = Path(..., ge=0, description="Scene index"),
+    search: str = Query("", max_length=200),
+):
+    """把搜到的照片列出来给人挑。``search`` 空着就由模型来写搜索词。"""
+    request_id = base.get_task_id(request)
+    _require_task(task_id, request_id)
+    data = _handle(
+        task_id, request_id,
+        lambda: scene_editor.find_reference_photos(task_id, index, search=search),
+    )
+    return utils.get_response(200, data)
+
+
+@router.get(
+    "/tasks/{task_id}/scenes/{index}/photos/words",
+    summary="The words to search photographs with for one scene; searches nothing",
+)
+def scene_photo_words(
+    request: Request,
+    task_id: str = Path(..., description="Task ID"),
+    index: int = Path(..., ge=0, description="Scene index"),
+):
+    request_id = base.get_task_id(request)
+    _require_task(task_id, request_id)
+    data = _handle(
+        task_id, request_id,
+        lambda: scene_editor.reference_photo_words(task_id, index),
+    )
+    return utils.get_response(200, data)
+
+
+@router.post(
+    "/tasks/{task_id}/photos",
+    summary="Upload a photograph to redraw a scene from",
+)
+def upload_scene_photo(
+    request: Request,
+    task_id: str = Path(..., description="Task ID"),
+    file: UploadFile = File(...),
+):
+    request_id = base.get_task_id(request)
+    _require_task(task_id, request_id)
+    raw = file.file.read(reference_image.MAX_BYTES + 1)
+    data = _handle(
+        task_id, request_id,
+        lambda: scene_editor.keep_uploaded_photo(raw, file.filename or ""),
+    )
+    return utils.get_response(200, data)
+
+
 @router.post(
     "/tasks/{task_id}/scenes/{index}/material/queue",
     response_model=SceneRegenJobResponse,
@@ -1170,6 +1295,16 @@ def queue_scene_material(
     """
     request_id = base.get_task_id(request)
     _require_task(task_id, request_id)
+
+    def chosen_photo():
+        # 挑好的那张在排队之前就下载、验过：这张用不了的话现在就说，而不是
+        # 排三分钟队之后才说。
+        if body.photo_upload:
+            return scene_editor.uploaded_reference_photo(body.photo_upload)
+        if body.photo_url:
+            return scene_editor.chosen_reference_photo(task_id, body.photo_url)
+        return None
+
     job = _handle(
         task_id,
         request_id,
@@ -1178,6 +1313,7 @@ def queue_scene_material(
             index,
             keyword=body.keyword,
             image_style=body.image_style,
+            photo=chosen_photo(),
             # 照着一张真实照片重画。排进队列里而不是同步做：搜图加出图是
             # 分钟级的，而队列那边本来就一张一张地画、一张一张地报进度。
             from_photo=bool(body.from_photo),

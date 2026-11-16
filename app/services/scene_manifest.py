@@ -48,7 +48,7 @@ from typing import Any, Iterable, Mapping
 
 from loguru import logger
 
-from app.services import task_artifacts
+from app.services import edit_history, task_artifacts
 from app.utils import file_security, subtitle_reader, utils
 
 # 与 ``_run_pipeline`` 的阶段顺序严格一致。``stop_at`` 在哪里停,
@@ -530,6 +530,16 @@ def load(task_id: str) -> dict:
 def save_scenes(task_id: str, scenes: list[dict], **extra: Any) -> bool:
     """写回场景列表并重排 ``index``，使其始终等于位置。"""
     ordered = [_normalise_scene(scene, index) for index, scene in enumerate(scenes)]
+    # 撤销就记在这一个口子上：所有改场景的操作最后都走这里，所以不用去改
+    # 每一个调用方，新加的操作也自动能撤销。见 ``edit_history``。
+    payload = task_artifacts.read_script_data(task_id)
+    stored = payload.get(_SCENES_KEY)
+    before = (
+        [_normalise_scene(raw, index) for index, raw in enumerate(stored)]
+        if isinstance(stored, list)
+        else []
+    )
+    edit_history.note(task_id, payload, before, ordered)
     return task_artifacts.patch_script_data(task_id, scenes=ordered, **extra)
 
 

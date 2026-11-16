@@ -787,6 +787,10 @@ class SceneRegenerateRequest(BaseModel):
     from_photo: bool = False
     search: Optional[str] = Field(default="", max_length=200)
     strength: Optional[float] = Field(default=None, gt=0, le=1)
+    # 用户自己挑的那一张：搜索结果里的一个地址，或者刚传上来的一张的名字。
+    # 给了其中一个就照它画，不再自动搜。
+    photo_url: Optional[str] = Field(default=None, max_length=2000)
+    photo_upload: Optional[str] = Field(default=None, max_length=80)
 
 
 class ScenePromptSuggestRequest(BaseModel):
@@ -894,6 +898,12 @@ class SettingsUpdateRequest(BaseModel):
 
     changes: dict[str, Any] = Field(default_factory=dict)
     clear: list[str] = Field(default_factory=list, max_length=200)
+
+
+class SceneSplitRequest(BaseModel):
+    """在场景的第 ``at`` 秒切一刀。``at`` 是这一段在成片里的时间。"""
+
+    at: float = Field(gt=0, le=36000)
 
 
 class CacheCleanRequest(BaseModel):

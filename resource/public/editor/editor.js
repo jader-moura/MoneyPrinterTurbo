@@ -108,6 +108,14 @@ const ui = {
   settingsNav: el("settings-nav"), settingsBody: el("settings-body"),
   settingsStatus: el("settings-status"), settingsClose: el("settings-close"),
   settingsSave: el("settings-save"),
+  dock: el("dock"), projectTitle: el("project-title"),
+  photoModal: el("photo-modal"), photoTitle: el("photo-title"),
+  photoSearch: el("photo-search"), photoFind: el("photo-find"),
+  photoNote: el("photo-note"), photoGrid: el("photo-grid"),
+  photoUpload: el("photo-upload"), photoAuto: el("photo-auto"),
+  photoClose: el("photo-close"),
+  undo: el("undo"), redo: el("redo"), split: el("split"),
+  duplicate: el("duplicate"), deleteScene: el("delete-scene"),
   createModal: el("create-modal"), createTitle: el("create-title"),
   createNote: el("create-note"), createBar: el("create-bar"),
   createPct: el("create-pct"), createElapsed: el("create-elapsed"),
@@ -275,6 +283,10 @@ async function call(method, path, body) {
     const detail = (payload && (payload.message || payload.detail)) || response.statusText;
     throw new Error(detail);
   }
+  // 改了这条片子的任何东西，"能撤销几步"就可能变了。
+  if (method !== "GET" && path.startsWith("/tasks/") && !path.includes("/history")) {
+    scheduleHistorySync();
+  }
   return payload ? payload.data : null;
 }
 
@@ -319,6 +331,7 @@ async function load(taskId) {
     state.queueSeen = doneIds(await fetchQueue());
     draw();
     watchQueue();
+    syncHistory();
   } catch (error) {
     state.data = null;
     state.scenes = [];
@@ -599,20 +612,26 @@ function keptLabel(strength) {
   return strength <= 0.7 ? " · keeping the photo" : " · loosely inspired";
 }
 
-async function queueRegeneration(index, keyword, imageStyle, fromPhoto, strength) {
+async function queueRegeneration(index, keyword, imageStyle, fromPhoto, strength,
+  photo) {
   try {
     const body = { keyword, image_style: imageStyle };
     if (fromPhoto) {
       body.from_photo = true;
       // 没选就不发：由服务端用配置里那个值，而不是在这里硬写一个默认。
       if (strength) body.strength = strength;
+      // 用户自己挑的那一张（搜索结果里的地址，或者传上来的那张的名字）。
+      Object.assign(body, photo || {});
     }
+    const chose = !!(photo && (photo.photo_url || photo.photo_upload));
     const job = await call(
       "POST",
       `${scenePath(index)}/material/queue`,
       body
     );
-    const how = fromPhoto ? " It will find a photo first." : "";
+    const how = !fromPhoto ? ""
+      : chose ? " It will be drawn from the photo you chose."
+        : " It will find a photo first.";
     say(job && job.position > 1
       ? `Scene ${index + 1} queued — ${job.position - 1} ahead of it.${how}`
       : `Scene ${index + 1} queued. Queue another or keep editing.${how}`);
@@ -983,6 +1002,8 @@ function drawSettings() {
 }
 
 function draw() {
+  drawEditBar();
+  drawProjectTitle();
   drawRuler();
   drawClips();
   drawVoice();
@@ -2547,6 +2568,562 @@ document.addEventListener("keydown", (event) => {
   else if (!ui.newModal.hidden && !fresh.writing) closeNewVideo();
 });
 
+/* ---------- 剪辑工具条和快捷键 ----------
+
+   撤销、重做、分割、复制、删除，加上空格播放、方向键走位。剪辑软件里这些
+   是肌肉记忆；没有它们，每一下都得先找按钮，而且删错了没有回头路。
+
+   撤销的历史在服务端（任务目录里），所以刷新页面、换个浏览器都还在。 */
+const edits = {
+  history: { undo: 0, redo: 0, undo_label: "", redo_label: "" },
+  timer: 0,
+};
+
+/** 播放头底下是哪一段，以及播放头在这一段里的第几秒。 */
+function sceneUnderPlayhead() {
+  const offsets = sceneOffsets();
+  for (let at = state.scenes.length - 1; at >= 0; at -= 1) {
+    if (state.playhead >= offsets[at] - 1e-6) {
+      const inside = state.playhead - offsets[at];
+      if (inside < screenDuration(state.scenes[at])) {
+        return { index: at, inside };
+      }
+      return null;
+    }
+  }
+  return null;
+}
+
+function canEdit() {
+  return !!state.taskId && state.scenes.length > 0 && !state.taskBusy;
+}
+
+function drawEditBar() {
+  const ready = canEdit();
+  const picked = state.selected >= 0 && state.selected < state.scenes.length;
+  ui.undo.disabled = !ready || !edits.history.undo;
+  ui.redo.disabled = !ready || !edits.history.redo;
+  ui.undo.title = edits.history.undo_label
+    ? `Undo: ${edits.history.undo_label} (Ctrl+Z)` : "Undo (Ctrl+Z)";
+  ui.redo.title = edits.history.redo_label
+    ? `Redo: ${edits.history.redo_label} (Ctrl+Y)` : "Redo (Ctrl+Y)";
+  ui.split.disabled = !ready;
+  ui.duplicate.disabled = !ready || !picked;
+  // 最后一段不能删：一条片子至少要有一段。
+  ui.deleteScene.disabled = !ready || !picked || state.scenes.length < 2;
+}
+
+async function syncHistory() {
+  if (!state.taskId) return;
+  try {
+    edits.history = await call("GET",
+      `/tasks/${encodeURIComponent(state.taskId)}/history`) || edits.history;
+  } catch {
+    // 老任务、或者接口还没重启：撤销用不了，但不该为这个报错。
+    edits.history = { undo: 0, redo: 0, undo_label: "", redo_label: "" };
+  }
+  drawEditBar();
+}
+
+/** 任何一次改动之后都重新问一遍"能撤销几步"。挂在 ``call`` 上而不是每个
+    操作各调一次：新加的操作不用记得来这里登记。 */
+function scheduleHistorySync() {
+  clearTimeout(edits.timer);
+  edits.timer = setTimeout(syncHistory, 250);
+}
+
+function splitAtPlayhead() {
+  if (!canEdit()) return;
+  const hit = sceneUnderPlayhead();
+  if (!hit) {
+    say("Move the playhead onto a scene to split it.", "warn");
+    return;
+  }
+  const length = screenDuration(state.scenes[hit.index]);
+  if (hit.inside < 0.2 || hit.inside > length - 0.2) {
+    say("Move the playhead further inside the scene — a cut this close to "
+      + "the edge would leave a piece too short to see.", "warn");
+    return;
+  }
+  run("Splitting", async () => {
+    await call("POST", `${scenePath(hit.index)}/split`, { at: hit.inside });
+    // 选中后一段：切完之后手上要处理的通常是它（拖走、换图、删掉）。
+    state.selected = hit.index + 1;
+  });
+}
+
+function duplicateSelected() {
+  if (!canEdit() || state.selected < 0) return;
+  const at = state.selected;
+  run("Duplicating", async () => {
+    await call("POST", `${scenePath(at)}/duplicate`);
+    state.selected = at + 1;
+  });
+}
+
+function deleteSelected() {
+  if (!canEdit() || state.selected < 0) return;
+  if (state.scenes.length < 2) {
+    say("A video needs at least one scene.", "warn");
+    return;
+  }
+  // 不再问"确定吗"：删错了按 Ctrl+Z 就回来了，图也还在盘上。
+  run("Deleting", () => call("DELETE", scenePath(state.selected)));
+}
+
+async function stepHistory(direction) {
+  if (!canEdit() || state.busy) return;
+  if (!edits.history[direction]) return;
+  state.busy = true;
+  try {
+    const data = await call("POST",
+      `/tasks/${encodeURIComponent(state.taskId)}/history/${direction}`);
+    edits.history = (data && data.history) || edits.history;
+    await refresh();
+    const what = (data && data.label) || "the last change";
+    say(direction === "undo" ? `Undone: ${what}` : `Redone: ${what}`, "ok");
+  } catch (error) {
+    say(String(error.message || error), "error");
+  } finally {
+    state.busy = false;
+    drawEditBar();
+  }
+}
+
+/** 选中上一段或下一段，并把播放头放到它开头。 */
+function stepScene(by) {
+  if (!state.scenes.length) return;
+  const from = state.selected >= 0 ? state.selected
+    : ((sceneUnderPlayhead() || { index: 0 }).index);
+  const to = Math.max(0, Math.min(state.scenes.length - 1, from + by));
+  state.selected = to;
+  scrubTo(sceneOffsets()[to]);
+  draw();
+}
+
+ui.undo.addEventListener("click", () => stepHistory("undo"));
+ui.redo.addEventListener("click", () => stepHistory("redo"));
+ui.split.addEventListener("click", splitAtPlayhead);
+ui.duplicate.addEventListener("click", duplicateSelected);
+ui.deleteScene.addEventListener("click", deleteSelected);
+
+/** 这一下键盘是打给时间线的，还是打给一个输入框的。
+    在框里打字时空格就是空格、Delete 就是删字——抢过来会毁掉用户正在写的
+    东西。开着的窗口（新片子、设置）同理。 */
+function typingSomewhere(event) {
+  const node = event.target;
+  if (node && (node.isContentEditable
+      || ["INPUT", "TEXTAREA", "SELECT"].includes(node.tagName))) {
+    return true;
+  }
+  return !!document.querySelector(".modal:not([hidden])");
+}
+
+document.addEventListener("keydown", (event) => {
+  if (event.altKey || typingSomewhere(event) || !state.taskId) return;
+  const ctrl = event.ctrlKey || event.metaKey;
+  const key = event.key.length === 1 ? event.key.toLowerCase() : event.key;
+  let handled = true;
+  if (ctrl && key === "z" && !event.shiftKey) stepHistory("undo");
+  else if (ctrl && (key === "y" || (key === "z" && event.shiftKey))) {
+    stepHistory("redo");
+  } else if (ctrl && key === "d") duplicateSelected();
+  else if (ctrl && key === "b") splitAtPlayhead();
+  else if (ctrl) handled = false;
+  else if (key === " ") {
+    if (state.scenes.length) (state.playing ? stop() : play());
+  } else if (key === "s") splitAtPlayhead();
+  else if (key === "Delete" || key === "Backspace") deleteSelected();
+  // 一下 0.1 秒，按住 Shift 一下 1 秒。
+  else if (key === "ArrowLeft") scrubTo(state.playhead - (event.shiftKey ? 1 : 0.1));
+  else if (key === "ArrowRight") scrubTo(state.playhead + (event.shiftKey ? 1 : 0.1));
+  else if (key === "ArrowUp") stepScene(-1);
+  else if (key === "ArrowDown") stepScene(1);
+  else if (key === "Home") scrubTo(0);
+  else if (key === "End") scrubTo(projectTotal());
+  else handled = false;
+  // 处理了的才拦：空格不拦会把页面往下滚，Ctrl+D 不拦会弹出"加书签"。
+  if (handled) event.preventDefault();
+});
+
+/* ---------- 左边的工具栏和停靠面板 ----------
+
+   脚本、字幕、声音、效果、发布这五个面板以前是浮在画面上的窗，各有各的
+   开关。现在它们停靠在左边，一次只开一个，像 CapCut 那样。
+
+   面板自己的代码一行没动：这里只做三件事——把它们搬进 dock，开一个时关掉
+   别的，以及让页签亮起来。所以哪个面板将来改了自己的开关逻辑，这里不用
+   跟着改。 */
+const DOCK_TABS = [
+  [ui.scriptToggle, ui.scriptPanel, closeScript],
+  [ui.subsToggle, ui.subsPanel, closeSubtitles],
+  [ui.musicToggle, ui.musicPanel, closeMusic],
+  [ui.effectsToggle, ui.effectsPanel, closeEffects],
+  [ui.publishToggle, ui.publishPanel, closePublish],
+];
+
+function syncDock() {
+  let open = false;
+  for (const [toggle, panel] of DOCK_TABS) {
+    toggle.classList.toggle("on", !panel.hidden);
+    open = open || !panel.hidden;
+  }
+  // 只在变了的时候写：写同一个值也会惊动下面那个观察者。
+  if (ui.dock.hidden === open) ui.dock.hidden = !open;
+}
+
+for (const [toggle, panel] of DOCK_TABS) {
+  ui.dock.appendChild(panel);
+  toggle.addEventListener("click", () => {
+    // 开这一个之前把别的关掉。走各自的关闭函数，不直接藏起来：字幕面板
+    // 关的时候要把没保存的预览还原，直接藏它就漏了这一步。
+    for (const [, other, close] of DOCK_TABS) {
+      if (other !== panel && !other.hidden) close();
+    }
+  });
+}
+// 面板怎么开、怎么关不归这里管（它们有自己的"关闭"按钮，保存之后也会自己
+// 关），所以不去每个地方都补一句，而是看着 hidden 这个属性。
+new MutationObserver(syncDock).observe(ui.dock, {
+  attributes: true, attributeFilter: ["hidden"], subtree: true,
+});
+syncDock();
+
+function drawProjectTitle() {
+  const name = (state.data && state.data.subject) || "";
+  ui.projectTitle.textContent = name;
+  ui.projectTitle.title = name;
+}
+
+// "按 id 打开"现在在"我的视频"那一屏里：打开之后那一屏得让开。
+ui.load.addEventListener("click", closeLibrary);
+ui.task.addEventListener("keydown", (event) => {
+  if (event.key === "Enter") closeLibrary();
+});
+
+/* ---------- "?" 说明 ----------
+
+   面板里原来到处是整段的说明文字：提示词怎么用、AI 写提示词是怎么回事、
+   效果什么时候生效。第一次用的时候它们有用，之后每一次都只是把按钮往下
+   挤——右边这一栏本来就窄，一屏里一半是字。
+
+   所以说明收进一个 "?"：鼠标移上去（或者用键盘聚焦）才出来。字一个没删，
+   只是不再占地方。
+
+   浮层是挂在 body 上的同一个节点，不是每个 "?" 各带一个：右边那一栏会
+   滚动、会裁剪溢出，带在里面的浮层会被裁掉一半。 */
+let helpPop = null;
+
+function showHelp(anchor, text) {
+  if (!helpPop) {
+    helpPop = document.createElement("div");
+    helpPop.className = "help-pop";
+    helpPop.setAttribute("role", "tooltip");
+    document.body.appendChild(helpPop);
+  }
+  helpPop.textContent = text;
+  helpPop.hidden = false;
+  // 先摆出来量尺寸，再决定放哪：优先放在 "?" 下面，放不下就翻到上面；
+  // 横向夹在屏幕里——右边那一栏的 "?" 紧贴着屏幕边。
+  const at = anchor.getBoundingClientRect();
+  const box = helpPop.getBoundingClientRect();
+  const left = Math.max(8, Math.min(window.innerWidth - box.width - 8,
+    at.left + at.width / 2 - box.width / 2));
+  const below = at.bottom + 8;
+  const top = below + box.height > window.innerHeight - 8
+    ? Math.max(8, at.top - box.height - 8) : below;
+  helpPop.style.left = `${left}px`;
+  helpPop.style.top = `${top}px`;
+}
+
+function hideHelp() {
+  if (helpPop) helpPop.hidden = true;
+}
+
+/** 一个 "?"。鼠标移上去、或者键盘聚焦，就显示 ``text``。 */
+function helpTip(text) {
+  const node = document.createElement("span");
+  node.className = "help";
+  node.textContent = "?";
+  node.tabIndex = 0;
+  node.setAttribute("role", "button");
+  node.setAttribute("aria-label", text);
+  node.addEventListener("mouseenter", () => showHelp(node, text));
+  node.addEventListener("focus", () => showHelp(node, text));
+  node.addEventListener("mouseleave", hideHelp);
+  node.addEventListener("blur", hideHelp);
+  // 它常常坐在一个 <label> 或 <summary> 里。点它不该顺便聚焦输入框、
+  // 也不该把抽屉收起来。
+  node.addEventListener("click", (event) => {
+    event.preventDefault();
+    event.stopPropagation();
+    showHelp(node, text);
+  });
+  return node;
+}
+
+/** 给一个字段的标题后面挂一个 "?"。 */
+function addHelp(wrap, text) {
+  const label = wrap && wrap.querySelector("label, summary");
+  if (label) label.appendChild(helpTip(text));
+  return wrap;
+}
+
+// 浮层是固定在屏幕上的，面板一滚它就对不上了；滚了就收起来。
+document.addEventListener("scroll", hideHelp, true);
+
+/* ---------- 右边那一栏分成几节 ----------
+
+   画面、效果、时长——三件不相干的事原来从上到下排成一条长卷，要改时长得
+   先滚过整个提示词区。现在一节一个抽屉，默认只开"画面"：那是来这一栏
+   十次里九次要做的事。
+
+   开没开是按节记的，不按场景记：把"时长"打开之后一段一段往下点，它应该
+   一直开着。 */
+const inspectorOpen = { Picture: true, Effects: false, Timing: false };
+
+/** 在右边那一栏里做一个记号："从这里开始是下一节"。空名字表示"分节到此
+    为止"，后面的东西（锁定、删除）不属于任何一节。
+    记号本身是看不见的：某条路提前返回、没走到分组那一步，也不会露出来。 */
+function inspectorSection(name) {
+  const mark = document.createElement("i");
+  mark.hidden = true;
+  mark.dataset.section = name;
+  ui.inspBody.appendChild(mark);
+}
+
+/** 按记号把右边那一栏的内容收进一个个抽屉里。 */
+function groupInspector() {
+  let drawer = null;
+  for (const node of [...ui.inspBody.children]) {
+    if (node.dataset && "section" in node.dataset) {
+      const name = node.dataset.section;
+      drawer = null;
+      if (name) {
+        const box = document.createElement("details");
+        box.className = "insp-section";
+        box.open = inspectorOpen[name] !== false;
+        box.addEventListener("toggle", () => { inspectorOpen[name] = box.open; });
+        const head = document.createElement("summary");
+        head.textContent = name;
+        box.appendChild(head);
+        // 抽屉放在记号原来的位置上，然后才把记号摘掉。
+        ui.inspBody.insertBefore(box, node);
+        drawer = box;
+      }
+      node.remove();
+      continue;
+    }
+    if (drawer) drawer.appendChild(node);
+  }
+}
+
+/* ---------- 左边面板里的说明也收进 "?" ----------
+
+   和右边那一栏同一个道理：每个面板顶上那段话第一次有用，之后只是把控件
+   往下挤。带 id 的不动——那些是会变的状态（"已保存"、"这条片子是竖版"），
+   不是说明。 */
+function tuckPanelHints() {
+  for (const [, panel] of DOCK_TABS) {
+    for (const hint of [...panel.querySelectorAll("p.hint")]) {
+      if (hint.id || hint.querySelector("[id]")) continue;
+      const text = hint.textContent.replace(/\s+/g, " ").trim();
+      if (text.length < 60) continue;
+      // 往上找它在讲的是谁：最近的那个标题，或者最近的那个字段。
+      let owner = hint.previousElementSibling;
+      while (owner && !owner.matches("h2, h3, .field")) {
+        owner = owner.previousElementSibling;
+      }
+      if (!owner) continue;
+      const label = owner.matches(".field") ? owner.querySelector("label") : owner;
+      if (!label) continue;
+      label.appendChild(helpTip(text));
+      hint.remove();
+    }
+  }
+}
+tuckPanelHints();
+
+/* ---------- 挑一张照片来重画 ----------
+
+   搜到的照片先摆出来，点哪张就照哪张画；也可以改搜索词再搜，或者传一张
+   自己的。以前这一步是自动的，画完才知道它拿了哪一张。 */
+const photoPick = {
+  at: -1, keyword: null, style: null, strength: 0, photos: [], busy: false,
+  // 每一段上一次在这里搜的是什么。再打开时框里就是它。
+  words: {},
+};
+
+function photoWordsKey(scene) {
+  return scene.id || materialKey(scene.material) || `at-${scene.index}`;
+}
+
+function openPhotoPicker(scene, keyword, style, strength) {
+  Object.assign(photoPick, {
+    at: scene.index, keyword, style, strength, photos: [], busy: false,
+  });
+  ui.photoTitle.textContent = `Redraw scene ${scene.index + 1} from a photo`;
+  ui.photoGrid.innerHTML = "";
+  ui.photoModal.hidden = false;
+  photoPick.key = photoWordsKey(scene);
+  // 框里一打开就得有词，而且是"之前搜的那个"：
+  //   1. 这一段刚才在这里搜过的词（改过的也算）；
+  //   2. 没有的话，上次照着照片画这一段时用的词（记在这一段上）；
+  //   3. 都没有，才让模型从台词和提示词里写一条。
+  const before = photoPick.words[photoPick.key]
+    || ((scene.reference && scene.reference.query) || "").trim();
+  ui.photoSearch.value = before;
+  if (before) findPhotos(before);
+  else writePhotoWords();
+}
+
+/** 让模型写搜索词，写完填进框里再搜。词先落框、后搜索：搜索失败（图库
+    抽风是常事）的时候，框里不能是空的。 */
+async function writePhotoWords() {
+  const at = photoPick.at;
+  ui.photoFind.disabled = true;
+  photoNote("Working out what to search for…", "pending");
+  let words = "";
+  try {
+    const data = await call("GET", `${scenePath(at)}/photos/words`);
+    words = ((data && data.query) || "").trim();
+  } catch (error) {
+    // 单独写词的那一步没成（比如接口还没重启、还不认识这条路由）。不能
+    // 就此停在一个空框上：退回原来那一步——让搜索自己写词、自己搜，搜到
+    // 之后词照样填进框里。点一下按钮就开始搜，这件事不能因为加了一步而没了。
+    console.warn("could not get the search words on their own", error);
+  }
+  if (photoPick.at !== at) return;
+  ui.photoFind.disabled = false;
+  ui.photoSearch.value = words;
+  // 有词就照词搜；没有就让搜索那一步自己写（空词 = "你来写"）。
+  findPhotos(words);
+}
+
+function closePhotoPicker() {
+  ui.photoModal.hidden = true;
+  photoPick.at = -1;
+}
+
+function photoNote(text, kind) {
+  ui.photoNote.className = "hint" + (kind ? " " + kind : "");
+  ui.photoNote.textContent = text;
+}
+
+async function findPhotos(search) {
+  if (photoPick.busy || photoPick.at < 0) return;
+  const at = photoPick.at;
+  photoPick.busy = true;
+  ui.photoFind.disabled = true;
+  ui.photoGrid.innerHTML = "";
+  // 搜的词留在框里：搜不到的时候要改的就是它，不该让人重打一遍。而且
+  // 记下来——关了窗再打开，框里还是它。
+  if (search) {
+    ui.photoSearch.value = search;
+    if (photoPick.key) photoPick.words[photoPick.key] = search;
+  }
+  photoNote(search ? "Searching…" : "Working out what to search for…", "pending");
+  try {
+    const data = await call("GET",
+      `${scenePath(at)}/photos?search=${encodeURIComponent(search)}`);
+    // 等结果的时候用户可能已经关了窗、或者换了一段。
+    if (photoPick.at !== at) return;
+    photoPick.photos = (data && data.photos) || [];
+    ui.photoSearch.value = (data && data.query) || search;
+    photoNote(`${photoPick.photos.length} photo`
+      + `${photoPick.photos.length === 1 ? "" : "s"} for “${data.query}”. `
+      + "Click one to draw this scene from it.");
+    drawPhotos();
+  } catch (error) {
+    if (photoPick.at !== at) return;
+    photoPick.photos = [];
+    photoNote(String(error.message || error), "warn");
+  } finally {
+    photoPick.busy = false;
+    ui.photoFind.disabled = false;
+  }
+}
+
+function drawPhotos() {
+  ui.photoGrid.innerHTML = "";
+  for (const photo of photoPick.photos) {
+    const tile = document.createElement("button");
+    tile.type = "button";
+    tile.className = "shelf-tile free" + (photo.used ? " used" : "");
+    const shot = document.createElement("img");
+    shot.className = "shelf-shot";
+    shot.loading = "lazy";
+    // 不把"我从哪个页面来的"告诉图床。
+    shot.referrerPolicy = "no-referrer";
+    shot.alt = "";
+    shot.src = photo.thumb || photo.url;
+    // 缩略图坏了的那一张多半原图也下不来；摆一个点了必失败的格子没有用。
+    shot.addEventListener("error", () => tile.remove());
+    tile.appendChild(shot);
+    const meta = document.createElement("div");
+    meta.className = "shelf-meta";
+    const where = document.createElement("span");
+    where.className = "shelf-where";
+    where.textContent = photo.used ? "Used in another scene" : (photo.host || "");
+    meta.appendChild(where);
+    const credit = [photo.license, photo.creator].filter(Boolean).join(" · ");
+    if (credit) {
+      const line = document.createElement("span");
+      line.className = "shelf-when";
+      line.textContent = credit;
+      meta.appendChild(line);
+    }
+    tile.appendChild(meta);
+    tile.title = photo.page_url || photo.url;
+    tile.addEventListener("click", () => redrawFromPhoto({ photo_url: photo.url }));
+    ui.photoGrid.appendChild(tile);
+  }
+}
+
+/** 照着挑好的那一张（或者传上来的那一张）排一次重画。``extra`` 空着就是
+    原来那条全自动的路：服务端自己搜、自己挑。 */
+function redrawFromPhoto(extra) {
+  const { at, keyword, style, strength } = photoPick;
+  if (at < 0) return;
+  const search = ui.photoSearch.value.trim();
+  closePhotoPicker();
+  queueRegeneration(at, keyword, style, true, strength,
+    { ...(extra || {}), ...(search ? { search } : {}) });
+}
+
+/** 按框里的词搜。框空着就先让模型写一条，而不是拿空词去搜。 */
+function searchPhotosFromBox() {
+  const words = ui.photoSearch.value.trim();
+  if (words) findPhotos(words);
+  else writePhotoWords();
+}
+ui.photoFind.addEventListener("click", searchPhotosFromBox);
+ui.photoSearch.addEventListener("keydown", (event) => {
+  if (event.key === "Enter") searchPhotosFromBox();
+});
+// 打了字还没搜就关窗，下次打开也该是这几个字。
+ui.photoSearch.addEventListener("input", () => {
+  if (photoPick.key) photoPick.words[photoPick.key] = ui.photoSearch.value;
+});
+ui.photoClose.addEventListener("click", closePhotoPicker);
+ui.photoAuto.addEventListener("click", () => redrawFromPhoto(null));
+ui.photoUpload.addEventListener("click", () => pickFile("image/*", async (file) => {
+  photoNote(`Uploading ${file.name}…`, "pending");
+  try {
+    const data = await upload(
+      `/tasks/${encodeURIComponent(state.taskId)}/photos`, file);
+    redrawFromPhoto({ photo_upload: data.file });
+  } catch (error) {
+    photoNote(String(error.message || error), "warn");
+  }
+}));
+ui.photoModal.addEventListener("click", (event) => {
+  if (event.target === ui.photoModal) closePhotoPicker();
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && !ui.photoModal.hidden) closePhotoPicker();
+});
+
 /* ---------- thumbnails ---------- */
 
 /* 每段画面抓一帧存成静态图。
@@ -3142,9 +3719,7 @@ function drawPromptAssist(scene, input) {
   title.textContent = "Write this prompt with AI";
   box.appendChild(title);
 
-  const hint = document.createElement("p");
-  hint.className = "hint";
-  hint.textContent =
+  const assistHelp =
     "Say in a few words what this picture should show, or what to change "
     + "about it, then press Write the prompt — it rewrites what is in the "
     + "box above. Suggest another ignores the box and thinks of a fresh "
@@ -3156,9 +3731,9 @@ function drawPromptAssist(scene, input) {
     + "in the queue below, so cancel it there if you would rather read the "
     + "words first. Writing takes a while, so you can move to another scene "
     + "while it writes — it finishes on its own.";
-  box.appendChild(hint);
 
   const direction = field("What it should show", "input", state_.direction);
+  addHelp(direction.wrap, assistHelp);
   direction.input.placeholder = "at night · have her smiling · not in an office";
   direction.input.addEventListener("input", () => {
     state_.direction = direction.input.value;
@@ -3237,6 +3812,7 @@ function drawInspector() {
     return;
   }
   ui.inspTitle.textContent = `Scene ${scene.index + 1}${scene.locked ? " · locked" : ""}`;
+  inspectorSection("Picture");
 
   // 这个框在两种源下根本不是一回事，所以名字也不能是同一个。
   //
@@ -3326,17 +3902,18 @@ function drawInspector() {
 
     const fromPhoto = button("Redraw from a photo", "", async () => {
       await savePromptEdit();
-      queueRegeneration(
-        scene.index,
+      // 不再直接开画：先把搜到的照片摆出来给人挑（或者传一张自己的）。
+      openPhotoPicker(
+        scene,
         keyword.input.value || null,
         style ? style.input.value : null,
-        true,
         Number(keep.input.value) || photoKeep
       );
     });
-    fromPhoto.title = "Search the web for a photograph of this, then draw this "
-      + "scene from it. The search words are written from this scene's "
-      + "narration and prompt.";
+    fromPhoto.title = "Search the web for photographs of this and choose the "
+      + "one to draw this scene from, or upload your own. The search words "
+      + "are written from this scene's narration and prompt, and you can "
+      + "change them.";
     ui.inspBody.appendChild(fromPhoto);
   }
 
@@ -3367,18 +3944,16 @@ function drawInspector() {
     ui.inspBody.appendChild(queued);
   }
 
-  const sourceNote = document.createElement("p");
-  sourceNote.className = "hint";
-  sourceNote.textContent = isGenerated(scene)
-    ? "The text above is the prompt, used exactly as written with the style "
-      + "added after it — nothing is rewritten and nothing else is sent. A full "
-      + "sentence works better than a few nouns: say who is in shot, what they "
-      + "are doing, and when and where. Pictures are drawn one at a time and a "
-      + "local image server takes a few minutes each, so this only joins the "
-      + "queue — keep working while it runs."
+  // 这一段以前是摆在按钮下面的一整段字。现在收在提示词标题旁边的 "?" 里。
+  addHelp(keyword.wrap, isGenerated(scene)
+    ? "The text in this box is the prompt, used exactly as written with the "
+      + "style added after it — nothing is rewritten and nothing else is sent. "
+      + "A full sentence works better than a few nouns: say who is in shot, "
+      + "what they are doing, and when and where. Pictures are drawn one at a "
+      + "time and a local image server takes a few minutes each, so "
+      + "generating only joins the queue — keep working while it runs."
     : "Stock searches are cached, so the same keyword returns the same clip. "
-      + "Change the keyword to get a different one.";
-  ui.inspBody.appendChild(sourceNote);
+      + "Change the keyword to get a different one.");
 
   /* 这里不再显示"这段画面上会念到什么"。
 
@@ -3403,6 +3978,7 @@ function drawInspector() {
   ui.inspBody.appendChild(save);
 
   // 这一段怎么出场。放在时长前面：先决定它长什么样，再决定它停多久。
+  inspectorSection("Effects");
   const transitions = (state.data && state.data.transitions) || [];
   const motions = (state.data && state.data.image_motions) || [];
   if (transitions.length || motions.length) {
@@ -3428,14 +4004,15 @@ function drawInspector() {
     if (motion) ui.inspBody.append(motion.wrap);
     if (sound) ui.inspBody.append(sound.wrap);
 
-    const effectsNote = document.createElement("p");
-    effectsNote.className = "hint";
-    effectsNote.textContent = "The transition and the sound are added when "
-      + "the video is rendered. The motion is baked into this scene's clip, so "
-      + "changing it re-renders the clip from its picture — a few seconds, and "
-      + "instant once you have used that setting before. The sound plays on "
-      + "the cut into this scene, at the video's transition-sound volume.";
-    ui.inspBody.appendChild(effectsNote);
+    // 挂在这一组的第一项上：三项讲的是同一件事（什么时候生效）。
+    const firstEffect = cut || motion || sound;
+    if (firstEffect) {
+      addHelp(firstEffect.wrap, "The transition and the sound are added when "
+        + "the video is rendered. The motion is baked into this scene's clip, so "
+        + "changing it re-renders the clip from its picture — a few seconds, and "
+        + "instant once you have used that setting before. The sound plays on "
+        + "the cut into this scene, at the video's transition-sound volume.");
+    }
 
     ui.inspBody.appendChild(button("Apply effects", "small", () =>
       run("Applying the effects", () =>
@@ -3446,6 +4023,7 @@ function drawInspector() {
         }))));
   }
 
+  inspectorSection("Timing");
   const source = scene.source_duration;
   const inPoint = field("In-point (s)", "input", String(scene.trim_start ?? 0), "number");
   const hold = field("Duration on screen (s)", "input",
@@ -3482,6 +4060,8 @@ function drawInspector() {
     ui.inspBody.appendChild(speedNote);
   }
 
+  // 分节到此为止：锁定和删除是对整段说的，不属于哪一节。
+  inspectorSection("");
   const actions = document.createElement("div");
   actions.className = "row";
   actions.append(
@@ -3493,6 +4073,7 @@ function drawInspector() {
   ui.inspBody.appendChild(
     button("Delete scene", "small danger", () => run("Deleting", () =>
       call("DELETE", scenePath(scene.index)))));
+  groupInspector();
 }
 
 /** 新增一段画面的表单。

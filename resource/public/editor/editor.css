@@ -536,6 +536,84 @@ body {
 
 /* ---------- stage: preview + inspector ---------- */
 
+/* ---------- CapCut 式的布局 ----------
+
+   左边一列工具页签，点开的面板停靠在它旁边；中间是画面；右边是选中那一段
+   的属性；底下是时间线。以前这些面板是浮在画面上的窗——开着就挡着画面，
+   而开它们正是为了看着画面调。 */
+.bar-sep { width: 1px; height: 20px; background: var(--line); }
+.project-title {
+  max-width: 34vw;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-weight: 600;
+  font-size: 13px;
+}
+.rail {
+  flex: 0 0 68px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 8px 5px;
+  background: var(--panel);
+  overflow-y: auto;
+}
+.rail-btn {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 9px 2px 7px;
+  font: inherit;
+  font-size: 11px;
+  color: var(--muted);
+  background: none;
+  border: 0;
+  border-radius: 8px;
+  cursor: pointer;
+}
+.rail-btn .ico { font-size: 17px; line-height: 1; font-weight: 600; }
+.rail-btn:hover:not(:disabled) { color: var(--text); background: var(--panel-2); }
+.rail-btn.on { color: var(--text); background: var(--accent-soft); }
+.rail-btn:disabled { opacity: 0.4; cursor: default; }
+.dock {
+  flex: 0 0 clamp(280px, 25vw, 380px);
+  min-width: 0;
+  min-height: 0;
+  overflow-y: auto;
+  background: var(--panel);
+}
+/* 停靠之后面板不再是一个浮着的窗：没有定位、没有阴影、没有圆角，宽度跟着
+   dock 走。 */
+.dock .script-panel, .dock .script-panel.aside {
+  position: static;
+  transform: none;
+  width: auto;
+  max-height: none;
+  padding: 14px;
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  box-shadow: none;
+}
+.dock .script-panel h2 { font-size: 14px; margin-bottom: 6px; }
+.dock .script-panel textarea { background: var(--bg); }
+@media (max-width: 1100px) {
+  /* 窄屏上三栏放不下：面板盖在画面上面，而不是把画面挤没。 */
+  .stage { position: relative; }
+  .dock {
+    position: absolute;
+    left: 68px;
+    top: 0;
+    bottom: 0;
+    z-index: 30;
+    width: min(360px, calc(100vw - 68px));
+    border-right: 1px solid var(--line);
+    box-shadow: 8px 0 24px rgba(0, 0, 0, 0.5);
+  }
+}
+
 .stage {
   display: flex;
   gap: 1px;
@@ -695,10 +773,104 @@ body {
 .row { display: flex; gap: 8px; }
 .row > * { flex: 1; min-width: 0; }
 .hint { font-size: 12px; color: var(--muted); margin: 0; }
+
+/* 右边那一栏的分节抽屉。 */
+.insp-section { border-top: 1px solid var(--line); margin: 0 -14px; padding: 0 14px; }
+.insp-section > summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 9px 0;
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--muted);
+  cursor: pointer;
+  list-style: none;
+  user-select: none;
+}
+.insp-section > summary::-webkit-details-marker { display: none; }
+.insp-section > summary::before { content: "▸"; font-size: 10px; transition: transform 0.12s; }
+.insp-section[open] > summary::before { transform: rotate(90deg); }
+.insp-section[open] > summary { color: var(--text); }
+.insp-section[open] { padding-bottom: 12px; }
+.insp-section > :not(summary) { margin-bottom: 8px; }
+/* 抽屉里不是弹性布局，按钮会缩成字那么宽。照原来的样子铺满一行。 */
+.insp-section > .btn { display: block; width: 100%; }
+
+/* 挑照片那一屏。格子借的是"画过的图"那一套；照片比例不一，所以图按
+   原比例缩进格子里，不裁——裁掉的那一块可能正是要看的。 */
+.photo-search-row { margin-bottom: 8px; }
+.photo-search-row input {
+  flex: 1;
+  padding: 7px 10px;
+  font: inherit;
+  font-size: 13px;
+  color: var(--text);
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 6px;
+}
+.photo-search-row .btn { flex: 0 0 auto; }
+.photo-grid .shelf-shot { object-fit: contain; background: #000; }
+.photo-grid .shelf-tile.used { opacity: 0.6; }
+
+/* "?"：说明收在里面，鼠标移上去才出来。见 editor.js 的 helpTip。 */
+.help {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 15px;
+  height: 15px;
+  margin-left: 6px;
+  vertical-align: middle;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1;
+  color: var(--muted);
+  border: 1px solid var(--line);
+  border-radius: 50%;
+  cursor: help;
+  user-select: none;
+}
+.help:hover, .help:focus {
+  color: var(--text);
+  border-color: var(--accent);
+  outline: none;
+}
+.help-pop {
+  position: fixed;
+  z-index: 90;
+  width: min(320px, calc(100vw - 16px));
+  padding: 10px 12px;
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--text);
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.6);
+  pointer-events: none;
+}
 .hint.warn { color: var(--warn); }
 .hint.pending { color: var(--accent); }
 
 /* ---------- timeline ---------- */
+
+/* 剪辑工具条：贴在时间线上面的一窄条。 */
+.edit-bar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 5px 14px;
+  background: var(--panel);
+  border-top: 1px solid var(--line);
+}
+.edit-bar .sep { width: 1px; height: 18px; background: var(--line); margin: 0 4px; }
+.edit-bar .keys { font-size: 11px; color: var(--muted); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.edit-bar .btn:disabled { opacity: 0.45; cursor: default; }
 
 .timeline {
   flex: 0 0 auto;

@@ -43,7 +43,7 @@ import io
 import re
 import time
 from dataclasses import dataclass
-from typing import Any, NamedTuple, Optional
+from typing import Any, NamedTuple, Optional, Mapping
 
 import requests
 from loguru import logger
@@ -162,6 +162,8 @@ class _Candidate(NamedTuple):
     page_url: str = ""
     licence: str = ""
     creator: str = ""
+    thumb: str = ""
+    """缩略图地址，给"挑一张"那一屏看的。没有就用原图。"""
 
 
 def _setting(app_config: Optional[dict], key: str, default: Any = "") -> Any:
@@ -246,6 +248,126 @@ def search(
     raise NothingFound(f"{last} (the search started as {tried[0]!r})")
 
 
+def _finder(app_config: Optional[dict]):
+    provider = str(
+        _setting(app_config, "reference_image_provider", DEFAULT_PROVIDER)
+    ).strip()
+    finder = {GOOGLE_CSE: _google_cse, BRAVE: _brave, OPENVERSE: _openverse}.get(
+        provider
+    )
+    if finder is None:
+        raise ReferenceImageError(
+            f"reference_image_provider {provider!r} is not one this build knows; "
+            "the ones it knows are "
+            + " and ".join(repr(name) for name in PROVIDERS)
+        )
+    return provider, finder
+
+
+def _listed(query: str, provider: str, candidates: "list[_Candidate]",
+            skip: "set[str]" = frozenset()) -> dict:
+    """和 ``_first_usable`` 同一个位置、同一组参数，但不下载：把搜到的原样
+    列出来给人挑。用过的那几张不跳过，标出来——挑不挑由人决定。"""
+    photos = []
+    seen: set = set()
+    for candidate in candidates:
+        url = str(candidate[0] or "").strip()
+        if not url.lower().startswith(("http://", "https://")) or url in seen:
+            continue
+        seen.add(url)
+        page, licence, creator = (list(candidate[1:4]) + ["", "", ""])[:3]
+        thumb = str(candidate[4] if len(candidate) > 4 else "").strip()
+        photos.append({
+            "url": url,
+            "thumb": thumb if thumb.lower().startswith(("http://", "https://"))
+            else url,
+            "page_url": str(page or url),
+            "host": _host(str(page or url)),
+            "license": str(licence or ""),
+            "creator": str(creator or ""),
+            "used": url in skip,
+        })
+    if not photos:
+        raise NothingFound(f"{provider} found no pictures for {query!r}")
+    return {"query": query, "provider": provider, "photos": photos}
+
+
+def candidates(
+    query: str,
+    *,
+    app_config: Optional[dict] = None,
+    avoid: "Any" = (),
+) -> dict:
+    """搜一遍，把结果列出来，不下载任何一张。
+
+    和 ``search`` 走的是同一家供应商、同一套"搜不到就把词放宽"——区别只在
+    最后一步：那边自己拿第一张能用的，这边交给人挑。以前只有那一条路，而
+    "第一张能用的"常常不是用户想要的那一张：搜"彗星号客机"，第一张可能是
+    博物馆里的残骸。
+    """
+    wanted = " ".join(str(query or "").split())
+    if not wanted:
+        raise ReferenceImageError("there is nothing to search for: the query is empty")
+    provider, finder = _finder(app_config)
+    skip = {str(one).strip() for one in (avoid or ()) if str(one or "").strip()}
+    tried: list[str] = []
+    last: Optional[NothingFound] = None
+    for attempt in _widening(wanted)[:BROADEN_TRIES]:
+        tried.append(attempt)
+        try:
+            return finder(attempt, app_config, skip, pick=_listed)
+        except NothingFound as exc:
+            last = exc
+    if last is None:  # pragma: no cover - _widening 至少给一个词
+        raise ReferenceImageError(f"{provider} found nothing for {wanted!r}")
+    if len(tried) == 1:
+        raise last
+    raise NothingFound(f"{last} (the search started as {tried[0]!r})")
+
+
+def chosen(photo: Mapping, query: str = "") -> Reference:
+    """用户在搜索结果里挑的那一张。下载、限大小、限类型、重新编码——和自动
+    挑的那条路是同一套检查。挑中的这张下不来就说这张下不来，不换一张。"""
+    url = str(photo.get("url") or "").strip()
+    if not url.lower().startswith(("http://", "https://")):
+        raise ReferenceImageError("that picture has no address to download it from")
+    try:
+        data, width, height = _fetch(url)
+    except ReferenceImageError as exc:
+        raise ReferenceImageError(
+            f"the picture you chose from {_host(url)} could not be used: it {exc}"
+        ) from None
+    return Reference(
+        data=data, query=str(query or photo.get("query") or ""),
+        source_url=url, page_url=str(photo.get("page_url") or url),
+        provider=str(photo.get("provider") or ""), width=width, height=height,
+        licence=str(photo.get("license") or ""),
+        creator=str(photo.get("creator") or ""),
+    )
+
+
+UPLOAD = "upload"
+
+
+def uploaded(raw: bytes, name: str = "") -> Reference:
+    """用户自己传上来的照片。和下载来的走同一个解码：验尺寸、丢 EXIF、
+    重新编码成 PNG。"""
+    if not raw:
+        raise ReferenceImageError("that file is empty")
+    if len(raw) > MAX_BYTES:
+        raise ReferenceImageError(
+            f"that file is over the {MAX_BYTES // (1024 * 1024)} MB limit"
+        )
+    try:
+        data, width, height = _decode(raw)
+    except ReferenceImageError as exc:
+        raise ReferenceImageError(f"{name or 'that file'} {exc}") from None
+    return Reference(
+        data=data, query="", source_url="", page_url="", provider=UPLOAD,
+        width=width, height=height,
+    )
+
+
 def _widening(query: str) -> "list[str]":
     """同一个意思，一次比一次宽。
 
@@ -272,7 +394,8 @@ def _safe_on(app_config: Optional[dict]) -> bool:
 
 
 def _google_cse(
-    query: str, app_config: Optional[dict], skip: "set[str]" = frozenset()
+    query: str, app_config: Optional[dict], skip: "set[str]" = frozenset(),
+    pick: Any = None,
 ) -> Reference:
     key = str(_setting(app_config, "google_search_api_key", "")).strip()
     engine = str(_setting(app_config, "google_search_engine_id", "")).strip()
@@ -336,7 +459,9 @@ def _google_cse(
         ) from None
 
     items = payload.get("items") if isinstance(payload, dict) else None
-    return _first_usable(query, GOOGLE_CSE, _google_candidates(items), skip)
+    return (pick or _first_usable)(
+        query, GOOGLE_CSE, _google_candidates(items), skip
+    )
 
 
 def _google_candidates(items: Any) -> "list[_Candidate]":
@@ -354,7 +479,8 @@ def _google_candidates(items: Any) -> "list[_Candidate]":
 
 
 def _openverse(
-    query: str, app_config: Optional[dict], skip: "set[str]" = frozenset()
+    query: str, app_config: Optional[dict], skip: "set[str]" = frozenset(),
+    pick: Any = None,
 ) -> Reference:
     """没有 key 这一步。不配置任何东西也能用，这是选它的全部理由。"""
     params = {
@@ -434,7 +560,9 @@ def _openverse(
             "licensed pictures, so it is far smaller than a web search and a "
             "very specific subject may simply not be in it."
         )
-    return _first_usable(query, OPENVERSE, _openverse_candidates(results), skip)
+    return (pick or _first_usable)(
+        query, OPENVERSE, _openverse_candidates(results), skip
+    )
 
 
 def _openverse_candidates(results: Any) -> "list[_Candidate]":
@@ -460,6 +588,7 @@ def _openverse_candidates(results: Any) -> "list[_Candidate]":
                 str(item.get("foreign_landing_url") or ""),
                 _openverse_licence(item),
                 str(item.get("creator") or "").strip(),
+                str(item.get("thumbnail") or "").strip(),
             )
         )
     return out
@@ -481,7 +610,8 @@ def _openverse_licence(item: dict) -> str:
 
 
 def _brave(
-    query: str, app_config: Optional[dict], skip: "set[str]" = frozenset()
+    query: str, app_config: Optional[dict], skip: "set[str]" = frozenset(),
+    pick: Any = None,
 ) -> Reference:
     key = str(_setting(app_config, "brave_search_api_key", "")).strip()
     if not key:
@@ -529,7 +659,9 @@ def _brave(
         ) from None
 
     results = payload.get("results") if isinstance(payload, dict) else None
-    return _first_usable(query, BRAVE, _brave_candidates(results), skip)
+    return (pick or _first_usable)(
+        query, BRAVE, _brave_candidates(results), skip
+    )
 
 
 def _brave_candidates(results: Any) -> "list[_Candidate]":
@@ -582,7 +714,10 @@ def _first_usable(
     refused: list[str] = []
     tried: set[str] = set()
     already = 0
-    for url, page, licence, creator in candidates:
+    for candidate in candidates:
+        # 只取前四项：后面加的字段（缩略图）这里用不上，而老的调用方给的
+        # 还是四项的元组。
+        url, page, licence, creator = tuple(candidate)[:4]
         # 试过几条就够了。头几条打不开是常事（防盗链、403、已经删了），但
         # 一直试下去会把一次点击拖成半分钟。
         if len(refused) >= MAX_ATTEMPTS:

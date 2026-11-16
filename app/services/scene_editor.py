@@ -46,7 +46,7 @@ from app.models.schema import (
     VideoTransitionMode,
 )
 from app.services import llm, material, picture_shelf, reference_image
-from app.services import scene_manifest, task_artifacts, timeline
+from app.services import edit_history, scene_manifest, task_artifacts, timeline
 from app.services import bgm, transition_sound, voice
 from app.utils import subtitle_reader, subtitle_writer
 from app.services import state as sm
@@ -295,6 +295,155 @@ def find_reference_photo(
         return reference_image.search(wanted, avoid=used)
     except reference_image.ReferenceImageError as exc:
         raise SceneError(str(exc)) from exc
+
+
+# ---------------------------------------------------------------------------
+# 挑一张照片
+# ---------------------------------------------------------------------------
+#
+# "照着照片重画"以前是全自动的：搜一遍，拿第一张下得来的，直接开画。画完
+# 三分钟之后才看到它拿的是哪一张——而"第一张下得来的"常常不是要的那一张。
+# 现在先把搜到的摆出来给人挑，也可以自己传一张。
+
+# 搜出来给人挑过的那些，按任务记着。排队的时候只认这里面的地址：否则
+# "照这个地址下载一张图"就成了一个谁都能让服务器去访问任意网址的接口。
+_OFFERED: dict = {}
+_OFFERED_TASKS = 40
+_OFFERED_PER_TASK = 200
+# 传上来、还没用掉的照片。放在内存里：它们只在"传完 → 点重画"这几秒里有用。
+_UPLOADED: dict = {}
+_UPLOADED_KEPT = 8
+_PHOTO_LOCK = threading.Lock()
+
+
+def _photo_search_words(task_id: str, index: Any, search: str,
+                        keyword: str | None) -> tuple:
+    """这一段该搜什么，以及这条片子里别的段已经用过哪些照片。"""
+    manifest = scene_manifest.load(task_id)
+    scenes = manifest["scenes"]
+    position = _scene_at(scenes, index)
+    scene = scenes[position]
+    term = str(keyword if keyword is not None else scene.get("keyword") or "").strip()
+    wanted = " ".join(str(search or "").split())
+    if not wanted:
+        spoken = narration_for_scenes(task_id, manifest)
+        line = ""
+        if 0 <= position < len(spoken):
+            line = " ".join(str(spoken[position] or "").split())
+        subject = str(
+            getattr(load_params(task_id), "video_subject", "") or ""
+        ).strip()
+        try:
+            wanted = llm.image_search_query(subject, line, term)
+        except llm.TermGenerationError as exc:
+            raise SceneError(str(exc)) from exc
+    used = []
+    for other_at, other in enumerate(scenes):
+        if other_at == position:
+            continue
+        recorded = other.get("reference")
+        if isinstance(recorded, dict):
+            source = str(recorded.get("source_url") or "").strip()
+            if source:
+                used.append(source)
+    return wanted, used
+
+
+def reference_photo_words(task_id: str, index: Any) -> dict:
+    """这一段该搜什么：只写词，不搜。
+
+    和搜索分成两步，是为了让词先落到搜索框里。合在一起的话，搜索那一步
+    失败（图库抽风是常事）时词也跟着丢了，用户面前是一个空框和一句报错，
+    只能自己从头想搜什么。
+
+    上次照着照片画过的那一段，直接用上次的词：那是用户已经见过、多半也
+    改过的，比让模型重新猜一遍靠得住。
+    """
+    scenes = scene_manifest.load(task_id)["scenes"]
+    scene = scenes[_scene_at(scenes, index)]
+    recorded = scene.get("reference")
+    before = ""
+    if isinstance(recorded, dict):
+        before = " ".join(str(recorded.get("query") or "").split())
+    if before:
+        return {"query": before, "from": "last"}
+    words, _ = _photo_search_words(task_id, index, "", None)
+    return {"query": words, "from": "model"}
+
+
+def find_reference_photos(
+    task_id: str,
+    index: Any,
+    *,
+    search: str = "",
+    keyword: str | None = None,
+) -> dict:
+    """搜一遍，把结果列出来给人挑。不下载、不开画。
+
+    ``search`` 空着就让模型从这一段的台词和提示词里写搜索词（和自动那条路
+    是同一步）；给了就照它搜。别的段已经用过的照片不藏起来，只标出来。
+    """
+    wanted, used = _photo_search_words(task_id, index, search, keyword)
+    try:
+        found = reference_image.candidates(wanted, avoid=used)
+    except reference_image.ReferenceImageError as exc:
+        raise SceneError(str(exc)) from exc
+    with _PHOTO_LOCK:
+        offered = _OFFERED.pop(task_id, {})
+        for photo in found["photos"]:
+            offered.pop(photo["url"], None)
+            offered[photo["url"]] = {
+                **photo, "query": found["query"], "provider": found["provider"],
+            }
+        for stale in list(offered)[:-_OFFERED_PER_TASK]:
+            offered.pop(stale, None)
+        _OFFERED[task_id] = offered
+        for stale in list(_OFFERED)[:-_OFFERED_TASKS]:
+            _OFFERED.pop(stale, None)
+    return found
+
+
+def chosen_reference_photo(task_id: str, url: str) -> Any:
+    """用户在搜索结果里挑的那一张，下载回来。
+
+    只认刚才搜出来给他看过的地址。
+    """
+    with _PHOTO_LOCK:
+        photo = dict(_OFFERED.get(task_id, {}).get(str(url or "").strip()) or {})
+    if not photo:
+        raise SceneError(
+            "that picture is not one of the search results shown for this "
+            "video; search again and choose from the results"
+        )
+    try:
+        return reference_image.chosen(photo)
+    except reference_image.ReferenceImageError as exc:
+        raise SceneError(str(exc)) from exc
+
+
+def keep_uploaded_photo(raw: bytes, name: str = "") -> dict:
+    """收下用户传上来的一张照片，返回一个凭它来用的名字。"""
+    import uuid
+
+    try:
+        reference = reference_image.uploaded(raw, name)
+    except reference_image.ReferenceImageError as exc:
+        raise SceneError(str(exc)) from exc
+    token = uuid.uuid4().hex
+    with _PHOTO_LOCK:
+        _UPLOADED[token] = reference
+        for stale in list(_UPLOADED)[:-_UPLOADED_KEPT]:
+            _UPLOADED.pop(stale, None)
+    return {"file": token, "width": reference.width, "height": reference.height,
+            "name": str(name or "")}
+
+
+def uploaded_reference_photo(token: str) -> Any:
+    with _PHOTO_LOCK:
+        reference = _UPLOADED.get(str(token or "").strip())
+    if reference is None:
+        raise SceneError("that uploaded photo is no longer here; upload it again")
+    return reference
 
 
 def regenerate_material(
@@ -800,6 +949,147 @@ def delete_scene(task_id: str, index: Any) -> list[dict]:
         return scene_manifest.load(task_id)["scenes"]
 
 
+def _on_screen_seconds(task_id: str, scene: dict) -> float:
+    """这一段在成片里停多久。没设过时长就是"素材剩下的全长"。"""
+    timing = scene_manifest.scene_timing(scene)
+    if timing["duration"] is not None:
+        return float(timing["duration"])
+    material = scene_manifest.resolve_material(task_id, scene.get("material"))
+    speed = float(getattr(load_params(task_id), "video_clip_speed", 1.0) or 1.0)
+    remaining = timeline.probe_duration(material) - timing["trim_start"]
+    return max(0.0, remaining / max(speed, 1e-6))
+
+
+# 分出来的两段各自至少这么长。再短在时间线上就点不中了，渲染出来也只是一闪。
+MIN_SPLIT_SECONDS = 0.2
+
+
+def split_scene(task_id: str, index: Any, at: Any) -> list[dict]:
+    """在这一段的 ``at`` 秒处切一刀，变成前后两段。
+
+    两段用的是同一个素材文件：前一段到切点为止，后一段从切点接着放。所以
+    切完马上渲染，成片和没切之前一模一样——切只是多了一个可以单独拖、单独
+    换图、单独加转场的接缝，这正是 CapCut 里"分割"的意思。
+
+    ``at`` 是这一段**在成片里**的时间（从这一段开头算起），不是素材上的
+    时间：变速之后两者不相等，而用户看着的是时间线。
+    """
+    _require_idle(task_id)
+    with _editing(task_id):
+        scenes = _scenes_or_fail(task_id)
+        position = _scene_at(scenes, index)
+        scene = scenes[position]
+        if not str(scene.get("material") or "").strip():
+            raise SceneError(
+                f"scene {position} has no picture yet, so there is nothing to split"
+            )
+        try:
+            cut = float(at)
+        except (TypeError, ValueError) as exc:
+            raise SceneError("the split point must be a number of seconds") from exc
+        total = _on_screen_seconds(task_id, scene)
+        if not MIN_SPLIT_SECONDS <= cut <= total - MIN_SPLIT_SECONDS:
+            raise SceneError(
+                f"scene {position} is {total:.2f}s long; split it between "
+                f"{MIN_SPLIT_SECONDS:.1f}s and {max(total - MIN_SPLIT_SECONDS, 0):.2f}s"
+            )
+        speed = float(getattr(load_params(task_id), "video_clip_speed", 1.0) or 1.0)
+        start = scene_manifest.scene_timing(scene)["trim_start"]
+
+        second = dict(scene)
+        second["id"] = scene_manifest.new_scene_id()
+        second["trim_start"] = round(start + cut * speed, 3)
+        second["duration"] = round(total - cut, 3)
+        # 台词按时间对到画面上，不跟着某一段走。后一段不带前一段手改过的那句。
+        second["narration"] = ""
+        second.pop("narration_edited", None)
+        second.pop("history", None)
+        scene["trim_start"] = round(start, 3)
+        scene["duration"] = round(cut, 3)
+        scenes.insert(position + 1, second)
+        with edit_history.labelled("Split scene"):
+            scene_manifest.save_scenes(task_id, scenes)
+        return scene_manifest.load(task_id)["scenes"]
+
+
+def duplicate_scene(task_id: str, index: Any) -> list[dict]:
+    """把这一段复制一份，放在它后面。同一张图、同样的入点和时长。"""
+    _require_idle(task_id)
+    with _editing(task_id):
+        scenes = _scenes_or_fail(task_id)
+        position = _scene_at(scenes, index)
+        copy = dict(scenes[position])
+        copy["id"] = scene_manifest.new_scene_id()
+        copy["narration"] = ""
+        copy.pop("narration_edited", None)
+        copy.pop("history", None)
+        scenes.insert(position + 1, copy)
+        with edit_history.labelled("Duplicate scene"):
+            scene_manifest.save_scenes(task_id, scenes)
+        return scene_manifest.load(task_id)["scenes"]
+
+
+def history_state(task_id: str) -> dict:
+    """能撤销几步、能重做几步。"""
+    return edit_history.state(task_id)
+
+
+def _step_history(task_id: str, direction: str) -> dict:
+    _require_idle(task_id)
+    with _editing(task_id):
+        payload = scene_manifest.load_raw(task_id)
+        current = scene_manifest.load(task_id)["scenes"]
+        wanted = edit_history.step(task_id, direction, payload, current)
+        if wanted is None:
+            raise SceneError(f"there is nothing to {direction}")
+
+        # 每一段"换过哪些图"的那份记录不跟着倒回去：它是"画过的每一张图"的
+        # 索引，撤销一次删除不该让它少一条。按身份把现在的接回去。
+        kept = {scene.get("id"): scene.get("history") for scene in current}
+        restored = []
+        for scene in wanted.get("scenes") or []:
+            scene = dict(scene)
+            if kept.get(scene.get("id")):
+                scene["history"] = kept[scene["id"]]
+            restored.append(scene)
+        if not restored:
+            raise SceneError(f"that step has no scenes in it, so it cannot be used")
+
+        script = str(wanted.get("script") or "")
+        same_recording = wanted.get("audio") == edit_history.snapshot(
+            payload, current
+        )["audio"]
+        words_changed = script != str(payload.get("script") or "") or [
+            scene.get("narration") for scene in restored
+        ] != [scene.get("narration") for scene in current]
+        extra: dict[str, Any] = {}
+        if script and script != str(payload.get("script") or ""):
+            extra["script"] = script
+        if same_recording:
+            # 配音还是那一份：它过没过期，就是那一步当时的样子。
+            extra["audio_stale"] = bool(wanted.get("audio_stale"))
+        elif words_changed:
+            # 这中间重新配过音。倒回去的台词和现在这份配音对不上。
+            extra["audio_stale"] = True
+        with edit_history.paused():
+            scene_manifest.save_scenes(task_id, restored, **extra)
+        return {
+            "scenes": scene_manifest.load(task_id)["scenes"],
+            "label": str(wanted.get("label") or ""),
+            "history": edit_history.state(task_id),
+        }
+
+
+def undo(task_id: str) -> dict:
+    """撤销时间线上的上一步。"""
+    return _step_history(task_id, "undo")
+
+
+def redo(task_id: str) -> dict:
+    """把刚撤销的那一步做回来。"""
+    return _step_history(task_id, "redo")
+
+
 def reorder_scenes(task_id: str, order: Sequence[Any]) -> list[dict]:
     """按给定的原始下标顺序重排场景。
 
@@ -1066,7 +1356,9 @@ def realign_narration(task_id: str) -> bool:
             continue
         index = item["scene"]
         texts[index] = "\n".join(filter(None, (texts[index], block))).strip()
-    scene_manifest.apply_narration_pairing(task_id, texts)
+    # 这是程序在补，不是用户在改：不该算成一步编辑，更不该清掉"重做"。
+    with edit_history.automatic():
+        scene_manifest.apply_narration_pairing(task_id, texts)
     logger.info(
         f"re-paired {len(lines)} narration lines across {len(scenes)} scenes "
         f"by on-screen time, task_id: {task_id}"
@@ -1177,6 +1469,9 @@ def describe(task_id: str, endpoint: str = "", *, with_timing: bool = False) -> 
     payload["image_styles"] = (
         list(image_style_model.image_style_ids()) if supports_style else []
     )
+    # 这条片子叫什么。顶栏要显示它：开着三个标签页的时候，一串 uuid 说不出
+    # 哪个是哪个。
+    payload["subject"] = str(getattr(params, "video_subject", "") or "").strip()
     # 这条片子出片前的任务没有记过画风（这个字段比它们新），那时唯一能说的
     # 就是"按设置来"。界面要分得清这两种情况，否则对一个老任务说"和这条片子
     # 一样"等于撒谎——它用的其实是设置里现在那个风格。
