@@ -56,33 +56,39 @@ class ImageStyle:
 # The first entry must match the shipped default template verbatim, or a fresh
 # install would open the selector showing "Custom". Asserted in the tests.
 #
-# “stickman”的措辞是逐张比对出来的,不要随手改长。实测十余张图说明：模型
-# 画这类角色时有很强的固有偏好,再怎么写“细黑线四肢”也只会得到圆头白身的
-# 吉祥物;真正会丢的是动作和道具。所以“手里拿着与动作相关的物体、充满动感
-# 的姿势”放在前面,背景描述放在最后——把词都花在背景上的那一版画出了漂亮的
-# 风景和一个呆站着的角色。另外“whiteboard”不能用,模型会真的画一块白板。
-# The wording here was arrived at by comparing frames, not by writing prose.
-# The test images showed the model has a strong prior for this round-headed
-# mascot and ignores limb geometry however it is described -- what it actually
-# drops is the action and the prop. So the action clause comes first and the
-# background clause last: the variant that spent its words on scenery drew a
-# beautiful landscape with a figure standing in it doing nothing. "objects of
-# the action" beats "tools of the action", which biases towards implements and
-# got a spatula for a keyword about two bottles. "whiteboard" is unusable --
-# the model draws an actual whiteboard, frame and all.
+# “stickman”重写过。原来那一版（"cute stick figure cartoon, round white
+# head, ... thin black line arms and legs"）画出来的是个圆头白身的吉祥物，
+# 不是火柴人。现在这一版照的是 YouTube 上"火柴人科普"那一路的样子：光头
+# 大白脑袋、两个小黑点眼睛加短眉毛、细黑线的胳膊和腿、身上一件纯色无袖
+# 小褂子，粗黑描边、平涂颜色、背景画满。逐张比对出来的几条：
+#   * 不能说 "cute" 和 "cartoon character"——模型一看到就走它那个白团子
+#     吉祥物的老路，四肢怎么描述都没用；
+#   * "胳膊和腿是单根细黑线"要单独说成一句；
+#   * 衣服必须说成"套在火柴身体外面的无袖小褂子"。只说"穿着纯色衬衫"，
+#     身体就被画成一整块色块，胳膊也跟着变粗；
+#   * 背景要明说"画满"，否则一半的图是白底。
+# 不能用的词："storyboard"（画出一页分镜格子）、"comic"和"frame"（给每张
+# 图加一个画框）、"whiteboard"（画出一块真的白板）。
+# The stickman preset was rewritten. The old wording drew a round white
+# mascot, not a stick figure. This one follows the look of the "stickman
+# explainer" channels: a big bald white head, tiny dot eyes with short
+# eyebrows, thin black line limbs, a small plain-coloured sleeveless tunic,
+# thick black outlines, flat colours and a fully drawn background. What the
+# test frames showed:
+#   * never "cute" or "cartoon character": that sends the model to its own
+#     white-blob mascot whatever is said about the limbs;
+#   * "arms and legs that are single thin black lines" has to be its own clause;
+#   * the clothing must be "a small sleeveless tunic over the stick body". A
+#     plain "wearing a coloured shirt" turns the whole body into a block of
+#     colour and thickens the arms with it;
+#   * the background has to be asked for, or half the pictures are on white.
+# Unusable words: "storyboard" (draws a grid of panels), "comic" and "frame"
+# (put a border round every picture), "whiteboard" (draws an actual one).
 #
-# 两个已知局限,不必再去调措辞：一是“贴地”的动作(弯腰、蹲下、在地面操作)
-# 大约一半的出图会丢掉道具,换过的每一种写法都这样,是模型本身的问题;二是
-# “expressive eyebrows”偶尔会画成皱眉,因为斜眉在模型眼里就是生气。想改表
-# 情只能连带牺牲别的,实测把它换成“与内容相称的表情”后,“存钱”这个词画出了
-# 一张哭丧脸。
-# Two known limits, so nobody burns another afternoon on the wording. Actions
-# at ground level -- bending, crouching, working on the floor -- drop the prop
-# in roughly half the draws, and did so in every wording tried; that is the
-# model, not the prompt. And "expressive eyebrows" occasionally lands as a
-# frown, because angled brows read as anger. Replacing it with "an expression
-# that matches what is happening" was tested and is worse: it drew a
-# miserable face for a keyword about saving money.
+# 后面那八种是和前面拉开距离的：前十二种里写实四种、绘画四种，后八种每一种
+# 都是"一眼认得出来"的做法（铅笔、像素、黏土、剪纸……）。
+# The last eight are deliberately far from the first twelve: each is a look
+# recognisable at a glance (pencil, pixels, clay, cut paper, ...).
 IMAGE_STYLE_PRESETS = (
     ImageStyle(
         "photorealistic",
@@ -147,18 +153,66 @@ IMAGE_STYLE_PRESETS = (
     ImageStyle(
         "stickman",
         "Image Style Stickman",
-        "{term}, cute stick figure cartoon, round white head, dot eyes,"
-        " expressive eyebrows, big happy smile, thin black line arms and legs,"
-        " clearly holding the objects of the action, mid-action pose full of"
-        " energy, bright flat vector colours, simple flat background showing"
-        " where this happens, full body centred, clean uncluttered composition,"
-        " wide 16:9 explainer illustration",
+        "{term}, stickman explainer cartoon with thick black outlines and flat"
+        " colours, the people are stick figures: a big bald white round head"
+        " with tiny dot eyes, short eyebrows and a small mouth, arms and legs"
+        " that are single thin black lines, and a small sleeveless coloured"
+        " tunic over the stick body, the scene behind them fully drawn with"
+        " flat colour sky, ground and objects, hand-drawn, no shading",
     ),
     ImageStyle(
         "comic",
         "Image Style Comic",
         "{term}, comic book art, bold ink outlines, halftone shading, dynamic"
         " composition, saturated colour",
+    ),
+    ImageStyle(
+        "pencil_sketch",
+        "Image Style Pencil Sketch",
+        "{term}, graphite pencil sketch on white paper, fine cross-hatching,"
+        " hand-drawn linework, monochrome, sketchbook drawing",
+    ),
+    ImageStyle(
+        "pixel_art",
+        "Image Style Pixel Art",
+        "{term}, 16-bit pixel art, chunky visible pixels, limited colour"
+        " palette, retro video game scene, crisp edges",
+    ),
+    ImageStyle(
+        "claymation",
+        "Image Style Claymation",
+        "{term}, claymation stop-motion scene, handmade plasticine figures"
+        " with visible fingerprints, miniature set, soft studio lighting",
+    ),
+    ImageStyle(
+        "paper_cutout",
+        "Image Style Paper Cutout",
+        "{term}, layered paper cut-out illustration, coloured craft paper"
+        " shapes, soft drop shadows between the layers, handmade collage",
+    ),
+    ImageStyle(
+        "engraving",
+        "Image Style Engraving",
+        "{term}, antique copperplate engraving, fine black cross-hatched lines"
+        " on aged cream paper, 19th century book illustration",
+    ),
+    ImageStyle(
+        "low_poly",
+        "Image Style Low Poly",
+        "{term}, low-poly 3D art, faceted geometric shapes, flat shaded"
+        " polygons, soft lighting, clean simple background",
+    ),
+    ImageStyle(
+        "noir",
+        "Image Style Noir",
+        "{term}, film noir still, high-contrast black and white, deep hard"
+        " shadows, low-key lighting, 1940s crime film atmosphere, light haze",
+    ),
+    ImageStyle(
+        "cyberpunk",
+        "Image Style Cyberpunk",
+        "{term}, cyberpunk illustration, night scene lit by pink and blue neon"
+        " light, wet reflective surfaces, futuristic glow, highly detailed",
     ),
 )
 

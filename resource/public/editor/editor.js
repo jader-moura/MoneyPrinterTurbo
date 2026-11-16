@@ -4677,6 +4677,10 @@ const STYLE_LABELS = {
   anime: "Anime", digital_art: "Digital art", oil_painting: "Oil painting",
   watercolour: "Watercolour", three_d: "3D render", flat_vector: "Flat vector",
   stickman: "Stickman explainer", comic: "Comic book",
+  pencil_sketch: "Pencil sketch", pixel_art: "Pixel art",
+  claymation: "Claymation", paper_cutout: "Paper cut-out",
+  engraving: "Old engraving", low_poly: "Low-poly", noir: "Film noir",
+  cyberpunk: "Cyberpunk neon",
 };
 
 function styleLabel(id) {
