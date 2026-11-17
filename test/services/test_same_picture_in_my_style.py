@@ -365,8 +365,11 @@ class TestThePage:
         assert "if (strength === SAME_PICTURE) body.follow = SAME_PICTURE;" in queue
         assert "else if (strength) body.strength = strength;" in queue
 
-    def test_both_buttons_read_the_choice_the_same_way(self):
-        assert JS.count("photoKeepOf(keep.input)") == 2
+    def test_every_way_of_choosing_a_photo_reads_the_one_choice(self):
+        # 选择现在在挑照片的那扇窗里，所有的路都从 ``redrawFromPhoto`` 过。
+        redraw = JS.split("function redrawFromPhoto(extra)")[1].split("\n}\n")[0]
+        assert "const strength = photoKeepOf(photoKeepChoice.input);" in redraw
+        assert JS.count("photoKeepOf(") == 2  # 定义一次，用一次
 
     def test_the_queue_and_the_scene_say_which_way_it_was(self):
         assert '(job.follow ? " · same picture, my style" : "")' in JS

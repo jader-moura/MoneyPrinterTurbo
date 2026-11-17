@@ -59,6 +59,7 @@ from app.models.schema import (
     SceneEffectsRequest,
     SceneRegenJobResponse,
     SceneRegenQueueResponse,
+    ScenePhotoPickRequest,
     SceneRegenerateRequest,
     SceneReorderRequest,
     SceneReplaceRequest,
@@ -1265,6 +1266,21 @@ def scene_photo_words(
 
 
 @router.get(
+    "/tasks/{task_id}/photos/candidates",
+    summary="Which scenes name something real that a photograph exists of",
+)
+def scene_photo_candidates(
+    request: Request, task_id: str = Path(..., description="Task ID")
+):
+    request_id = base.get_task_id(request)
+    _require_task(task_id, request_id)
+    data = _handle(
+        task_id, request_id, lambda: scene_editor.photo_candidates(task_id)
+    )
+    return utils.get_response(200, data)
+
+
+@router.get(
     "/tasks/{task_id}/photos/used/{name}",
     summary="The photograph a scene was drawn from",
 )
@@ -1346,6 +1362,56 @@ def upload_scene_photo(
     return utils.get_response(200, data)
 
 
+@router.get(
+    "/tasks/{task_id}/scenes/{index}/photo-pick",
+    summary="The photograph saved for a scene before it was drawn",
+)
+def scene_photo_pick(
+    request: Request,
+    task_id: str = Path(..., description="Task ID"),
+    index: int = Path(..., ge=0, description="Scene index"),
+):
+    request_id = base.get_task_id(request)
+    _require_task(task_id, request_id)
+    path = _handle(
+        task_id, request_id, lambda: scene_editor.picked_photo_path(task_id, index)
+    )
+    return FileResponse(path, media_type="image/png")
+
+
+@router.post(
+    "/tasks/{task_id}/scenes/{index}/photo-pick",
+    summary="Keep the photo chosen for a scene; nothing is drawn yet",
+)
+def keep_scene_photo_pick(
+    request: Request,
+    body: ScenePhotoPickRequest,
+    task_id: str = Path(..., description="Task ID"),
+    index: int = Path(..., ge=0, description="Scene index"),
+):
+    """开画之前给一段定下照片。照片现在就下载、验过、存进这条片子里：
+    用不了的话当场说，而不是十几张都挑完了才说。"""
+    request_id = base.get_task_id(request)
+    _require_task(task_id, request_id)
+
+    def keep():
+        photo = None
+        if not body.skip:
+            if body.photo_upload:
+                photo = scene_editor.uploaded_reference_photo(body.photo_upload)
+            elif body.photo_kept:
+                photo = scene_editor.kept_reference_photo(task_id, body.photo_kept)
+            elif body.photo_url:
+                photo = scene_editor.chosen_reference_photo(task_id, body.photo_url)
+        return scene_editor.keep_photo_pick(
+            task_id, index,
+            photo=photo, skip=body.skip, search=str(body.search or ""),
+            strength=body.strength, follow=str(body.follow or ""),
+        )
+
+    return utils.get_response(200, _handle(task_id, request_id, keep))
+
+
 @router.post(
     "/tasks/{task_id}/scenes/{index}/material/queue",
     response_model=SceneRegenJobResponse,
@@ -1383,6 +1449,8 @@ def queue_scene_material(
             return scene_editor.uploaded_reference_photo(body.photo_upload)
         if body.photo_kept:
             return scene_editor.kept_reference_photo(task_id, body.photo_kept)
+        if body.photo_picked:
+            return scene_editor.picked_reference_photo(task_id, index)
         if body.photo_url:
             return scene_editor.chosen_reference_photo(task_id, body.photo_url)
         return None

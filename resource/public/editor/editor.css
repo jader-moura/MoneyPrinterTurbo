@@ -952,6 +952,9 @@ body {
 /* 挑照片那一屏。格子借的是"画过的图"那一套；照片比例不一，所以图按
    原比例缩进格子里，不裁——裁掉的那一块可能正是要看的。 */
 .photo-search-row { margin-bottom: 8px; }
+.photo-line { margin: 0 0 8px; font-style: italic; }
+.photo-line:empty { display: none; }
+#photo-keep { margin-bottom: 8px; }
 .photo-search-row input {
   flex: 1;
   padding: 7px 10px;

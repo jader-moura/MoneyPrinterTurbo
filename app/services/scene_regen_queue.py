@@ -387,17 +387,27 @@ def enqueue_pending(task_id: str) -> dict:
         for scene in todo
     ]
 
+    # 开画之前定过照片的那几段照着各自那张照片画，其余的照提示词画。
+    picks = scene_editor.photo_picks_for_drawing(task_id)
+    jobs = [
+        _Job(
+            task_id=task_id,
+            index=plan["index"],
+            keyword=plan["keyword"],
+            image_style=None,
+            anchor=plan["scene_id"],
+            material=plan["material"],
+            **picks.get(plan["scene_id"], {}),
+        )
+        for plan in plans
+    ]
+    # 照片的排前面，用改图模型的那几张又排在最前：换一次模型要一分钟，
+    # 同一种画法挨在一起就只换一次。同一组里还是时间线的顺序。
+    jobs.sort(key=lambda job: 0 if job.follow else 1 if job.from_photo else 2)
+
     queued = []
     with _LOCK:
-        for plan in plans:
-            job = _Job(
-                task_id=task_id,
-                index=plan["index"],
-                keyword=plan["keyword"],
-                image_style=None,
-                anchor=plan["scene_id"],
-                material=plan["material"],
-            )
+        for job in jobs:
             _QUEUE.append(job)
             queued.append(job)
         _ensure_worker()
@@ -408,6 +418,7 @@ def enqueue_pending(task_id: str) -> dict:
     )
     return {
         "queued": len(queued),
+        "from_photos": sum(1 for job in queued if job.from_photo),
         "jobs": [job.payload() for job in queued],
         **snapshot(task_id),
     }

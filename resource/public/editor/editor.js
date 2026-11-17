@@ -118,6 +118,8 @@ const ui = {
   photoNote: el("photo-note"), photoGrid: el("photo-grid"),
   photoUpload: el("photo-upload"), photoAuto: el("photo-auto"),
   photoClose: el("photo-close"),
+  photoLine: el("photo-line"), photoKeepSlot: el("photo-keep"),
+  photoKept: el("photo-kept"), photoSkip: el("photo-skip"),
   photoGoogle: el("photo-google"), photoGoogleNote: el("photo-google-note"),
   undo: el("undo"), redo: el("redo"), split: el("split"),
   duplicate: el("duplicate"), deleteScene: el("delete-scene"),
@@ -843,6 +845,7 @@ function drawApprove() {
   // 画风、一种不对的提示词写法画完——那要几个小时，而且看得出不对的时候
   // 已经付过钱了。队列里已经有活了就收起来：整批都开了，再说"先试一张"已经晚了。
   const sample = queued ? null : sampleScene();
+  const fromPhotos = queued ? 0 : photoQuota().count;
 
   ui.approveCount.textContent = queued
     ? `Drawing ${queued} picture${queued === 1 ? "" : "s"}…`
@@ -860,6 +863,11 @@ function drawApprove() {
       + (drawn
         ? ` The ${drawn} already drawn ${drawn === 1 ? "is" : "are"} left `
           + "alone."
+        : "")
+      + (fromPhotos
+        ? ` You will first choose a photo for up to ${fromPhotos} of them `
+          + "— the ones that name a real person, place or thing; nothing is "
+          + "queued until all are chosen."
         : "");
 
   ui.approveOne.hidden = !sample;
@@ -891,7 +899,54 @@ ui.approveOne.addEventListener("click", async () => {
   await queueRegeneration(sample.index, null, null);
 });
 
-ui.approveDraw.addEventListener("click", () => run("Queueing the pictures", async () => {
+ui.approveDraw.addEventListener("click", async () => {
+  if (state.busy) return;
+  await savePromptEdit();
+  // 这条片子有几张是要照着照片画的：先把那几张的照片挑完，一张图都不排。
+  // 挑完了（见 ``finishPhotoRound``）才连同其余的一起排进队列。
+  if (!photoQuota().count) {
+    drawPending();
+    return;
+  }
+  // 哪几段：有真人、真地方、真东西的那几段。场景切出来的时候就算好记下
+  // 了，这里只是读；那一次没算成才会在这里等模型。
+  state.busy = true;
+  say("Reading which scenes name a real person, place or thing…");
+  let found = null;
+  try {
+    found = await scenesForPhotos();
+  } catch (error) {
+    // 评不出来就停在这里：退回"隔几段取一段"是悄悄换了一种挑法。
+    say("Could not work out which scenes to draw from photos: "
+      + `${String(error.message || error).replace(/[.\s]+$/, "")}. `
+      + "Nothing was queued — click again to retry.",
+      "error");
+    return;
+  } finally {
+    state.busy = false;
+  }
+  if (!found.scenes.length) {
+    drawPending("No scene left to draw names a real person, place or "
+      + "thing, so none is drawn from a photo. ");
+    return;
+  }
+  // 定过照片的不再问：照片存在这条片子里，开画多少次用的都是它。
+  const todo = found.scenes.filter((scene) => !scene.photo_pick);
+  if (!todo.length) {
+    drawPending();
+    return;
+  }
+  photoRound.short = found.scenes.length < found.asked
+    ? `Only ${found.scenes.length} of the ${found.asked} scenes asked for name `
+      + "something real. "
+    : "";
+  startPhotoRound(todo);
+});
+
+/** 把还没画的全排进队列。定过照片的那几段照着各自那张照片画（先排），
+    其余的照提示词画——哪一段用哪张照片是服务端记着的，这里不用带。 */
+function drawPending(first) {
+  return run("Queueing the pictures", async () => {
   // 开画读的是清单里存着的提示词。框里还有没落盘的那一笔，现在存——
   // 两百张照旧词画完是这一屏最贵的一种错。
   await savePromptEdit();
@@ -901,9 +956,13 @@ ui.approveDraw.addEventListener("click", () => run("Queueing the pictures", asyn
   await fetchQueue();
   watchQueue();
   const count = (result && result.queued) || 0;
-  return `${count} picture${count === 1 ? "" : "s"} queued. They are drawn one `
-    + "at a time; you can keep editing or close this page and come back.";
-}));
+  const photos = (result && result.from_photos) || 0;
+  return `${first || ""}${count} picture${count === 1 ? "" : "s"} queued`
+    + (photos ? `, ${photos} of them from the photos you chose` : "")
+    + ". They are drawn one at a time; you can keep editing or close this "
+    + "page and come back.";
+  });
+}
 
 /** 所有改数据的操作都走这里：禁用按钮、显示真实错误、完成后重读一次。
 
@@ -3079,20 +3138,174 @@ tuckPanelHints();
    搜到的照片先摆出来，点哪张就照哪张画；也可以改搜索词再搜，或者传一张
    自己的。以前这一步是自动的，画完才知道它拿了哪一张。 */
 const photoPick = {
-  at: -1, keyword: null, style: null, strength: 0, photos: [], busy: false,
+  at: -1, keyword: null, style: null, photos: [], busy: false,
+  // 这一段现在那张图是照着哪张存下来的照片画的（没有就是空的）。
+  kept: "",
+  // 没照着画过，但开画之前给它定下过一张（从 Google 挑的、传的）。
+  saved: false,
   // 每一段上一次在这里搜的是什么。再打开时框里就是它。
   words: {},
 };
+
+// "这一张保留多少照片"就在这扇窗里选：它和照片是同一个决定，而且一口气
+// 给十几段挑照片的时候，每一张都可以不一样。
+const photoKeepChoice = photoKeepPicker();
+photoKeepChoice.wrap.title = "Measured on this model: keeping the photograph gives you "
+  + "the real subject and framing but a photographic picture, and loosely "
+  + "inspired gives your style exactly while the photograph only hints at "
+  + "the subject. Same picture gives both; it ignores the prompt.";
+ui.photoKeepSlot.appendChild(photoKeepChoice.wrap);
+
+/* ---------- 开画之前，一口气把照片挑完 ----------
+
+   开片时可以定"百分之多少的画面照着照片画"。点"开画"的时候，这几段一段
+   一段地过这扇窗：挑一张，下一段。全挑完之前一张图都不排——排了队就开始
+   占显卡，而挑照片要用的那个写搜索词的模型也要显卡。
+
+   每挑一张就存进这条片子里（服务端，连照片带选择）：中途关了窗、刷新了
+   页面、出图失败了重来，都不用再挑一遍，从没挑的那一段接着来。 */
+const photoRound = { on: false, scenes: [], at: -1, short: "" };
+
+// 模型给一段打的分到这个数才去找照片：6 是"具体、真实、多半有照片"。
+const PHOTO_WORTH = 6;
+
+/** 最多几段要照着照片画，以及能从哪几段里挑（还没画、也没在排队的）。
+
+    份额是按整条片子算的，已经照着照片画过（或者正排着照片的活）的算在
+    里面——否则每点一次"开画"都会在剩下的里面再要一遍。 */
+function photoQuota() {
+  const percent = Number((state.data || {}).photo_scene_percent) || 0;
+  const all = state.scenes || [];
+  if (percent <= 0 || !all.length) return { count: 0, waiting: [] };
+  const active = (state.queue.jobs || []).filter(
+    (job) => job.state === "queued" || job.state === "running");
+  const busy = new Set(active.map(jobScene));
+  const done = all.filter((scene) => scene.reference).length
+    + active.filter((job) => job.from_photo).length;
+  const waiting = all.filter(
+    (scene) => isPending(scene) && !busy.has(scene.index));
+  const count = Math.max(0, Math.min(waiting.length,
+    Math.round(all.length * percent / 100) - done));
+  return { count, waiting };
+}
+
+/** 哪几段要照着照片画：说到真实的人、地方、东西的那几段，人排最前。
+
+    不是隔几段取一段。够格的不到份额就少挑几段——拿一段"通货膨胀上升了"
+    去凑数，找来的只会是一张不相干的图。``asked`` 是份额本来要几段。 */
+async function scenesForPhotos() {
+  const { count, waiting } = photoQuota();
+  if (!count) return { scenes: [], asked: 0 };
+  const data = await call(
+    "GET", `/tasks/${encodeURIComponent(state.taskId)}/photos/candidates`);
+  const rated = new Map();
+  for (const one of (data && data.scenes) || []) rated.set(one.id, one);
+  const worth = waiting
+    .map((scene) => ({ scene, rating: rated.get(scene.id || materialKey(scene.material)) }))
+    .filter((one) => one.rating && one.rating.kind !== "none"
+      && one.rating.score >= PHOTO_WORTH);
+  worth.sort((a, b) =>
+    (b.rating.kind === "person") - (a.rating.kind === "person")
+    || b.rating.score - a.rating.score
+    || a.scene.index - b.scene.index);
+  // 挑出来之后按时间线的顺序过，不按分数：一段一段往后走才不乱。
+  const scenes = worth.slice(0, count).map((one) => one.scene)
+    .sort((a, b) => a.index - b.index);
+  return { scenes, asked: count };
+}
+
+function startPhotoRound(scenes) {
+  Object.assign(photoRound, { on: true, scenes, at: -1 });
+  nextRoundPhoto();
+}
+
+/** 下一段还没定照片的；没有了就开始排队。 */
+function nextRoundPhoto() {
+  const { scenes } = photoRound;
+  let at = photoRound.at + 1;
+  while (at < scenes.length && scenes[at].photo_pick) at += 1;
+  photoRound.at = at;
+  if (at >= scenes.length) {
+    finishPhotoRound();
+    return;
+  }
+  // 时间线跟着走：窗后面看得见现在在给哪一段找照片。
+  state.selected = scenes[at].index;
+  draw();
+  openPhotoPicker(scenes[at], null, null);
+}
+
+/** 这一段的照片定了（``pick.skip`` 是"这一段不要照片"）：存进这条片子里，
+    下一段。存不进去（照片太小、下载不了）就停在这一段上说清楚。 */
+async function keepRoundPhoto(pick) {
+  const at = photoPick.at;
+  const scene = photoRound.scenes[photoRound.at];
+  const body = pick.skip ? { skip: true } : { ...(pick.photo || {}) };
+  if (!pick.skip) {
+    if (pick.strength === SAME_PICTURE) body.follow = SAME_PICTURE;
+    else if (pick.strength) body.strength = pick.strength;
+  }
+  photoNote(pick.skip ? "Skipping this scene…" : "Keeping this photo…", "pending");
+  try {
+    await call("POST", `${scenePath(at)}/photo-pick`, body);
+  } catch (error) {
+    if (photoPick.at !== at) return;
+    photoNote(`${String(error.message || error).replace(/[.\s]+$/, "")}. `
+      + "Choose another photo for this scene.", "warn");
+    googleNote("Click Search on Google to open the window again.");
+    return;
+  }
+  if (scene) scene.photo_pick = pick.skip ? "skip" : "photo";
+  if (photoPick.at !== at || !photoRound.on) return;
+  // 先等那个小窗口关掉再开下一个：关和开撞在一起，关掉的会是新开的那个。
+  await closePhotoBrowser();
+  nextRoundPhoto();
+}
+
+function finishPhotoRound() {
+  photoRound.on = false;
+  ui.photoModal.hidden = true;
+  photoPick.at = -1;
+  drawPending();
+}
+
+/** 挑照片的那一轮里一直挂着的那句话。 */
+function photoRoundNote() {
+  return photoRound.on
+    ? `${photoRound.short}Nothing is drawn until a photo is chosen for every `
+      + "one of these scenes."
+    : "";
+}
+
+/** 这一段说的是什么，摆在窗顶上。 */
+function photoSceneLine(scene) {
+  const line = String(scene.narration || "").replace(/\s+/g, " ").trim();
+  if (line) return `“${line}”`;
+  return String(scene.keyword || scene.keyword_suggestion || "").trim();
+}
 
 function photoWordsKey(scene) {
   return scene.id || materialKey(scene.material) || `at-${scene.index}`;
 }
 
-function openPhotoPicker(scene, keyword, style, strength) {
+function openPhotoPicker(scene, keyword, style, again) {
   Object.assign(photoPick, {
-    at: scene.index, keyword, style, strength, photos: [], busy: false,
+    at: scene.index, keyword, style, photos: [], busy: false,
+    kept: (scene.reference && scene.reference.file) || "",
+    saved: scene.photo_pick === "photo",
   });
-  ui.photoTitle.textContent = `Redraw scene ${scene.index + 1} from a photo`;
+  const round = photoRound.on;
+  ui.photoTitle.textContent = round
+    ? `Photo ${photoRound.at + 1} of ${photoRound.scenes.length} — `
+      + `scene ${scene.index + 1}`
+    : `Redraw scene ${scene.index + 1} from a photo`;
+  ui.photoLine.textContent = photoSceneLine(scene);
+  // 上一次选的那一档；连着挑好几段时不用每一段重选。
+  photoKeepChoice.input.value = String(photoKeep);
+  ui.photoKept.hidden = round || !(photoPick.kept || photoPick.saved);
+  ui.photoKept.textContent = photoPick.kept
+    ? "Use this scene's current photo" : "Use the photo saved for this scene";
+  ui.photoSkip.hidden = !round;
   ui.photoGrid.innerHTML = "";
   ui.photoModal.hidden = false;
   photoPick.key = photoWordsKey(scene);
@@ -3107,7 +3320,13 @@ function openPhotoPicker(scene, keyword, style, strength) {
   // 图库那一遍不再自己搜：用户是在 Google 的窗口里挑的，再搜一遍只是多
   // 一次会失败的请求。想用图库，"Search" 按钮还在。
   googleNote("");
-  photoNote("");
+  photoNote(photoRoundNote());
+  // "还是这张照片，换一档再画"：照片已经有了，不用去开 Google 的窗口。
+  if (again) {
+    photoNote("Choose how much of the photo to keep, then click "
+      + `“${ui.photoKept.textContent}”. Or search for another one.`);
+    return;
+  }
   if (before) browseGoogle(before);
   else writePhotoWords();
 }
@@ -3132,7 +3351,7 @@ async function writePhotoWords() {
   ui.photoFind.disabled = false;
   ui.photoSearch.value = words;
   if (words) {
-    photoNote("");
+    photoNote(photoRoundNote());
     browseGoogle(words);
   } else {
     // 词没写出来（模型没应答）。不停在一个空框和一句"正在想"上。
@@ -3146,6 +3365,16 @@ function closePhotoPicker() {
   closePhotoBrowser();
   ui.photoModal.hidden = true;
   photoPick.at = -1;
+  // 挑到一半关了窗：什么都没排。挑过的那几张记着，下次接着挑。
+  if (photoRound.on) {
+    photoRound.on = false;
+    const kept = photoRound.scenes.filter(
+      (scene) => scene.photo_pick === "photo" || scene.photo_pick === "auto").length;
+    say("Nothing was queued."
+      + (kept ? ` The ${kept} photo${kept === 1 ? "" : "s"} you chose `
+        + `${kept === 1 ? "is" : "are"} kept — click the draw button to carry on.`
+        : ""), "warn");
+  }
 }
 
 function photoNote(text, kind) {
@@ -3226,12 +3455,18 @@ function drawPhotos() {
 /** 照着挑好的那一张（或者传上来的那一张）排一次重画。``extra`` 空着就是
     原来那条全自动的路：服务端自己搜、自己挑。 */
 function redrawFromPhoto(extra) {
-  const { at, keyword, style, strength } = photoPick;
+  const { at, keyword, style } = photoPick;
   if (at < 0) return;
+  const strength = photoKeepOf(photoKeepChoice.input);
   const search = ui.photoSearch.value.trim();
+  const photo = { ...(extra || {}), ...(search ? { search } : {}) };
+  // 开画之前挑照片的那一轮：记下来，下一段。全挑完才排队。
+  if (photoRound.on) {
+    keepRoundPhoto({ strength, photo });
+    return;
+  }
   closePhotoPicker();
-  queueRegeneration(at, keyword, style, true, strength,
-    { ...(extra || {}), ...(search ? { search } : {}) });
+  queueRegeneration(at, keyword, style, true, strength, photo);
 }
 
 /** 按框里的词搜。框空着就先让模型写一条，而不是拿空词去搜。 */
@@ -3250,6 +3485,14 @@ ui.photoSearch.addEventListener("input", () => {
 });
 ui.photoClose.addEventListener("click", closePhotoPicker);
 ui.photoAuto.addEventListener("click", () => redrawFromPhoto(null));
+ui.photoKept.addEventListener("click", () => {
+  // 照着画过的那一张优先；没有就用开画之前定下、存着的那一张。
+  if (photoPick.kept) redrawFromPhoto({ photo_kept: photoPick.kept });
+  else if (photoPick.saved) redrawFromPhoto({ photo_picked: true });
+});
+ui.photoSkip.addEventListener("click", () => {
+  if (photoRound.on && photoPick.at >= 0) keepRoundPhoto({ skip: true });
+});
 ui.photoUpload.addEventListener("click", () => pickFile("image/*", async (file) => {
   photoNote(`Uploading ${file.name}…`, "pending");
   try {
@@ -3350,8 +3593,8 @@ function watchPhotoBrowser(at) {
 function closePhotoBrowser() {
   const was = browsing.on;
   stopWatchingPhotoBrowser();
-  if (!was || !state.taskId) return;
-  call("DELETE", photoBrowserPath()).catch(() => {});
+  if (!was || !state.taskId) return Promise.resolve();
+  return call("DELETE", photoBrowserPath()).catch(() => {});
 }
 
 ui.photoGoogle.addEventListener("click", () => {
@@ -4102,6 +4345,29 @@ function inspectorGroup(title) {
 /** 这一段现在这张图是照着哪张照片画的。照片本身存在任务目录里，所以这里
     摆的是它，不是一个可能已经失效的地址：画得好不好，对着照片一眼就知道
     是照片的事还是画的事。 */
+/** 给这一段存着、还没照着画的那张照片。 */
+function savedPhotoNote(scene) {
+  const box = document.createElement("div");
+  box.className = "used-photo";
+  const address = `${API}${scenePath(scene.index)}/photo-pick`;
+  const shot = document.createElement("img");
+  shot.alt = "The photo saved for this scene";
+  shot.loading = "lazy";
+  shot.src = address;
+  shot.title = "Open the photo full size";
+  shot.addEventListener("click", () => window.open(address, "_blank", "noopener"));
+  // 文件不在了就不摆一个破图标。
+  shot.addEventListener("error", () => shot.remove());
+  box.appendChild(shot);
+  const words = document.createElement("div");
+  const head = document.createElement("b");
+  head.textContent = "Photo saved for this scene";
+  words.appendChild(head);
+  words.appendChild(document.createTextNode("chosen before drawing"));
+  box.appendChild(words);
+  return box;
+}
+
 function usedPhotoNote(scene) {
   const used = scene.reference;
   if (!used || typeof used !== "object") return null;
@@ -4268,14 +4534,8 @@ function drawInspector() {
   // 只对生成源出现：库存素材源是去库里搜一个现成文件，没有"照着这张画"
   // 这回事（接口那边也会拒）。
   if (isGenerated(scene)) {
-    // 选择摆在按钮**上面**：它改变这个按钮会做什么，看到按钮之前就该看到它。
-    const keep = photoKeepPicker();
-    keep.wrap.title = "Measured on this model: keeping the photograph gives you "
-      + "the real subject and framing but a photographic picture, and loosely "
-      + "inspired gives your style exactly while the photograph only hints at "
-      + "the subject. Same picture gives both; it ignores the prompt.";
+    // "保留多少照片"不在这里选了：它在挑照片的那扇窗里，和照片一起定。
     const photoBox = inspectorGroup("Draw it from a photo");
-    photoBox.appendChild(keep.wrap);
 
     const fromPhoto = button("Redraw from a photo", "", async () => {
       await savePromptEdit();
@@ -4283,8 +4543,7 @@ function drawInspector() {
       openPhotoPicker(
         scene,
         keyword.input.value || null,
-        style ? style.input.value : null,
-        photoKeepOf(keep.input)
+        style ? style.input.value : null
       );
     });
     fromPhoto.title = "Search the web for photographs of this and choose the "
@@ -4298,22 +4557,26 @@ function drawInspector() {
     // 同一张照片，换一档"留多少"再画一次。看了结果才知道该留多少是常事，
     // 不该为此重新去搜、去点。只有存下来的照片才行：服务端手里得有它。
     const kept = scene.reference && scene.reference.file;
-    if (kept) {
+    // 没照着画过、但从 Google 挑过（或者传过）一张存着的，也算"同一张"：
+    // 照片已经在这条片子里了，不该为了用它再去搜一遍。
+    const saved = !kept && scene.photo_pick === "photo";
+    if (saved) photoBox.appendChild(savedPhotoNote(scene));
+    if (kept || saved) {
       const again = button("Redraw from this same photo", "small", async () => {
         await savePromptEdit();
-        const words = scene.reference.query || "";
-        queueRegeneration(
-          scene.index,
+        // 开的是同一扇窗，但不去搜：在里面选留多少，再点"用现在这张"。
+        openPhotoPicker(
+          scene,
           keyword.input.value || null,
           style ? style.input.value : null,
-          true,
-          photoKeepOf(keep.input),
-          { photo_kept: kept, ...(words ? { search: words } : {}) }
+          true
         );
       });
-      again.title = "Draw this scene again from the photo shown here, using "
-        + "the choice in \"How much of the photo\" above. Change that choice "
-        + "first to try the other one — nothing is searched for again.";
+      again.title = (kept
+        ? "Draw this scene again from the photo shown here."
+        : "Draw this scene from the photo already saved for it.")
+        + " A window opens to choose how much of the photo to keep — nothing "
+        + "is searched for again.";
       photoBox.appendChild(again);
     }
     ui.inspBody.appendChild(photoBox);

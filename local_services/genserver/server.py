@@ -52,7 +52,9 @@ import sys
 import threading
 import time
 import traceback
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
+from functools import wraps
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Optional
 
@@ -64,6 +66,17 @@ from registry import EDITORS, OUTLINES, REGISTRY, ModelSpec, as_json, parse_size
 # install is the whole point of `doctor` asking this process rather than
 # guessing. The error is carried and reported, not raised at startup.
 TORCH_IMPORT_ERROR: Optional[str] = None
+# Give freed memory back to Windows at once. Must be set before torch loads.
+#
+# The Windows build of torch allocates CPU memory through mimalloc, which keeps
+# what is freed for later instead of returning it. Measured on this server:
+# after one picture, dropping Z-Image left 34.8 GB of commit charge held with
+# no tensor alive, and the next model then loaded on top of it (49.5 GB) - the
+# machine ran into its commit limit during a model switch and the process died
+# with nothing in the log. With this, the same drop leaves 3.1 GB.
+# `setdefault`, so a value set by hand still wins.
+os.environ.setdefault("MIMALLOC_PURGE_DELAY", "0")
+
 try:
     import torch
 except Exception as err:  # pragma: no cover - depends on the machine
@@ -332,6 +345,33 @@ def machine_commit_mb() -> "Optional[tuple[int, int]]":
     return limit - free, limit
 
 
+# Everything that allocates or frees model memory runs on this one thread.
+#
+# The HTTP server answers each request on a new thread, and torch's allocator
+# on Windows (mimalloc) keeps a heap per thread: memory freed by a thread other
+# than the one that allocated it is not handed back, it waits for the owner.
+# The owner was a request thread that had long since ended, so every picture
+# and every model switch left its memory behind - measured, a model dropped
+# from another thread gave back nothing (27 GB -> 27 GB), and dropped from the
+# thread that loaded it gave back all of it (34.8 GB -> 3.1 GB).
+_TORCH_THREAD = ThreadPoolExecutor(max_workers=1, thread_name_prefix="torch")
+
+
+def on_the_torch_thread(work):
+    """Runs the function on the one thread that owns the model's memory.
+
+    The caller waits for it and gets its result or its exception, so nothing
+    else about the call changes - including which thread holds the lock.
+    """
+    @wraps(work)
+    def there(*args, **kwargs):
+        if threading.current_thread().name.startswith("torch"):
+            return work(*args, **kwargs)
+        return _TORCH_THREAD.submit(work, *args, **kwargs).result()
+    return there
+
+
+@on_the_torch_thread
 def give_back_what_we_can() -> None:
     """Best effort, and never raises.
 
@@ -489,6 +529,7 @@ class Resident:
         # Readable without the lock, so /health answers during a generation.
         self.generating: Optional[str] = None
 
+    @on_the_torch_thread
     def unload(self) -> float:
         """Drops whatever is resident and returns the free VRAM in MB after.
 
@@ -527,6 +568,7 @@ class Resident:
                 )
         return free_mb()
 
+    @on_the_torch_thread
     def load(self, spec: ModelSpec, offload: bool) -> dict:
         """Loads `spec`, unloading whatever was there first."""
         before = free_mb()
@@ -570,6 +612,7 @@ class Resident:
             "offload": offload,
         }
 
+    @on_the_torch_thread
     def starting_from_image(self, spec: ModelSpec) -> Any:
         """The img2img pipeline over the weights that are already resident.
 
@@ -654,6 +697,7 @@ class Resident:
         return self.image_pipe
 
 
+    @on_the_torch_thread
     def following_outlines(self, spec: ModelSpec) -> Any:
         """The ControlNet pipeline over the weights that are already resident.
 
@@ -1325,9 +1369,14 @@ def generate(body: dict) -> dict:
                 pipe = RESIDENT.starting_from_image(spec)
                 kwargs["image"] = reference
                 kwargs["strength"] = strength
-            if control is not None:
+            # On the thread that loaded the weights: drawing moves them to
+            # the card and back, and that is memory being freed and allocated.
+            @on_the_torch_thread
+            def draw() -> Any:
+                if control is None:
+                    return pipe(**kwargs).images[0]
                 try:
-                    image = pipe(**kwargs).images[0]
+                    return pipe(**kwargs).images[0]
                 finally:
                     # Off the card again, the transformer with it: the two
                     # share modules, and a transformer left half on the card
@@ -1335,8 +1384,8 @@ def generate(body: dict) -> dict:
                     pipe.transformer.to("cpu")
                     pipe.controlnet.to("cpu")
                     torch.cuda.empty_cache()
-            else:
-                image = pipe(**kwargs).images[0]
+
+            image = draw()
             seconds = round(time.monotonic() - started, 2)
             peak = int(torch.cuda.max_memory_allocated() // MB)
 

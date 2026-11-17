@@ -159,7 +159,19 @@ ADVANCED_FIELDS = frozenset({
 })
 
 # 表单原样交给任务参数的那些项。
-DIRECT_FIELDS = UI_FIELDS + APP_FIELDS + ("llm_provider", "llm_model")
+DIRECT_FIELDS = UI_FIELDS + APP_FIELDS + (
+    "llm_provider", "llm_model",
+    # 只属于这一条片子，不记成"上次用的"：每条片子有多少画面值得去找照片
+    # 是看题材的。
+    "photo_scene_percent",
+)
+# "多少画面照着照片画"能挑的那几档。
+PHOTO_SHARES = (
+    (0, "None — draw every scene from its prompt"),
+    (10, "10% of the scenes"), (25, "25% of the scenes"),
+    (50, "50% of the scenes"), (75, "75% of the scenes"),
+    (100, "Every scene"),
+)
 
 
 # ---------------------------------------------------------------------------
@@ -495,6 +507,10 @@ def form() -> dict:
                    settings_style=(
                        "" if style == image_style_model.IMAGE_STYLE_CUSTOM
                        else str(style or ""))),
+            # 照着照片画的那几张是用户自己挑照片的：点"开画"时先把这几张的
+            # 照片挑完，然后才开始排队出图。
+            _field("photo_scene_percent", "Scenes drawn from photos you choose",
+                   "select", show=drawn, options=_options(PHOTO_SHARES)),
             _field("image_motion", "Camera move on a still", "select",
                    show={"video_source": list(STILL_SOURCES)},
                    options=_options((("zoom", "Slow zoom"), ("static", "Still")))),

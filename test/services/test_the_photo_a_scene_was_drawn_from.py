@@ -160,13 +160,18 @@ class TestDrawingFromItAgain:
         assert got.status_code == 200, got.text
         assert seen["photo"].width == 800 and seen["strength"] == 0.9
 
-    def test_the_button_uses_the_choice_above_it(self):
+    def test_the_button_opens_the_window_without_searching(self):
+        # "留多少"现在在那扇窗里选：按钮开窗（不去搜），窗里那个"用现在这张"
+        # 才把存着的照片交出去。
         place = JS.split('button("Redraw from this same photo"')[1][:520]
-        assert "photoKeepOf(keep.input)" in place
-        assert "{ photo_kept: kept," in place
-        # 只有存下来的照片才有这个按钮。
+        assert "openPhotoPicker(" in place and "true\n        );" in place
+        assert "queueRegeneration(" not in place
+        opened = JS.split("function openPhotoPicker(")[1].split("\n}\n")[0]
+        assert opened.index("if (again) {") < opened.index("browseGoogle(before)")
+        assert "redrawFromPhoto({ photo_kept: photoPick.kept })" in JS
+        # 只有存下来的照片才有这个按钮：照着画过的那一张，或者开画之前定下的那一张。
         before = JS.split('button("Redraw from this same photo"')[0][-160:]
-        assert "if (kept) {" in before
+        assert "if (kept || saved) {" in before
 
 
 class TestTheInspector:
@@ -174,7 +179,8 @@ class TestTheInspector:
         assert 'inspectorGroup(isGenerated(scene) ? "Draw it from the prompt"' in JS
         assert 'inspectorGroup("Draw it from a photo")' in JS
         assert "drawBox.appendChild(regenerate);" in JS
-        assert "photoBox.appendChild(keep.wrap);" in JS
+        # “留多少照片”搬进了挑照片的那扇窗里。
+        assert "ui.photoKeepSlot.appendChild(photoKeepChoice.wrap);" in JS
         assert "photoBox.appendChild(fromPhoto);" in JS
 
     def test_the_two_small_buttons_sit_apart_from_them(self):

@@ -482,7 +482,15 @@ def _generate_response(
     app_config=None,
     request_timeout: float | None = None,
     max_retries: int | None = None,
+    without_thinking: bool = False,
 ) -> str:
+    """``without_thinking``：只对本机的 Ollama 起作用——叫它直接答，不先"想"。
+
+    qwen3 这类模型默认先写一大段推理再给答案。写文案时那是好事；从 25 句
+    台词里各抄一个名字出来时，它把 4 秒的活变成 40 秒（实测一条 156 段的
+    片子 293 秒对 25 秒，挑出来的名字差不多）。别的供应商不传这个开关：
+    各家的写法不一样，传错了是一个 400。
+    """
     sdk_client = None
     sdk_stream = None
     try:
@@ -939,9 +947,15 @@ def _generate_response(
             **_sdk_transport_options(request_timeout, max_retries),
         )
 
+        # 见 ``without_thinking``。只对 Ollama 传：它的兼容接口认这个值。
+        quick = (
+            {"reasoning_effort": "none"}
+            if without_thinking and llm_provider == "ollama" else {}
+        )
         response = trace_sdk_call(
             llm_provider, base_url, client.chat.completions.create,
-            model=model_name, messages=[{"role": "user", "content": prompt}]
+            model=model_name, messages=[{"role": "user", "content": prompt}],
+            **quick,
         )
         if response:
             if isinstance(response, ChatCompletion):
@@ -2641,3 +2655,158 @@ if __name__ == "__main__":
     )
     print("######################")
     print(search_terms)
+
+
+# ---------------------------------------------------------------------------
+# 哪几段值得去找一张真实照片
+# ---------------------------------------------------------------------------
+
+#: 一段台词点了名的那样东西是哪一类。``none`` 是没点名。
+PHOTO_KINDS = ("person", "place", "thing", "event", "none")
+#: 一次请求里看多少段。
+PHOTO_RATING_CHUNK = 25
+#: 一批里有没答到的段时，再问几次。
+PHOTO_RATING_TRIES = 3
+#: 答案里的一行：``3|person|Santos Dumont``，没有就是 ``3|none|-``。不要求是
+#: JSON——小模型常在数组外面多写一句话、或者少一个括号。
+_PHOTO_NAME_LINE = re.compile(
+    r"^\s*(\d+)\s*\|\s*([A-Za-z]+)\s*\|\s*(.*?)\s*$", re.MULTILINE
+)
+_WORD = re.compile(r"[^\W\d_][\w'’-]*")
+#: 大写开头、却不是谁的名字的词：月份和星期。
+_NOT_A_NAME = frozenset(
+    "january february march april may june july august september october "
+    "november december monday tuesday wednesday thursday friday saturday "
+    "sunday".split()
+)
+
+
+def _named_in(name: str, line: str) -> bool:
+    """``name`` 是不是这句台词里真的写着的一个专有名字。
+
+    模型说"这一段讲的是 Dennis Rader"不算数，得这句话里有这个名字——"他认了
+    罪"里没有，照片配上去观众也不知道是谁。认法：名字里的词在台词里以大写
+    开头出现，而且不是句首那一个（句首本来就大写）；句首的也算，只要名字
+    有两个词都对得上（"Nancy Fox"整句就是一个名字）。
+    """
+    words = _WORD.findall(str(line or ""))
+    wanted = {word.casefold() for word in _WORD.findall(str(name or ""))}
+    wanted -= _NOT_A_NAME
+    hits = [
+        at for at, word in enumerate(words)
+        if word[:1].isupper() and word.casefold() in wanted
+    ]
+    return bool(hits) and (len(hits) >= 2 or hits[0] > 0)
+
+
+def rate_scenes_for_photos(
+    subject: str,
+    scenes: List[tuple],
+    *,
+    app_config=None,
+) -> List[dict]:
+    """哪几段台词点了一个真实的人、地方、东西的名字。
+
+    ``scenes`` 是 ``(台词, 画面提示词)`` 的列表；返回同样长、同样顺序的
+    ``{"kind", "score", "name"}``。"多少画面照着照片画"据此挑段。
+
+    为什么是"找名字"而不是"打分"
+    ----------------------------
+    先试过让模型给每一段打 0-10 分。在本机的模型上，一条 156 段的片子评了
+    七分半钟，而且分数挤在 6 上：手里拿着软盘的几段都成了"真实的东西"，
+    "警察拦下了 Dennis Rader"反而没评上。找名字是一件更小的事，而且**查得
+    出来**：模型说的名字不在那句台词里就不算（见 ``_named_in``）。
+
+    只看台词，不看画面提示词：提示词是另一个模型编的画面（"一个男人在八十
+    年代威奇托的车库里"），里面的地名是布景，不是这一段在讲的东西。
+
+    分数只是排序用的：第一次出现的名字高于重复出现的，这样十张照片不会
+    全是同一个人。人排在最前是界面那边做的。
+
+    Finds the real proper name each line of narration mentions, and keeps it
+    only when that name is actually written in the line. A line the model did
+    not answer for raises ``TermGenerationError`` rather than counting as none.
+    """
+    topic = " ".join(str(subject or "").split())
+    lines = [" ".join(str(line or "").split()) for line, _keyword in scenes]
+    rated: List[dict] = []
+    seen: set = set()
+    for start in range(0, len(lines), PHOTO_RATING_CHUNK):
+        chunk = lines[start:start + PHOTO_RATING_CHUNK]
+        listing = "\n".join(
+            f"{number}. {line or '(silence)'}" for number, line in enumerate(chunk, 1)
+        )
+        request = f"""Below are numbered lines of narration from a video. For each line, find
+the ONE real, specific thing that the line mentions BY NAME and that a
+photograph could show.
+
+## Kinds
+- person: a real person or family named in the line (Santos Dumont, Marie
+  Curie, the Otero family).
+- place: a named place, landmark or building (Eiffel Tower, Machu Picchu).
+- thing: a named object, machine, product, artwork, species, company or
+  organisation (the 14-bis, Concorde, the Mona Lisa, NASA).
+- event: a named event (the Moon landing, the fall of the Berlin Wall).
+- none: the line names nothing like that.
+
+## Rules
+1. Answer with exactly {len(chunk)} lines, one per narration line, in order,
+   and nothing else.
+2. Each line is: number|kind|name    for example 3|person|Santos Dumont
+   When there is nothing: 4|none|-
+3. Copy the name exactly as it is written in that line. If the name is not
+   written in that line, the answer is none - even if you know who or what
+   the line is about. "He", "she", "they", "the killer", "the police" are
+   not names.
+4. Ordinary nouns are not names: "a floppy disk", "a letter", "the church",
+   "a newspaper" are none.
+5. If the line names a person and something else, answer with the person.
+6. Dates, months and years alone are none.
+
+## Video subject
+{topic or "(not given)"}
+
+## Narration
+{listing}
+""".strip()
+        found = {}
+        for _attempt in range(PHOTO_RATING_TRIES):
+            if app_config is None:
+                response = _generate_response(request, without_thinking=True)
+            else:
+                response = _generate_response(
+                    request, app_config=app_config, without_thinking=True
+                )
+            response = str(response or "")
+            if response.startswith("Error: "):
+                # 供应商自己报的错：再问多少次都是同一句。
+                raise TermGenerationError(response[len("Error: "):].strip())
+            for number, kind, name in _PHOTO_NAME_LINE.findall(response):
+                if 1 <= int(number) <= len(chunk):
+                    found.setdefault(int(number), (kind.lower(), name.strip()))
+            if len(found) == len(chunk):
+                break
+            logger.warning(
+                f"the model answered for {len(found)} of {len(chunk)} lines "
+                f"when asked which name something real, asking again"
+            )
+        if len(found) != len(chunk):
+            raise TermGenerationError(
+                f"the model answered for {len(found)} of {len(chunk)} scenes "
+                f"when asked which ones name a real person, place or thing."
+            )
+        for number, line in enumerate(chunk, 1):
+            kind, name = found[number]
+            if kind not in PHOTO_KINDS or kind == "none" or not _named_in(name, line):
+                rated.append({"kind": "none", "score": 0, "name": ""})
+                continue
+            key = name.casefold()
+            # 第一次出现的名字排在重复出现的前面。
+            rated.append({"kind": kind, "score": 7 if key in seen else 9, "name": name})
+            seen.add(key)
+    logger.info(
+        "scenes that name something real: "
+        + ", ".join(f"{at + 1}:{one['kind']}:{one['name']}"
+                    for at, one in enumerate(rated) if one["kind"] != "none")
+    )
+    return rated

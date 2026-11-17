@@ -398,6 +398,10 @@
 <div id="photo-modal" class="modal" hidden>
   <div class="modal-box wide">
     <h2 id="photo-title">Redraw from a photo</h2>
+    <!-- 这一段说的是什么：一口气挑十几张的时候，得知道现在在给哪句话找图。 -->
+    <p id="photo-line" class="hint photo-line"></p>
+    <!-- "这一张保留多少照片"。原来在右边那一栏，现在和照片在同一扇窗里。 -->
+    <div id="photo-keep"></div>
     <div class="row photo-search-row">
       <input id="photo-search" type="text" maxlength="200" autocomplete="off"
         placeholder="What to search for">
@@ -417,6 +421,10 @@
       <button id="photo-upload" class="btn small">Upload my own photo…</button>
       <button id="photo-auto" class="btn small"
         title="Search with these words and use the first photo that can be downloaded, as before.">Pick one for me</button>
+      <button id="photo-kept" class="btn small" hidden
+        title="Draw this scene again from the photo it was last drawn from, with the choice above. Nothing is searched for.">Use this scene's current photo</button>
+      <button id="photo-skip" class="btn small" hidden
+        title="No photo for this scene: it is drawn from its prompt like the others.">Skip — draw it from its prompt</button>
       <span class="spacer"></span>
       <button id="photo-close" class="btn small">Close</button>
     </div>

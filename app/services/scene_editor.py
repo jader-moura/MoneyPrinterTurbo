@@ -371,6 +371,207 @@ def reference_photo_words(task_id: str, index: Any) -> dict:
     return {"query": words, "from": "model"}
 
 
+#: 任务清单里记着"哪几段点了一个真实的名字"的那一项。
+_CANDIDATES_KEY = "photo_candidates"
+#: 任务清单里记着"每一段定下了哪张照片"的那一项。
+_PICKS_KEY = "photo_picks"
+#: 定下来、还没画的照片放在任务目录下的这个文件夹里。
+PHOTO_PICK_DIR = "photo_picks"
+_NO_CANDIDATE = {"kind": "none", "score": 0, "name": ""}
+
+
+def photo_candidates(task_id: str, *, again: bool = False) -> dict:
+    """每一段台词有没有点一个真实的人、地方、东西的名字（人排最前）。
+
+    只算一次，记在任务清单里：流水线把场景切出来的时候就算（见
+    ``task.py``），之后点多少次"开画"读的都是记下来的这一份——每点一次
+    重新问一遍模型，既慢，两次的答案还不一样，上一次挑好的照片就对不上了。
+    那一次没算成（模型没应答）的话，第一次点"开画"时在这里补算。
+
+    ``again`` 是"重新算"。后来才加出来的段没有记录，算作没点名。
+    """
+    manifest = scene_manifest.load(task_id)
+    scenes = manifest["scenes"]
+    stored = task_artifacts.read_script_data(task_id).get(_CANDIDATES_KEY)
+    if again or not isinstance(stored, dict):
+        spoken = narration_for_scenes(task_id, manifest)
+        subject = str(
+            getattr(load_params(task_id), "video_subject", "") or ""
+        ).strip()
+        material_for_model = [
+            (spoken[at] if at < len(spoken) else "", scene.get("keyword") or "")
+            for at, scene in enumerate(scenes)
+        ]
+        try:
+            rated = llm.rate_scenes_for_photos(subject, material_for_model)
+        except llm.TermGenerationError as exc:
+            raise SceneError(str(exc)) from exc
+        stored = {
+            scene_manifest.scene_id(scene): dict(rated[at])
+            for at, scene in enumerate(scenes)
+        }
+        task_artifacts.patch_script_data(task_id, **{_CANDIDATES_KEY: stored})
+    listed = []
+    for at, scene in enumerate(scenes):
+        key = scene_manifest.scene_id(scene)
+        found = stored.get(key) if isinstance(stored.get(key), dict) else {}
+        listed.append({
+            "index": at, "id": key,
+            **{name: found.get(name, default)
+               for name, default in _NO_CANDIDATE.items()},
+        })
+    return {"scenes": listed}
+
+
+def _photo_pick_file(task_id: str, name: str) -> str:
+    return os.path.join(utils.task_dir(), str(task_id), PHOTO_PICK_DIR, name)
+
+
+def _stored_photo_picks(task_id: str) -> dict:
+    stored = task_artifacts.read_script_data(task_id).get(_PICKS_KEY)
+    return dict(stored) if isinstance(stored, dict) else {}
+
+
+def keep_photo_pick(
+    task_id: str,
+    index: Any,
+    *,
+    photo: Any = None,
+    skip: bool = False,
+    search: str = "",
+    strength: float | None = None,
+    follow: str = "",
+) -> dict:
+    """把一段定下的照片存进这条片子里，不画。
+
+    开画之前一口气给十几段挑照片时用。照片存在磁盘上、选择记在任务清单里：
+    以前它们只在内存里放最近八张，挑到第九张第一张就没了；页面一刷新、
+    程序一重启也全没了。存下来之后，"开画"点多少次用的都是这一张，出图
+    失败了重来也不用再挑。
+
+    ``skip`` 是"这一段不要照片"；``photo`` 空着又不是 ``skip``，是"替我挑
+    一张"（开画时自己去搜）。
+    """
+    import hashlib
+
+    scenes = scene_manifest.load(task_id)["scenes"]
+    scene = scenes[_scene_at(scenes, index)]
+    key = scene_manifest.scene_id(scene)
+    way = str(follow or "").strip()
+    if way and way not in FOLLOW_WAYS:
+        raise SceneError(f"unknown way to follow a photo: {way!r}")
+    if skip:
+        entry: dict = {"skip": True}
+    else:
+        entry = {
+            "search": " ".join(str(search or "").split()),
+            "strength": strength,
+            "follow": way,
+        }
+        if photo is not None:
+            name = hashlib.sha1(key.encode("utf-8")).hexdigest()[:16] + ".png"
+            path = _photo_pick_file(task_id, name)
+            try:
+                os.makedirs(os.path.dirname(path), exist_ok=True)
+                with open(path, "wb") as handle:
+                    handle.write(photo.data)
+            except OSError as exc:
+                raise SceneError(f"the chosen photo could not be kept: {exc}") from exc
+            entry.update(
+                file=name,
+                query=photo.query, source_url=photo.source_url,
+                page_url=photo.page_url, provider=photo.provider,
+                width=photo.width, height=photo.height,
+                license=photo.licence, creator=photo.creator,
+            )
+    with _PHOTO_LOCK:
+        picks = _stored_photo_picks(task_id)
+        picks[key] = entry
+        task_artifacts.patch_script_data(task_id, **{_PICKS_KEY: picks})
+    return {"scene_id": key, "pick": _pick_kind(entry)}
+
+
+def picked_photo_path(task_id: str, index: Any) -> str:
+    """给这一段定下的那张照片在磁盘上的位置。"""
+    scenes = scene_manifest.load(task_id)["scenes"]
+    key = scene_manifest.scene_id(scenes[_scene_at(scenes, index)])
+    entry = _stored_photo_picks(task_id).get(key)
+    if _pick_kind(entry) != "photo":
+        raise SceneError("no photo is saved for this scene")
+    path = _photo_pick_file(task_id, str(entry["file"]))
+    if not os.path.isfile(path):
+        raise SceneError("the photo saved for this scene is no longer on disk")
+    return path
+
+
+def picked_reference_photo(task_id: str, index: Any) -> Any:
+    """给这一段定下的那张照片，拿来画（或者再画一次）。"""
+    scenes = scene_manifest.load(task_id)["scenes"]
+    key = scene_manifest.scene_id(scenes[_scene_at(scenes, index)])
+    ready = photo_picks_for_drawing(task_id).get(key)
+    if not ready or ready.get("photo") is None:
+        raise SceneError("no photo is saved for this scene")
+    return ready["photo"]
+
+
+def _pick_kind(entry: Any) -> str:
+    if not isinstance(entry, dict):
+        return ""
+    if entry.get("skip"):
+        return "skip"
+    return "photo" if entry.get("file") else "auto"
+
+
+def photo_pick_kinds(task_id: str) -> dict:
+    """``{段的身份: "photo" | "auto" | "skip"}``：哪几段已经定过照片了。"""
+    return {
+        key: _pick_kind(entry)
+        for key, entry in _stored_photo_picks(task_id).items()
+        if _pick_kind(entry)
+    }
+
+
+def photo_picks_for_drawing(task_id: str) -> dict:
+    """``{段的身份: 排队要用的那几项}``，给"开画"用。
+
+    说了不要照片的段不在里面。存着的照片读不回来就报错，不悄悄改成照
+    提示词画：那是用户亲手挑的一张。
+    """
+    ready: dict = {}
+    for key, entry in _stored_photo_picks(task_id).items():
+        kind = _pick_kind(entry)
+        if kind not in ("photo", "auto"):
+            continue
+        photo = None
+        if kind == "photo":
+            try:
+                with open(_photo_pick_file(task_id, str(entry["file"])), "rb") as handle:
+                    data = handle.read()
+            except OSError as exc:
+                raise SceneError(
+                    f"the photo chosen for a scene could not be read back: {exc}"
+                ) from exc
+            photo = reference_image.Reference(
+                data=data,
+                query=str(entry.get("query") or ""),
+                source_url=str(entry.get("source_url") or ""),
+                page_url=str(entry.get("page_url") or ""),
+                provider=str(entry.get("provider") or ""),
+                width=int(entry.get("width") or 0),
+                height=int(entry.get("height") or 0),
+                licence=str(entry.get("license") or ""),
+                creator=str(entry.get("creator") or ""),
+            )
+        ready[key] = {
+            "from_photo": True,
+            "search": str(entry.get("search") or ""),
+            "strength": entry.get("strength"),
+            "follow": str(entry.get("follow") or ""),
+            "photo": photo,
+        }
+    return ready
+
+
 def find_reference_photos(
     task_id: str,
     index: Any,
@@ -1568,11 +1769,15 @@ def describe(task_id: str, endpoint: str = "", *, with_timing: bool = False) -> 
     # 一改时长就过期了。理由见 ``narration_for_scenes``。
     spoken = narration_for_scenes(task_id, manifest, windows or None)
     scenes = []
+    picked = photo_pick_kinds(task_id)
     for scene in manifest["scenes"]:
         record = dict(scene)
         if scene["index"] < len(spoken):
             record["narration"] = spoken[scene["index"]]
         record["narration_edited"] = bool(scene.get("narration_edited"))
+        # 开画之前给这一段定过照片没有（"photo"、"auto"、"skip"，或者空）。
+        # 定过的不再问第二遍。
+        record["photo_pick"] = picked.get(scene_manifest.scene_id(scene), "")
         # 这一段自己挑的转场和运镜。空字符串一律是"跟整条片子一样"，界面
         # 据此把下拉框停在第一项上。
         record["transition"] = transition_id(scene.get("transition"))
@@ -1643,6 +1848,10 @@ def describe(task_id: str, endpoint: str = "", *, with_timing: bool = False) -> 
     # 这条片子叫什么。顶栏要显示它：开着三个标签页的时候，一串 uuid 说不出
     # 哪个是哪个。
     payload["subject"] = str(getattr(params, "video_subject", "") or "").strip()
+    # 开片时挑的"多少画面照着照片画"。界面点"开画"时要先请人挑那几张照片。
+    payload["photo_scene_percent"] = int(
+        getattr(params, "photo_scene_percent", 0) or 0
+    )
     # 这条片子出片前的任务没有记过画风（这个字段比它们新），那时唯一能说的
     # 就是"按设置来"。界面要分得清这两种情况，否则对一个老任务说"和这条片子
     # 一样"等于撒谎——它用的其实是设置里现在那个风格。

@@ -2344,6 +2344,7 @@ def _run_pipeline(
                 subtitle_path=subtitle_path,
                 video_source=getattr(params, "video_source", "") or "",
             )
+            _find_scenes_for_photos(task_id, params)
         elif runs("audio") and scene_manifest.load(task_id)["scenes"]:
             scene_manifest.record_audio_artifacts(
                 task_id,
@@ -2601,6 +2602,36 @@ def _run_pipeline(
             kwargs["cross_post_owner"] = None
 
     return kwargs
+
+
+def _find_scenes_for_photos(task_id: str, params) -> None:
+    """场景一切出来，就把"哪几段点了一个真实的名字"算好记下。
+
+    只在这条片子定了"多少画面照着照片画"时才算。算在这里而不是点"开画"
+    的时候：那时用户在等，而且每点一次算一遍，两次的答案不一样，上一次
+    挑好的照片就对不上了。
+
+    没算成不挡这条片子——配音、字幕、提示词都已经做完了。第一次点"开画"
+    时会补算，那时没算成才报错（见 ``scene_editor.photo_candidates``）。
+    """
+    if int(getattr(params, "photo_scene_percent", 0) or 0) <= 0:
+        return
+    # 这里才导入：scene_editor 自己要导入这个模块。
+    from app.services import scene_editor
+
+    try:
+        found = scene_editor.photo_candidates(task_id, again=True)["scenes"]
+    except Exception as exc:
+        logger.warning(
+            f"could not work out which scenes of {task_id} name something "
+            f"real; it will be tried again when the pictures are drawn: {exc}"
+        )
+        return
+    named = sum(1 for one in found if one["kind"] != "none")
+    logger.info(
+        f"{named} of {len(found)} scenes of {task_id} name a real person, "
+        f"place or thing"
+    )
 
 
 def start(

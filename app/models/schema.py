@@ -182,6 +182,13 @@ class VideoParams(BaseModel):
     # means drawing a separate image for "in Texas", spoken in 0.7s.
     one_picture_per_sentence: bool = True
 
+    # 这条片子里有百分之多少的画面要照着用户自己挑的照片画（0 = 一张都不）。
+    # 流水线本身不读它：它只是记在任务上，编辑器点"开画"时据此先请用户把
+    # 那几张照片挑好，再开始排队。
+    # Share of this video's scenes drawn from photos the user chooses. The
+    # pipeline does not read it; the editor does, when the pictures are drawn.
+    photo_scene_percent: int = Field(default=0, ge=0, le=100)
+
     # 一张图最多停多久（秒）。
     #
     # 画面是按它配的那句话有多长就停多长的，这正是同步的来源；可实测用户那条
@@ -794,8 +801,30 @@ class SceneRegenerateRequest(BaseModel):
     # 这条片子里已经照着画过、存下来的那一张（场景 ``reference.file``）。
     # 同一张照片换一种"留多少"再画一次，不用重新去找它。
     photo_kept: Optional[str] = Field(default=None, max_length=40)
+    # 开画之前给这一段定下、存在这条片子里的那一张（见 ``photo-pick``）。
+    # 这一段还没照着它画过、或者后来改成照提示词画了，也能拿它来画。
+    photo_picked: bool = False
     # "outlines"：同一张照片，换成我的画风——只跟着照片的轮廓，按画风从头
     # 画。给了它就不看 ``strength``。
+    follow: Optional[str] = Field(default=None, pattern="^(outlines|picture)$")
+
+
+class ScenePhotoPickRequest(BaseModel):
+    """开画之前给一段定下的照片：挑的那一张、传的那一张，或者"这一段不要"。
+
+    和 ``SceneRegenerateRequest`` 里照片那几项是同一个意思，只是这里不排队：
+    照片先存在这条片子里，点"开画"时才用。三项照片都不给、也不是 ``skip``，
+    就是"替我挑一张"。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    skip: bool = False
+    search: Optional[str] = Field(default="", max_length=200)
+    strength: Optional[float] = Field(default=None, gt=0, le=1)
+    photo_url: Optional[str] = Field(default=None, max_length=2000)
+    photo_upload: Optional[str] = Field(default=None, max_length=80)
+    photo_kept: Optional[str] = Field(default=None, max_length=40)
     follow: Optional[str] = Field(default=None, pattern="^(outlines|picture)$")
 
 
@@ -848,6 +877,7 @@ class NewVideoRequest(BaseModel):
     image_motion: Optional[str] = Field(default=None, max_length=20)
     video_clip_duration: Optional[int] = Field(default=None, ge=1, le=15)
     one_picture_per_sentence: Optional[bool] = None
+    photo_scene_percent: Optional[int] = Field(default=None, ge=0, le=100)
     max_image_scene_duration: Optional[float] = Field(default=None, ge=0, le=60)
     align_terms_to_narration: Optional[bool] = None
     review_prompts: Optional[bool] = None
