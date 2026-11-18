@@ -221,7 +221,9 @@ class TestOverHttp:
         task_id, _ = _reviewed_task(task_root)
         data = client.get(f"/api/v1/tasks/{task_id}/scenes").json()["data"]
         assert "fade_in" in data["transitions"]
-        assert data["image_motions"] == ["zoom", "static"]
+        assert data["image_motions"] == [
+            "zoom", "static", "varied", "zoom_out", "pan_right", "pan_left", "zoom_top",
+        ]
 
 
 class TestTheSoundOnTheCut:

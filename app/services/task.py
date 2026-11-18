@@ -17,6 +17,7 @@ from app.config import config
 from app.models import const
 from app.models.schema import VideoConcatMode, VideoParams
 from app.services import bgm as bgm_service
+from app.services import finishing
 from app.services import (
     codex_image,
     codex_oauth,
@@ -1442,7 +1443,12 @@ def generate_final_videos(
                 warnings.append({"code": warning_code, "video_index": index})
 
         logger.info(f"\n\n## generating video: {index} => {final_video_path}")
-        bgm_mix_succeeded = video.generate_video(
+        # ``finish_look`` 不为空的任务由 ffmpeg 那一遍精修出成片；为空时照旧。
+        # 两个函数的参数和返回值是同一套约定。
+        render_final = (
+            finishing.render if finishing.wanted(params) else video.generate_video
+        )
+        bgm_mix_succeeded = render_final(
             video_path=combined_video_path,
             audio_path=audio_file,
             subtitle_path=subtitle_path,

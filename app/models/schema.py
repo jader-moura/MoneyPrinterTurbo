@@ -30,6 +30,11 @@ class VideoTransitionMode(str, Enum):
     slide_out = "SlideOut"
     zoom_in = "ZoomIn"
     zoom_out = "ZoomOut"
+    # 真正的叠化：前一段的尾巴和后一段的开头叠在一起半秒。上面那几种都是
+    # 在一段自己的时间里做的（从黑里淡出来、滑进来），这一种是两段之间的。
+    # A real dissolve between two clips, where the others above happen inside
+    # one clip's own time.
+    cross_fade = "CrossFade"
 
 
 class VideoAspect(str, Enum):
@@ -57,11 +62,26 @@ class VideoFitMode(str, Enum):
 class ImageMotion(str, Enum):
     static = "static"
     zoom = "zoom"
+    # 下面这几种是后加的。每一张图都用同一种慢推，一条八分钟的片子看下来
+    # 像幻灯片；"varied" 让每张图在五种运镜里按图的内容挑一种（同一张图每次
+    # 挑到的是同一种），其余几个是把某一种单独点出来。值会写进片段的文件名，
+    # 所以里面不能有 "." 和 "-"。
+    #
+    # Added later. "varied" gives each picture one of the five moves below,
+    # chosen from the picture's own content so it is the same every time.
+    # The value goes into the clip's file name: no "." and no "-".
+    varied = "varied"
+    zoom_out = "zoom_out"
+    pan_right = "pan_right"
+    pan_left = "pan_left"
+    zoom_top = "zoom_top"
 
 
-SubtitleDisplayMode = Literal["sentence", "word_by_word"]
+# "highlight"：几个词一组，念到哪个词哪个词变色。只有成片精修那条路
+# （``finish_look`` 不为空）画得出来；原来的渲染器遇到它按 "sentence" 画。
+SubtitleDisplayMode = Literal["sentence", "word_by_word", "highlight"]
 SubtitleAnimation = Literal["none", "pop_spring"]
-_SUBTITLE_DISPLAY_MODES = ("sentence", "word_by_word")
+_SUBTITLE_DISPLAY_MODES = ("sentence", "word_by_word", "highlight")
 _SUBTITLE_ANIMATIONS = ("none", "pop_spring")
 
 
@@ -240,6 +260,17 @@ class VideoParams(BaseModel):
     # 内解析，这里不接受路径。
     transition_sound: Optional[str] = ""
     transition_sound_volume: Optional[float] = Field(default=0.5, allow_inf_nan=False)
+
+    # 成片精修（``app/services/finishing.py``）。空串 = 不精修，成片由原来的
+    # 渲染器出，和这个字段出现之前逐字节一致——所以历史任务和不带这个字段的
+    # API 请求都不受影响。不为空时是调色的名字（``finishing.LOOKS`` 的键，
+    # "clean" 是不调色），成片改由 ffmpeg 出：旁白均衡压缩、配乐让位、整体
+    # 响度 -14 LUFS、调色、暗角、颗粒、淡入淡出、libass 烧字幕。
+    #
+    # Empty keeps the classic renderer, byte for byte. A look name from
+    # ``finishing.LOOKS`` sends the final render through the ffmpeg finishing
+    # pass instead.
+    finish_look: Optional[str] = Field(default="", max_length=40)
 
     subtitle_enabled: Optional[bool] = True
     subtitle_position: Optional[str] = config.ui.get(
@@ -895,6 +926,7 @@ class NewVideoRequest(BaseModel):
     video_aspect: Optional[str] = Field(default=None, max_length=10)
     image_style: Optional[str] = Field(default=None, max_length=40)
     image_motion: Optional[str] = Field(default=None, max_length=20)
+    finish_look: Optional[str] = Field(default=None, max_length=40)
     video_clip_duration: Optional[int] = Field(default=None, ge=1, le=15)
     one_picture_per_sentence: Optional[bool] = None
     photo_scene_percent: Optional[int] = Field(default=None, ge=0, le=100)
@@ -1073,6 +1105,8 @@ class VideoEffectsRequest(BaseModel):
 
     transition: Optional[str] = None
     image_motion: Optional[str] = None
+    # 成片精修用哪种调色；空串是关掉（用原来的渲染器），不给就是不改。
+    finish_look: Optional[str] = Field(default=None, max_length=40)
     apply_to_scenes: bool = False
 
 

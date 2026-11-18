@@ -725,6 +725,125 @@ def concat_video_clips_with_ffmpeg(
         delete_files([concat_list_file, staged_output])
 
 
+# 叠化多长；一张滤镜图里最多接几段。145 段塞进一张图，ffmpeg 要同时开 145 个
+# 解码器——实测会慢到像卡死，而且有一段只剩一个输入时还会直接报错。
+_CROSSFADE_SECONDS = 0.5
+_CROSSFADE_CHUNK = 12
+
+
+def crossfade_seconds(before: float, after: float) -> float:
+    """这两段之间叠多久：半秒，但不超过任何一段的一小半。"""
+    return max(0.0, min(_CROSSFADE_SECONDS, 0.45 * float(before), 0.45 * float(after)))
+
+
+def _crossfade_graph(pieces: List[tuple], keep_tail: bool) -> tuple[str, str]:
+    """把几段接起来的滤镜图，返回 ``(图, 输出标签)``。
+
+    每一段是 ``(文件, 它在成片里占多久, 它和下一段叠多久)``。叠化要求前一段
+    比它占的时间多出一截尾巴：文件里有就用文件里的，没有就把最后一帧定住补
+    上（``tpad``）——一张慢慢推的图在半秒的叠化里停住，看不出来。
+
+    叠化从"下一段本来该开始的那一刻"开始，所以每一刀的时刻和硬切时一模一样，
+    旁白、字幕、转场音效都不用跟着挪。
+    """
+    parts: List[str] = []
+    for index, (_, seconds, fade) in enumerate(pieces):
+        last = index == len(pieces) - 1
+        tail = fade if (not last or keep_tail) else 0.0
+        parts.append(
+            f"[{index}:v]fps={fps},format=yuv420p,settb=AVTB,"
+            f"tpad=stop_mode=clone:stop_duration={tail + 0.2:.3f},"
+            f"trim=duration={seconds + tail:.4f},setpts=PTS-STARTPTS[c{index}]"
+        )
+    previous, elapsed = "[c0]", 0.0
+    for index in range(1, len(pieces)):
+        elapsed += pieces[index - 1][1]
+        fade = pieces[index - 1][2]
+        if fade > 0:
+            parts.append(
+                f"{previous}[c{index}]xfade=transition=fade:duration={fade:.4f}:"
+                f"offset={elapsed:.4f}[v{index}]"
+            )
+        else:
+            parts.append(f"{previous}[c{index}]concat=n=2:v=1:a=0[v{index}]")
+        previous = f"[v{index}]"
+    return ";".join(parts), previous
+
+
+def crossfade_video_clips_with_ffmpeg(
+    pieces: List[tuple],
+    output_file: str,
+    threads: int,
+    output_dir: str,
+    max_duration: float | None = None,
+):
+    """把片段接成一条，相邻两段之间按各自的设置叠化或硬切。
+
+    ``pieces`` 是 ``[(文件, 秒数, 和下一段叠多久)]``。一次最多接
+    ``_CROSSFADE_CHUNK`` 段，接出来的中间文件再同样地接，直到只剩一条。
+    中间文件带着它最后一段的那截尾巴，所以块与块之间照样能叠。
+
+    Joins the clips with a dissolve (or a hard cut) at each boundary, at most
+    ``_CROSSFADE_CHUNK`` inputs per filter graph; the intermediate files are
+    joined the same way until one remains.
+    """
+    work = [(str(file), float(seconds), float(fade)) for file, seconds, fade in pieces]
+    intermediates: List[str] = []
+    staged_output = None
+
+    def join(chunk: List[tuple], target: str, *, final: bool) -> None:
+        graph, label = _crossfade_graph(chunk, keep_tail=not final)
+        command = [utils.get_ffmpeg_binary(), "-nostdin", "-y"]
+        for file, _, _ in chunk:
+            command += ["-i", file]
+        if final:
+            graph += f";{label}{_BT709_VIDEO_FILTER}[out]"
+            label = "[out]"
+        command += [
+            "-filter_complex", graph, "-map", label, "-an",
+            "-c:v", _DEFAULT_VIDEO_CODEC, "-preset", "veryfast",
+            # 中间文件还要再编码一两遍，所以压得轻一些。
+            "-crf", "16" if final else "14",
+            "-threads", str(threads or 2), "-pix_fmt", "yuv420p",
+        ]
+        if final and max_duration is not None and max_duration > 0:
+            command += ["-t", f"{max_duration:.3f}"]
+        command.append(target)
+        result = _run_concat_with_heartbeat(command, target)
+        if result.returncode != 0:
+            error_message = (result.stderr or result.stdout or "").strip()
+            raise RuntimeError(error_message[-1500:] or "ffmpeg crossfade failed")
+
+    try:
+        while len(work) > _CROSSFADE_CHUNK:
+            merged: List[tuple] = []
+            for at in range(0, len(work), _CROSSFADE_CHUNK):
+                chunk = work[at:at + _CROSSFADE_CHUNK]
+                if len(chunk) == 1:
+                    merged.append(chunk[0])
+                    continue
+                descriptor, target = tempfile.mkstemp(
+                    prefix=".ffmpeg-crossfade-", suffix=".mp4", dir=output_dir or ".")
+                os.close(descriptor)
+                intermediates.append(target)
+                join(chunk, target, final=False)
+                merged.append((target, sum(piece[1] for piece in chunk), chunk[-1][2]))
+            work = merged
+        descriptor, staged_output = tempfile.mkstemp(
+            prefix=".ffmpeg-crossfade-",
+            suffix=os.path.splitext(output_file)[1] or ".mp4",
+            dir=os.path.dirname(os.path.abspath(output_file)),
+        )
+        os.close(descriptor)
+        join(work, staged_output, final=True)
+        if os.path.getsize(staged_output) == 0:
+            raise RuntimeError("ffmpeg crossfade produced no output")
+        os.replace(staged_output, output_file)
+        staged_output = None
+    finally:
+        delete_files([*intermediates, *([staged_output] if staged_output else [])])
+
+
 def _sanitize_image_file(image_path: str) -> str:
     # 某些本地图片虽然能被 Pillow 打开，但会因为损坏的 EXIF/eXIf 元数据导致
     # ImageClip 在解析阶段直接抛异常。这里重新导出一份“干净图片”，把坏元数据剥离掉。
@@ -1182,6 +1301,22 @@ def combine_videos(
     logger.debug(f"total subclipped items: {len(subclipped_items)}")
     
     # Add downloaded clips over and over until the duration of the audio (max_duration) has been reached
+    crossfade_value = VideoTransitionMode.cross_fade.value
+
+    def transition_of(item):
+        """这一段用哪种转场：自己挑过就用自己的，否则用整条片子的。"""
+        own = getattr(item, "transition", None)
+        if own:
+            return None if own == "none" else own
+        return transition_value
+
+    # 下一段是叠化进来的那些段：它们要多带半秒尾巴，叠化时才有画面可叠。
+    crossfades_out = {
+        position
+        for position in range(len(subclipped_items) - 1)
+        if transition_of(subclipped_items[position + 1]) == crossfade_value
+    }
+
     def process_one_clip(indexed_item):
         """把一个源片段裁剪、变速、转场后写出，失败时返回 None。"""
         index, subclipped_item = indexed_item
@@ -1197,6 +1332,20 @@ def combine_videos(
             clip = source_clip.subclipped(
                 subclipped_item.start_time, subclipped_item.end_time
             )
+            # 要叠化到下一段：素材后面还有多的就多取半秒当尾巴。没有多的也
+            # 不要紧，拼接那一步会把最后一帧定住补上。尾巴不算进这一段的时长。
+            tail = 0.0
+            if index in crossfades_out:
+                spare = float(source_clip.duration) - float(subclipped_item.end_time)
+                tail_source = min(
+                    _CROSSFADE_SECONDS * normalized_clip_speed, max(0.0, spare)
+                )
+                if tail_source > 0.02:
+                    clip = source_clip.subclipped(
+                        subclipped_item.start_time,
+                        subclipped_item.end_time + tail_source,
+                    )
+                    tail = tail_source / normalized_clip_speed
             # 播放速度属于素材本身属性，应在转场前应用。这样 Fade/Slide 等一秒转场
             # 不会跟随素材速度变成 0.5 秒或 2 秒；后续最大时长裁剪继续作为
             # 浮点误差或异常素材时长的安全兜底，保证最终片段不突破配置上限。
@@ -1265,8 +1414,8 @@ def combine_videos(
 
             # 剪辑表里的出点就是用户拖到的位置，这里再按 max_clip_duration
             # 截一刀会把他拖长的片段悄悄切回 5 秒。
-            if not render_edit_list and clip.duration > max_clip_duration:
-                clip = clip.subclipped(0, max_clip_duration)
+            if not render_edit_list and clip.duration - tail > max_clip_duration:
+                clip = clip.subclipped(0, max_clip_duration + tail)
 
             # Write each candidate clip to a unique temporary file. Threads must not
             # share the same output path.
@@ -1284,7 +1433,7 @@ def combine_videos(
                 fps=fps,
             )
 
-            clip_duration_saved = clip.duration
+            clip_duration_saved = clip.duration - tail
             processed_clip = SubClippedVideoClip(
                 file_path=clip_file,
                 duration=clip_duration_saved,
@@ -1294,6 +1443,8 @@ def combine_videos(
                 # 交界时刻是从处理完的片段上数出来的，所以这一声要跟着传下去。
                 cut_sound=getattr(subclipped_item, "cut_sound", None),
             )
+            # 切到这一段时是不是叠化。拼接那一步据此决定这一刀怎么接。
+            processed_clip.crossfade_in = effective_transition == crossfade_value
             clip_file = None
             return processed_clip
         except Exception as exc:
@@ -1398,16 +1549,35 @@ def combine_videos(
     
     clip_files = [clip.file_path for clip in processed_clips]
     logger.info(f"concatenating {len(clip_files)} clips with ffmpeg")
+    # 有任何一刀是叠化，就走会叠的那条拼接；一刀都没有时和以前完全一样。
+    fades = [
+        crossfade_seconds(clip.duration, following.duration)
+        if getattr(following, "crossfade_in", False) else 0.0
+        for clip, following in zip(processed_clips, processed_clips[1:])
+    ] + [0.0]
     try:
-        concat_video_clips_with_ffmpeg(
-            clip_files=clip_files,
-            output_file=combined_video_path,
-            threads=threads,
-            output_dir=output_dir,
-            # 自动模式下成片按旁白长度收尾(多出来的安全余量会被截掉)；
-            # 时间线模式下长度由用户决定，这里不能再按旁白截。
-            max_duration=None if render_edit_list else audio_duration,
-        )
+        if any(fades):
+            logger.info(f"{sum(1 for fade in fades if fade)} of the cuts are crossfades")
+            crossfade_video_clips_with_ffmpeg(
+                pieces=[
+                    (clip.file_path, clip.duration, fade)
+                    for clip, fade in zip(processed_clips, fades)
+                ],
+                output_file=combined_video_path,
+                threads=threads,
+                output_dir=output_dir,
+                max_duration=None if render_edit_list else audio_duration,
+            )
+        else:
+            concat_video_clips_with_ffmpeg(
+                clip_files=clip_files,
+                output_file=combined_video_path,
+                threads=threads,
+                output_dir=output_dir,
+                # 自动模式下成片按旁白长度收尾(多出来的安全余量会被截掉)；
+                # 时间线模式下长度由用户决定，这里不能再按旁白截。
+                max_duration=None if render_edit_list else audio_duration,
+            )
         if used_video_paths is not None or clip_boundaries is not None:
             # Exclude safety-margin clips that FFmpeg trims entirely from the output.
             elapsed = 0.0
@@ -2396,6 +2566,64 @@ def _zoom_image_clip(clip, clip_duration):
     return clip.transform(sample_zoomed_frame, apply_to=["mask"])
 
 
+# "varied" 在这五种里挑。顺序不要改：挑哪一种是按图的内容算出来的下标。
+_VARIED_MOVES = (
+    ImageMotion.zoom,
+    ImageMotion.zoom_out,
+    ImageMotion.pan_right,
+    ImageMotion.pan_left,
+    ImageMotion.zoom_top,
+)
+# 横移时画面放大这么多，左右才有余量可以移。
+_PAN_ZOOM = 1.12
+# 新加的这几种运镜的算法版本，和 _IMAGE_ZOOM_SAMPLING_REVISION 是同一个用途。
+_IMAGE_MOVE_REVISION = "moves-1"
+
+
+def _move_amount(duration: float) -> float:
+    """推拉的幅度：停得越久推得越多，但不超过 16%。"""
+    return min(0.16, 0.05 + 0.025 * float(duration))
+
+
+def _move_image_clip(clip, clip_duration, motion: ImageMotion):
+    """推近、拉远、横移——``_zoom_image_clip`` 之外的那几种运镜。
+
+    "varied" 按图的内容在 ``_VARIED_MOVES`` 里挑一种：同一张图每次挑到的都是
+    同一种，所以重渲不会让一段画面换一种动法；不同的图大致平均地分到五种。
+    """
+    motion = ImageMotion(motion)
+    if motion == ImageMotion.varied:
+        picked = int(hashlib.sha256(clip.get_frame(0).tobytes()).hexdigest(), 16)
+        motion = _VARIED_MOVES[picked % len(_VARIED_MOVES)]
+    if motion == ImageMotion.zoom:
+        return _zoom_image_clip(clip, clip_duration)
+
+    duration = max(float(clip_duration), 1e-3)
+    amount = _move_amount(duration)
+
+    def window(progress: float):
+        if motion == ImageMotion.zoom_out:
+            return 1.0 + amount * (1.0 - progress), 0.5, 0.5
+        if motion == ImageMotion.pan_right:
+            return _PAN_ZOOM, progress, 0.5
+        if motion == ImageMotion.pan_left:
+            return _PAN_ZOOM, 1.0 - progress, 0.5
+        # zoom_top：推向画面上三分之一——人脸多半在那儿。
+        return 1.0 + amount * progress, 0.5, 0.3
+
+    def sample_moved_frame(get_frame, current_time: float):
+        progress = min(max(current_time / duration, 0.0), 1.0)
+        scale, focus_x, focus_y = window(progress)
+        sampled = video_effects.move_still_frame(
+            get_frame(current_time), scale, focus_x, focus_y
+        )
+        if sampled.ndim == 2:
+            return np.clip(sampled, 0.0, 1.0)
+        return sampled
+
+    return clip.transform(sample_moved_frame, apply_to=["mask"])
+
+
 def _image_zoom_video_path(
     image_path: str, clip, clip_duration, motion: ImageMotion
 ) -> str:
@@ -2435,6 +2663,8 @@ def image_clip_suffix(clip_duration, image_motion: ImageMotion) -> str:
     identity = str(clip_duration)
     if motion == ImageMotion.zoom:
         identity = f"{identity}|{_IMAGE_ZOOM_SAMPLING_REVISION}"
+    elif motion != ImageMotion.static:
+        identity = f"{identity}|{_IMAGE_MOVE_REVISION}"
     duration_identity = hashlib.sha256(identity.encode()).hexdigest()[:16]
     return f".{motion.value}-{duration_identity}.mp4"
 
@@ -2474,11 +2704,12 @@ def render_image_zoom_video(
             logger.debug(f"reusing the rendered image clip: {os.path.basename(existing)}")
             return existing
         # 放大模式在固定画幅内做亚像素采样，静止模式保留原始构图及透明背景处理。
-        image_clip = (
-            _zoom_image_clip(clip, clip_duration)
-            if motion == ImageMotion.zoom
-            else clip
-        )
+        if motion == ImageMotion.zoom:
+            image_clip = _zoom_image_clip(clip, clip_duration)
+        elif motion == ImageMotion.static:
+            image_clip = clip
+        else:
+            image_clip = _move_image_clip(clip, clip_duration, motion)
 
         # Optionally, create a composite video clip containing the zoomed clip.
         # This is useful if you want to add other elements to the video.

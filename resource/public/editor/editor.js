@@ -66,6 +66,7 @@ const ui = {
   effectsToggle: el("effects-toggle"), effectsPanel: el("effects-panel"),
   effectsTransition: el("effects-transition"), effectsMotion: el("effects-motion"),
   effectsApply: el("effects-apply"), effectsOwn: el("effects-own"),
+  effectsFinish: el("effects-finish"),
   effectsSave: el("effects-save"), effectsClose: el("effects-close"),
   effectsNote: el("effects-note"),
   publishToggle: el("publish-toggle"), publishPanel: el("publish-panel"),
@@ -1060,7 +1061,8 @@ function drawSettings() {
   const motion = String(s.image_motion || "");
   if (motion) {
     const off = motion === "static";
-    chips.push([off ? "no image motion (static)" : "image motion: zoom", off]);
+    chips.push([off ? "no image motion (static)"
+      : `image motion: ${(MOTION_LABELS[motion] || motion).toLowerCase()}`, off]);
   }
 
   const transition = String(s.transition || "");
@@ -5088,10 +5090,15 @@ function stylePicker(selected) {
 const TRANSITION_LABELS = {
   none: "No transition", fade_in: "Fade in", fade_out: "Fade out",
   slide_in: "Slide in", slide_out: "Slide out", zoom_in: "Zoom in",
-  zoom_out: "Zoom out", shuffle: "Random each time",
+  zoom_out: "Zoom out", shuffle: "Random each time", cross_fade: "Crossfade",
 };
 
-const MOTION_LABELS = { zoom: "Slow zoom", static: "Hold still" };
+const MOTION_LABELS = {
+  zoom: "Slow zoom", static: "Hold still",
+  varied: "Varied (a different move per picture)", zoom_out: "Pull back",
+  pan_right: "Pan right", pan_left: "Pan left",
+  zoom_top: "Push in on the upper third",
+};
 
 /** 选择框：第一项永远是"跟整条片子一样"。 */
 function inheritPicker(label, ids, labels, selected, inheritText) {
@@ -6263,6 +6270,12 @@ function fillEffectsPanel(data) {
     data.transition || "none");
   fill(ui.effectsMotion, data.image_motions, MOTION_LABELS,
     data.image_motion || "zoom");
+  // 成片精修。第一项是"关掉"：成片照旧由原来的渲染器出。
+  const looks = data.finish_looks || [];
+  const lookLabels = { "": "Off — the classic render" };
+  for (const look of looks) lookLabels[look.id] = look.label;
+  fill(ui.effectsFinish, [""].concat(looks.map((look) => look.id)), lookLabels, "");
+  ui.effectsFinish.value = data.finish_look || "";
 
   const own = Number(data.scenes_with_own_transition || 0);
   ui.effectsOwn.textContent = own
@@ -6295,6 +6308,7 @@ ui.effectsSave.addEventListener("click", () => run("Saving the effects", async (
   await call("PUT", `/tasks/${encodeURIComponent(state.taskId)}/effects`, {
     transition: ui.effectsTransition.value,
     image_motion: ui.effectsMotion.value,
+    finish_look: ui.effectsFinish.value,
     apply_to_scenes: ui.effectsApply.checked,
   });
   closeEffects();

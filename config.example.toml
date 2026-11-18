@@ -934,6 +934,60 @@ voice_id = "default"
 # WebUI Preferences / WebUI 偏好
 # =============================================================================
 
+[finish]
+# The finishing pass: a second way to make the final file, done entirely in
+# ffmpeg (app/services/finishing.py). A video uses it when its "Finish" is set
+# to a look - "clean", "cold_documentary", "warm", "vivid" or "noir" - in the
+# new-video form or in the editor's effects panel. With Finish off the classic
+# renderer runs and nothing in this section is read.
+#
+# Every key is optional; the values below are the defaults.
+# 成片精修的各项开关；都可以不写，下面就是默认值。
+
+# High-pass, de-mud, presence and compression on the narration.
+# voice_processing = true
+
+# Push the music down while the narration is speaking, let it rise in pauses.
+# music_ducking = true
+
+# Loudness of the finished video in LUFS (YouTube plays at about -14).
+# 0 leaves the loudness as mixed.
+# loudness = -14.0
+
+# Film grain strength (0 = none) and the darkened corners. Both apply only to
+# the looks that have texture: cold_documentary, warm and noir.
+# grain = 5
+# vignette = true
+
+# Fade from black at the start and to black at the end, in seconds. 0 = none.
+# fade_in = 1.0
+# fade_out = 2.0
+
+# Let the language model pick three to five moments for a title card in the
+# top-left corner (a date and place, or a name and role). The choice is saved
+# as title-cards.json in the task folder: edit that file to change the cards,
+# write [] in it to have none, delete it to choose again.
+# title_cards = true
+
+# Where word timings for "a word at a time" and "the spoken one lit up"
+# subtitles come from. "whisper" listens to the narration with the [whisper]
+# model and aligns what it hears to the script, so the lit word is the one
+# being spoken; it takes a minute or two for a long video, once per narration
+# (kept as spoken-words.json in the task folder). "cues" spreads each subtitle
+# line's time over its words: instant, but the lit word can run well ahead of
+# or behind the voice. If the whisper model cannot be loaded the render stops
+# with an error naming this setting.
+# word_timing = "whisper"
+
+# "The spoken one lit up" subtitles: upper case, and the colour the spoken
+# word turns ("" picks one that stands out from the subtitle colour).
+# subtitle_uppercase = true
+# highlight_color = ""
+
+# x264 quality of the finished file: lower crf is better and larger.
+# crf = 19
+# preset = "medium"
+
 [ui]
 # Hide generation logs in the WebUI.
 hide_log = false

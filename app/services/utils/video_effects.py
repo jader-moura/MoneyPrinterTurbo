@@ -150,6 +150,29 @@ def zoom_still_frame(
     return np.asarray(resized)
 
 
+def move_still_frame(
+    frame: np.ndarray,
+    scale_factor: float,
+    focus_x: float = 0.5,
+    focus_y: float = 0.5,
+    resample: Image.Resampling = Image.Resampling.BICUBIC,
+) -> np.ndarray:
+    """``zoom_still_frame`` 加上"窗口在哪"：0 是贴左（上）边，1 是贴右（下）边。
+
+    窗口的边界同样是浮点的，所以横移和推拉一样不会一像素一像素地跳。
+    """
+    if scale_factor <= 0:
+        raise ValueError("scale_factor must be greater than zero")
+    height, width = frame.shape[:2]
+    crop_width = width / scale_factor
+    crop_height = height / scale_factor
+    left = (width - crop_width) * min(max(focus_x, 0.0), 1.0)
+    top = (height - crop_height) * min(max(focus_y, 0.0), 1.0)
+    box = (left, top, left + crop_width, top + crop_height)
+    resized = Image.fromarray(frame).resize((width, height), resample, box=box)
+    return np.asarray(resized)
+
+
 # 现在采样入口有两个（转场和静态图片各一个），所以它们都用公开名字；
 # 原来的 ``_zoom_frame`` 保留，仍然指向转场那一个。
 _zoom_frame = zoom_frame

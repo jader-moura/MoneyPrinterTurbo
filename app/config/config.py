@@ -680,6 +680,9 @@ chatterbox = _SynchronizedConfig(_cfg.get("chatterbox", {}))
 kokoro = _SynchronizedConfig(_cfg.get("kokoro", {}))
 fish_audio = _SynchronizedConfig(_cfg.get("fish_audio", {}))
 voxcpm = _SynchronizedConfig(_cfg.get("voxcpm", {}))
+# 成片精修的开关（见 app/services/finishing.py 的 DEFAULTS）。只读：没写的项
+# 用默认值，这里不往用户的 config.toml 里写任何东西。
+finish = dict(_cfg.get("finish", {}) or {})
 ui = _SynchronizedConfig(
     _cfg.get(
         "ui",

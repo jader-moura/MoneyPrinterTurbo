@@ -1634,7 +1634,13 @@ able to follow what is happening from the pictures alone.
    narration establishes anywhere must be restated in every prompt where
    people, clothing or landscape appear - "ten thousand years ago", "ancient",
    "in southern China", "pre-industrial", and so on. leaving it out gives a
-   modern street scene in the middle of a stone-age story.
+   modern street scene in the middle of a stone-age story. **keep everything
+   in the picture true to that period**: say the year or the decade and the
+   country, and name period clothing and equipment where they matter ("a
+   1959 Soviet canvas ridge tent", "a valve radio set"). a scene set in 1959
+   has no dome tents, flat monitors, mobile phones or modern offices. when
+   the narration moves to another time - "in 2019 prosecutors reopened the
+   case" - use that year for those lines and only those.
 8. **keep recurring people recognisably the same.** if the video follows one
    farmer, inventor or patient, describe them the same way each time (age,
    build, clothing) so the pictures read as one story rather than a slideshow
@@ -1649,7 +1655,15 @@ able to follow what is happening from the pictures alone.
    subject and the neighbouring lines what is happening at that moment and
    describe that, with people in it.
 10. do not quote or spell out the narration, and never ask for text, captions,
-    numbers or letters inside the picture.
+    numbers or letters inside the picture. **the image model cannot spell**:
+    anything it is asked to write comes out as gibberish or a misspelt name.
+    so do not make a written thing the subject - no newspaper front pages,
+    certificates, calendars, maps with place names, signs, name plates, book
+    titles or screens showing text. when the line is about a document, a
+    headline or a date, show the people handling it: hands holding a folder,
+    a clerk stamping a page seen from behind, a crowd reading a notice from
+    too far away to make out. never ask for a portrait captioned or labelled
+    with a real person's name; show that person in the scene, doing something.
 11. no camera directions, no style words, no lighting or render instructions -
     those are appended separately from the user's chosen style.
 12. english only.
@@ -2182,6 +2196,80 @@ def _direction_guidance(direction: str, current: str) -> str:
     if not parts:
         return ""
     return "\n" + "\n\n".join(parts) + "\n"
+
+
+_TITLE_CARD_LIMIT = 5
+
+
+def _title_card_request(subject: str, script: str) -> str:
+    return f"""
+# Role: Documentary Title Card Editor
+
+## Goals:
+Pick three to {_TITLE_CARD_LIMIT} moments in the narration below where a short
+on-screen title card (a "lower third") would help the viewer: a date and a
+place when the story moves, or the name and role of a person when they are
+first introduced.
+
+## Constrains:
+1. return a json-array of strings and nothing else.
+2. each string is three parts separated by " | ":
+   the exact phrase | the title | the second line
+3. the exact phrase is three to six consecutive words copied **character for
+   character** from the narration, at the moment the card should appear. it
+   is how the card is timed, so do not paraphrase it.
+4. the title is at most 28 characters: a date, a year, or a person's name.
+5. the second line is at most 48 characters: the place, or the person's role.
+6. use only facts the narration itself states. do not add ages, dates, places
+   or roles from your own knowledge, and do not guess.
+7. spread the cards over the whole narration; none in the last two sentences.
+8. write the title and the second line in the language of the narration.
+9. if the narration has no dates, places or named people, return [].
+
+## Output Example:
+["On February twenty sixth | FEBRUARY 26, 1959 | Northern Ural Mountains",
+ "led by Igor Dyatlov | IGOR DYATLOV | Group leader"]
+
+## Subject:
+{subject}
+
+## Narration:
+{script}
+""".strip()
+
+
+def generate_title_cards(subject: str, script: str, app_config=None) -> List[dict]:
+    """成片精修用的标题卡：在旁白的哪句话上、打什么字。
+
+    返回 ``[{"phrase", "title", "subtitle"}]``。``phrase`` 是从旁白里原样抄
+    下来的几个词——渲染时靠它在字幕时间里找到这张卡该什么时候出来，所以不在
+    旁白里的那一条在这里就丢掉。模型一条都没给时返回空列表；供应商报错照常
+    抛出来。
+
+    Title cards for the finishing pass: a phrase copied from the narration (it
+    times the card) plus two short lines. Cards whose phrase is not in the
+    narration are dropped here.
+    """
+    def squeeze(text: str) -> str:
+        return re.sub(r"[\W_]+", " ", str(text).lower()).strip()
+
+    spoken = f" {squeeze(script)} "
+    cards: List[dict] = []
+    for item in _request_terms(_title_card_request(subject, script), app_config):
+        parts = [part.strip() for part in str(item).split("|")]
+        if len(parts) < 2 or not parts[0] or not parts[1]:
+            continue
+        if f" {squeeze(parts[0])} " not in spoken:
+            logger.warning(
+                f"dropping a title card whose phrase is not in the narration: {item!r}"
+            )
+            continue
+        cards.append({
+            "phrase": parts[0],
+            "title": parts[1][:40],
+            "subtitle": (parts[2] if len(parts) > 2 else "")[:60],
+        })
+    return cards[:_TITLE_CARD_LIMIT]
 
 
 def improve_image_prompt(

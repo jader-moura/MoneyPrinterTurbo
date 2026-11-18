@@ -37,6 +37,7 @@ from typing import Any, Iterable
 
 from loguru import logger
 
+from app.models.schema import ImageMotion
 from app.services import scene_manifest
 from app.utils import utils
 
@@ -282,7 +283,7 @@ def motion_of(material: str) -> str:
     if len(parts) < 3:
         return ""
     motion = parts[1].split("-", 1)[0]
-    return motion if motion in {"zoom", "static"} else ""
+    return motion if motion in {member.value for member in ImageMotion} else ""
 
 
 def ensure_image_motion(task_id: str, material: str, motion: str) -> str:

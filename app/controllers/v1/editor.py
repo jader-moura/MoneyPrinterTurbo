@@ -654,6 +654,7 @@ def update_video_effects(
             transition=body.transition,
             image_motion=body.image_motion,
             apply_to_scenes=body.apply_to_scenes,
+            finish_look=body.finish_look,
         ),
     )
     return utils.get_response(200, data)

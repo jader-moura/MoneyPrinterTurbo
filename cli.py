@@ -195,6 +195,7 @@ _TRANSITION_MODE_VALUES = {
     "slide-out": "SlideOut",
     "zoom-in": "ZoomIn",
     "zoom-out": "ZoomOut",
+    "cross-fade": "CrossFade",
 }
 
 # 单任务 argparse 和批量清单必须共享同一份字幕位置取值，避免再次出现
@@ -211,7 +212,7 @@ _SUBTITLE_POSITION_VALUES = (
 # 字幕展示模式与入场动画由 WebUI 保存进 [ui]。两者随「逐词字幕 + 弹跳动画」
 # 加入时只改了 WebUI 与模型字段默认值，命令行一直缺少开关。取值需与
 # app/models/schema.py 的 _SUBTITLE_DISPLAY_MODES / _SUBTITLE_ANIMATIONS 一致。
-_SUBTITLE_DISPLAY_MODE_VALUES = ("sentence", "word_by_word")
+_SUBTITLE_DISPLAY_MODE_VALUES = ("sentence", "word_by_word", "highlight")
 _SUBTITLE_ANIMATION_VALUES = ("none", "pop_spring")
 
 
@@ -234,10 +235,18 @@ def _video_fit_mode(value: str) -> str:
     return normalized
 
 
+# static 和 zoom 排在前面：它们是原来就有的两种，错误信息里的顺序不变。
+_IMAGE_MOTIONS = [
+    "static", "zoom", "varied", "zoom_out", "pan_right", "pan_left", "zoom_top",
+]
+
+
 def _image_motion(value: str) -> str:
     normalized = value.strip().lower()
-    if normalized not in {"static", "zoom"}:
-        raise argparse.ArgumentTypeError("image-motion must be one of: static, zoom")
+    if normalized not in _IMAGE_MOTIONS:
+        raise argparse.ArgumentTypeError(
+            f"image-motion must be one of: {', '.join(_IMAGE_MOTIONS)}"
+        )
     return normalized
 
 
@@ -495,7 +504,7 @@ Batch manifests:
     video_group.add_argument(
         "--image-motion",
         type=_image_motion,
-        choices=["static", "zoom"],
+        choices=_IMAGE_MOTIONS,
         default=None,
         help="motion for local or AI-generated images (default: zoom)",
     )

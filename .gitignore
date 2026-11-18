@@ -69,3 +69,11 @@ htmlcov/
 # 真要提交某一首，git add -f 它。
 /resource/songs/*
 !/resource/songs/output[0-9][0-9][0-9].mp3
+
+# pytest 在 Windows 上把临时目录建在仓库里（basetemp）：都是测试跑出来的东西。
+# pytest temp folders created inside the repo on this machine.
+/pytest-of-*/
+
+# 浏览器/ffmpeg 留在仓库根目录的流媒体分片。
+# Stray streaming segments left in the repo root.
+/*.m4s

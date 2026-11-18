@@ -47,7 +47,7 @@ from app.models.schema import (
 )
 from app.services import llm, material, picture_shelf, reference_image
 from app.services import edit_history, scene_manifest, task_artifacts, timeline
-from app.services import bgm, transition_sound, voice
+from app.services import bgm, finishing, transition_sound, voice
 from app.utils import subtitle_reader, subtitle_writer
 from app.services import state as sm
 from app.services import task as tm
@@ -2168,9 +2168,12 @@ SCENE_TRANSITIONS: dict[str, str] = {
     "zoom_in": VideoTransitionMode.zoom_in.value,
     "zoom_out": VideoTransitionMode.zoom_out.value,
     "shuffle": VideoTransitionMode.shuffle.value,
+    "cross_fade": VideoTransitionMode.cross_fade.value,
 }
 
-SCENE_MOTIONS: tuple[str, ...] = ("zoom", "static")
+SCENE_MOTIONS: tuple[str, ...] = (
+    "zoom", "static", "varied", "zoom_out", "pan_right", "pan_left", "zoom_top",
+)
 
 
 def transition_id(stored: Any) -> str:
@@ -2746,6 +2749,12 @@ def video_effects(task_id: str) -> dict:
         "image_motion": str(_enum_value(getattr(params, "image_motion", "")) or ""),
         "transitions": list(SCENE_TRANSITIONS),
         "image_motions": list(SCENE_MOTIONS),
+        # 成片精修：用哪种调色（空 = 关着），以及能挑哪些。
+        "finish_look": str(getattr(params, "finish_look", "") or ""),
+        "finish_looks": [
+            {"id": look, "label": spec["label"]}
+            for look, spec in finishing.LOOKS.items()
+        ],
         # 界面要据此说清楚"改了这个，那几段还是不跟着变"。
         "scenes_with_own_transition": sum(
             1 for scene in scenes if str(scene.get("transition") or "").strip()
@@ -2760,8 +2769,9 @@ def set_video_effects(
     transition: str | None = None,
     image_motion: str | None = None,
     apply_to_scenes: bool = False,
+    finish_look: str | None = None,
 ) -> dict:
-    """一次改掉整条片子的转场（和运镜）。
+    """一次改掉整条片子的转场（和运镜、成片精修）。
 
     ``apply_to_scenes`` 打开时，顺手清掉每一段自己挑过的转场——否则"全部改成
     淡入"之后，之前单独挑过的那几段仍然我行我素,而用户以为自己已经改完了。
@@ -2794,6 +2804,15 @@ def set_video_effects(
                 )
             if motion:
                 fields["image_motion"] = motion
+
+        if finish_look is not None:
+            look = str(finish_look).strip()
+            if look and look not in finishing.LOOKS:
+                raise SceneError(
+                    f"unknown finish {look!r}; pick one of: "
+                    f"{', '.join(finishing.LOOKS)} (or empty to turn it off)"
+                )
+            fields["finish_look"] = look
 
         if fields:
             _patch_params(task_id, **fields)

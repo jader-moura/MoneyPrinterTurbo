@@ -41,7 +41,7 @@ from app.config import config
 from app.models import image_style as image_style_model
 from app.models.llm_provider import LLM_PROVIDER_REGISTRY
 from app.models.schema import MaterialInfo, TaskVideoRequest, VideoAspect
-from app.services import bgm, local_defaults, material, transition_sound, voice
+from app.services import bgm, finishing, local_defaults, material, transition_sound, voice
 from app.services import task as tm
 from app.utils import utils
 
@@ -135,7 +135,18 @@ UI_FIELDS = (
     "subtitle_animation", "subtitle_max_lines", "text_fore_color",
     "font_size", "stroke_color", "stroke_width", "rounded_subtitle_background",
     "transition_sound", "transition_sound_volume",
+    "finish_look",
 )
+# 从来没存过 ``finish_look`` 时，新片子用哪种精修。任务参数本身的默认值是空
+# （不精修）——那是给 API 和老任务的；在这张表里开的新片子默认就精修。存过
+# 的值（包括存成空的"关掉"）照旧优先。
+DEFAULT_FINISH_LOOK = "cold_documentary"
+# 第一次带精修开片子时一起换上的那几项，见 ``saved_settings``。
+FIRST_FINISHED_VIDEO = {
+    "subtitle_display_mode": "highlight",
+    "image_motion": "varied",
+    "video_transition_mode": "CrossFade",
+}
 # 这几项 WebUI 存在 ``[app]`` 里。
 APP_FIELDS = (
     "match_materials_to_script", "align_terms_to_narration",
@@ -282,6 +293,18 @@ def saved_settings(ui: Optional[Mapping] = None, app: Optional[Mapping] = None) 
         colour = str(ui.get("subtitle_background_color") or "#000000")
         if _valid("text_background_color", colour):
             saved["text_background_color"] = colour
+    if "finish_look" not in ui:
+        # 从来没存过 ``finish_look``：上一次开片子时还没有精修，那时存下来的
+        # "一句一句"、"慢推"、"不要转场"是在没有别的可挑的时候挑的。第一条
+        # 新片子用新的那一套；开过一条之后这几项和别的一样记着上次挑的。
+        #
+        # Nothing was ever saved for the finish, so the saved subtitle mode,
+        # camera move and transition were chosen before the new ones existed.
+        # The first new video starts from the new set; after that the form
+        # remembers what was chosen, like every other field.
+        saved.update(FIRST_FINISHED_VIDEO)
+    if saved.get("finish_look") not in ("", *finishing.LOOKS):
+        saved["finish_look"] = DEFAULT_FINISH_LOOK
     return saved
 
 
@@ -511,9 +534,18 @@ def form() -> dict:
             # 照片挑完，然后才开始排队出图。
             _field("photo_scene_percent", "Scenes drawn from photos you choose",
                    "select", show=drawn, options=_options(PHOTO_SHARES)),
+            _field("finish_look", "Finish (colour, sound levels, fades)", "select",
+                   options=[{"id": "", "label": "Off — the classic render"}] + [
+                       {"id": look, "label": spec["label"]}
+                       for look, spec in finishing.LOOKS.items()]),
             _field("image_motion", "Camera move on a still", "select",
                    show={"video_source": list(STILL_SOURCES)},
-                   options=_options((("zoom", "Slow zoom"), ("static", "Still")))),
+                   options=_options((
+                       ("varied", "Varied (a different move per picture)"),
+                       ("zoom", "Slow zoom"), ("zoom_out", "Pull back"),
+                       ("pan_right", "Pan right"), ("pan_left", "Pan left"),
+                       ("zoom_top", "Push in on the upper third"),
+                       ("static", "Still")))),
             _field("video_clip_duration", "Longest a picture stays (seconds)",
                    "number", min=1, max=15, step=1),
             _field("one_picture_per_sentence", "One picture per sentence", "bool",
@@ -532,7 +564,8 @@ def form() -> dict:
                    "Keep the clips in the order of the script", "bool"),
             _field("video_transition_mode", "Transition between pictures", "select",
                    options=_options((
-                       ("None", "None"), ("Shuffle", "Shuffle"), ("FadeIn", "Fade in"),
+                       ("None", "None"), ("CrossFade", "Crossfade"),
+                       ("Shuffle", "Shuffle"), ("FadeIn", "Fade in"),
                        ("FadeOut", "Fade out"), ("SlideIn", "Slide in"),
                        ("SlideOut", "Slide out"), ("ZoomIn", "Zoom in"),
                        ("ZoomOut", "Zoom out")))),
@@ -579,7 +612,9 @@ def form() -> dict:
                    show={"subtitle_enabled": [True], "subtitle_position": ["custom"]}),
             _field("subtitle_display_mode", "Show", "select", show=subtitled,
                    options=_options((("sentence", "A sentence at a time"),
-                                     ("word_by_word", "A word at a time")))),
+                                     ("word_by_word", "A word at a time"),
+                                     ("highlight", "A few words, the spoken one "
+                                                   "lit up (needs a finish)")))),
             _field("subtitle_animation", "Animation", "select", show=subtitled,
                    options=_options((("none", "None"), ("pop_spring", "Pop up")))),
             _field("subtitle_max_lines", "Most lines at once", "number",
@@ -817,6 +852,14 @@ def build_params(choices: Mapping) -> TaskVideoRequest:
         if "transition_sound" in chosen:
             raise NewVideoError(f"unknown cut sound {sound!r}")
         params["transition_sound"] = NO_SOUND
+
+    look = str(params.get("finish_look") or "").strip()
+    if look and look not in finishing.LOOKS:
+        raise NewVideoError(
+            f"unknown finish {look!r}; choose one of {', '.join(finishing.LOOKS)}, "
+            "or leave it empty for the classic render"
+        )
+    params["finish_look"] = look
 
     try:
         return TaskVideoRequest.model_validate(params)
