@@ -702,6 +702,90 @@ def uploaded_reference_photo(token: str) -> Any:
     return reference
 
 
+# 摆好的照片按这个长边出：和出图的画幅一个量级，再大只是多传几兆。
+FRAMED_LONG_EDGE = 1536
+
+
+def framed_photo(task_id: str, reference: Any, frame: Any) -> Any:
+    """照片按用户摆好的大小和位置放进这条片子的画框里，返回放好的那一张。
+
+    ``frame`` 见 ``PhotoFrame``。没动过（1、0、0）就原样返回——那时候整张
+    照片交给出图服务，由它自己不裁地放进去。动过的话在这里放好：照片没
+    盖住的地方用它自己糊开了的样子垫上，和出图服务那边是同一个办法。
+
+    The photo placed in the video's frame the way the user set it. Untouched
+    (zoom 1, centred) it is returned as it is.
+    """
+    import dataclasses
+    import io
+
+    from PIL import Image, ImageFilter
+
+    frame = dict(frame or {})
+    try:
+        zoom = float(frame.get("zoom", 1) or 1)
+        x = float(frame.get("x", 0) or 0)
+        y = float(frame.get("y", 0) or 0)
+    except (TypeError, ValueError) as exc:
+        raise SceneError("the photo's size and position must be numbers") from exc
+    if not 0.25 <= zoom <= 4 or abs(x) > 1 or abs(y) > 1:
+        raise SceneError(
+            "the photo's size must be between 25% and 400%, and it cannot be "
+            "moved more than one frame away from the middle"
+        )
+    if zoom == 1 and x == 0 and y == 0:
+        return reference
+    params = load_params(task_id)
+    wide, high = VideoAspect(
+        getattr(params, "video_aspect", None) or VideoAspect.portrait
+    ).to_resolution()
+    scale = FRAMED_LONG_EDGE / max(wide, high)
+    width, height = int(wide * scale + 0.5), int(high * scale + 0.5)
+    try:
+        with Image.open(io.BytesIO(reference.data)) as opened:
+            photo = opened.convert("RGB")
+    except Exception as exc:
+        raise SceneError(f"the chosen photo could not be read: {exc}") from exc
+    fit = min(width / photo.width, height / photo.height) * zoom
+    size = (max(1, int(photo.width * fit + 0.5)), max(1, int(photo.height * fit + 0.5)))
+    left = int(width / 2 + x * width - size[0] / 2 + 0.5)
+    top = int(height / 2 + y * height - size[1] / 2 + 0.5)
+    seen = (max(left, 0), max(top, 0),
+            min(left + size[0], width), min(top + size[1], height))
+    if seen[0] >= seen[2] or seen[1] >= seen[3]:
+        raise SceneError(
+            "the photo was moved completely out of the frame; move it back in"
+        )
+    cover = max(width / photo.width, height / photo.height)
+    behind = photo.resize(
+        (max(width, int(photo.width * cover + 0.5)),
+         max(height, int(photo.height * cover + 0.5))),
+        Image.BILINEAR,
+    )
+    edge_x, edge_y = (behind.width - width) // 2, (behind.height - height) // 2
+    behind = behind.crop((edge_x, edge_y, edge_x + width, edge_y + height)).filter(
+        ImageFilter.GaussianBlur(max(width, height) / 32)
+    )
+    placed = behind.copy()
+    placed.paste(photo.resize(size, Image.LANCZOS), (left, top))
+    # 照片和垫底的那一层之间是一条软边，不是一条直线：直线是个形状，模型
+    # 会把它画出来。只在照片没顶到画框边的那几条边上。
+    soft = max(2, min(width, height) // 90)
+    inner = (seen[0] + (soft if seen[0] > 0 else 0),
+             seen[1] + (soft if seen[1] > 0 else 0),
+             seen[2] - (soft if seen[2] < width else 0),
+             seen[3] - (soft if seen[3] < height else 0))
+    mask = Image.new("L", (width, height), 0)
+    if inner[0] < inner[2] and inner[1] < inner[3]:
+        mask.paste(255, inner)
+    mask = mask.filter(ImageFilter.GaussianBlur(soft / 2))
+    out = io.BytesIO()
+    Image.composite(placed, behind, mask).save(out, "PNG")
+    return dataclasses.replace(
+        reference, data=out.getvalue(), width=width, height=height
+    )
+
+
 def regenerate_material(
     task_id: str,
     index: Any,
@@ -2428,7 +2512,8 @@ def suggested_keyword(task_id: str, index: Any) -> str:
 
 
 def suggest_image_prompt(
-    task_id: str, index: Any, *, direction: str = "", current: str = ""
+    task_id: str, index: Any, *, direction: str = "", current: str = "",
+    fresh: bool = False,
 ) -> str:
     """按用户的一句话，把这一段的提示词写成一条完整的画面描述。
 
@@ -2471,7 +2556,11 @@ def suggest_image_prompt(
     # 所以草稿和真正出图时用的是同一套风格词。
     style = _image_prompt_template(params, scene.get("image_style"))
 
-    chosen = str(current or "").strip() or str(scene.get("keyword") or "")
+    # ``fresh`` 是"换个想法"：存着的那条不递给模型。递过去的话模型被要求
+    # "保留里面已经对的东西"，于是一条配错了句子的提示词怎么点都还是它。
+    chosen = str(current or "").strip() or (
+        "" if fresh else str(scene.get("keyword") or "")
+    )
     try:
         return llm.improve_image_prompt(
             subject,

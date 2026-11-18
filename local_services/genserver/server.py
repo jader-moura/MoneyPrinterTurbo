@@ -1131,26 +1131,77 @@ def decode_reference(value: Any) -> Any:
         raise ValueError(f"image could not be read: {err}") from None
 
 
-def fit_reference(image: Any, width: int, height: int) -> Any:
-    """The starting picture at exactly WIDTHxHEIGHT, by cover-crop.
+def whole_reference(image: Any, width: int, height: int, step: int = 1) -> Any:
+    """The whole picture, as large as fits inside WIDTHxHEIGHT. Nothing cut.
 
-    Letterboxing would hand the model black bars to denoise, and they come back
-    as black bars. Squashing bends faces. Cover keeps the proportions and loses
-    the edges, which is what a reference picture is for.
+    Its own proportions, so the result is WIDTHxHEIGHT only when the picture
+    already had that shape. `step` is for a model that takes sides in
+    multiples of something: each side is brought down to one by resizing, a
+    squeeze of at most `step - 1` pixels, because the alternative — letting
+    the pipeline do it — is a crop.
     """
     from PIL import Image
 
+    scale = min(width / image.width, height / image.height)
+    size = [
+        min(width, max(1, int(image.width * scale + 0.5))),
+        min(height, max(1, int(image.height * scale + 0.5))),
+    ]
+    if step > 1:
+        size = [max(step, (side // step) * step) for side in size]
+    if tuple(size) == image.size:
+        return image
+    return image.resize(tuple(size), Image.LANCZOS)
+
+
+def fit_reference(image: Any, width: int, height: int) -> Any:
+    """The starting picture at exactly WIDTHxHEIGHT, with none of it cut off.
+
+    The picture is scaled until all of it is inside the frame. What is left
+    over at the sides (or above and below) is filled with the same picture,
+    grown to cover the frame and blurred until it is only colour: something
+    the model can turn into background.
+
+    It used to be cover-cropped, which loses the edges — and on a portrait
+    photograph in a landscape frame, the edges are the top of a head. Black
+    bars are not the answer either: they are handed to the model to denoise
+    and come back as black bars. Squashing bends faces.
+    """
+    from PIL import Image, ImageFilter
+
     if image.width == width and image.height == height:
         return image
-    scale = max(width / image.width, height / image.height)
-    grown = image.resize(
-        (max(width, int(image.width * scale + 0.5)),
-         max(height, int(image.height * scale + 0.5))),
-        Image.LANCZOS,
+    whole = whole_reference(image, width, height)
+    if whole.size == (width, height):
+        return whole
+    cover = max(width / image.width, height / image.height)
+    behind = image.resize(
+        (max(width, int(image.width * cover + 0.5)),
+         max(height, int(image.height * cover + 0.5))),
+        Image.BILINEAR,
     )
-    left = (grown.width - width) // 2
-    top = (grown.height - height) // 2
-    return grown.crop((left, top, left + width, top + height))
+    left = (behind.width - width) // 2
+    top = (behind.height - height) // 2
+    behind = behind.crop((left, top, left + width, top + height)).filter(
+        ImageFilter.GaussianBlur(max(width, height) / 32)
+    )
+    at = ((width - whole.width) // 2, (height - whole.height) // 2)
+    framed = behind.copy()
+    framed.paste(whole, at)
+    # A soft seam instead of a ruled line where the picture meets what is
+    # behind it: a hard edge is a shape, and the model draws shapes. Only on
+    # the sides that touch the fill, and only a few pixels wide.
+    soft = max(2, min(width, height) // 90)
+    mask = Image.new("L", (width, height), 0)
+    inset_x = soft if whole.width < width else 0
+    inset_y = soft if whole.height < height else 0
+    mask.paste(
+        255,
+        (at[0] + inset_x, at[1] + inset_y,
+         at[0] + whole.width - inset_x, at[1] + whole.height - inset_y),
+    )
+    mask = mask.filter(ImageFilter.GaussianBlur(soft / 2))
+    return Image.composite(framed, behind, mask)
 
 
 def outlines_of(image: Any, keep: float = 0.12) -> Any:
@@ -1257,7 +1308,12 @@ def generate(body: dict) -> dict:
                 f"{editor.id} takes no negative prompt; say what is wanted in "
                 f"the instruction instead."
             )
-        reference = fit_reference(decode_reference(reference), width, height)
+        # The editing model reads the picture beside the canvas rather than
+        # painting over it, so it is given the whole photograph in its own
+        # shape and draws it into the frame that was asked for.
+        reference = whole_reference(
+            decode_reference(reference), width, height, editor.granularity
+        )
         if body.get("steps") is None:
             steps = editor.steps
         if body.get("guidance") is None:

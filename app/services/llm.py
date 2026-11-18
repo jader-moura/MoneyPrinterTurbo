@@ -1409,10 +1409,72 @@ _PER_LINE_CONTEXT = 3
 
 def _numbered_lines(lines, start: int) -> str:
     """按整篇的真实序号编号，而不是每一批都从 1 开始。"""
+    # 一句一行。一段旁白里可以有换行（字幕是分行显示的），原样放进来的话
+    # 编号列表里就多出几行没有编号的——模型把它们也当成一句，从那里开始
+    # 后面每一条提示词都配到了别的句子上。
     return "\n".join(
-        f"{start + offset}. {utils.remove_pause_tags(line)}"
+        f"{start + offset}. {' '.join(utils.remove_pause_tags(line).split())}"
         for offset, line in enumerate(lines)
     )
+
+
+def _answer_numbering(start: int, count: int) -> str:
+    """让模型每一条都写上它是给第几句的。
+
+    为什么需要它
+    ------------
+    以前是按位置配的：数组里第 i 条配第 i 句。模型只要中途多写一条、少写
+    一条、或者把两句并成一条，后面整批就全部错位——而且看不出来，因为条数
+    可能还是对的。实测那条片子第 25-48 句这一批：第 39 句"这个名字常被译作
+    死亡之山"配的是帐篷里的收音机，讲曼西老人指着山的那一条跑到了第 44 句
+    "佳特洛夫答应发电报"下面。
+
+    写上编号之后按编号配：错一条只错那一条，缺的那几句单独再问。
+
+    Answers used to be matched to lines by position, so one extra, missing or
+    merged item shifted every prompt after it onto the wrong line, silently.
+    With the line number on each item they are matched by number instead.
+    """
+    return f"""
+### How To Answer
+Begin every item with the number of the narration line it is for, then a
+colon - "{start}: ..." for line {start}, and so on up to line
+{start + count - 1}. One item per numbered line: a line is one item however
+long it is. The numbers are how your answers are matched to the lines, so do
+not skip, merge or reorder them. (The example above leaves the numbers out;
+your items must have them.)
+"""
+
+
+_ANSWER_NUMBER = re.compile(r"^\s*(?:line\s*)?#?(\d{1,4})\s*[:.)\]|-]\s*(.*)$",
+                            re.IGNORECASE | re.DOTALL)
+
+
+def _by_line_number(items: List[str], start: int, count: int):
+    """把模型写了编号的那些条按编号放回各自的句子上。
+
+    返回长度为 ``count`` 的列表，没写到的句子是空字符串。模型没照着写编号
+    （一条带编号的都没有，或者不到一半）就返回 ``None``，由调用方按位置配，
+    和以前一样。
+    """
+    placed = [""] * count
+    numbered = 0
+    filled = [item for item in items if str(item or "").strip()]
+    for item in filled:
+        found = _ANSWER_NUMBER.match(str(item))
+        if not found:
+            continue
+        at = int(found.group(1)) - start
+        text = found.group(2).strip()
+        if not 0 <= at < count or not text:
+            continue
+        numbered += 1
+        # 同一个编号写了两遍：留第一条。
+        if not placed[at]:
+            placed[at] = text
+    if not filled or numbered * 2 < len(filled):
+        return None
+    return placed
 
 
 def _placement_guidance(
@@ -1576,7 +1638,12 @@ able to follow what is happening from the pictures alone.
 8. **keep recurring people recognisably the same.** if the video follows one
    farmer, inventor or patient, describe them the same way each time (age,
    build, clothing) so the pictures read as one story rather than a slideshow
-   of strangers.
+   of strangers. **write that description out in full every time.** the image
+   model is given one prompt and nothing else: it has never seen the other
+   pictures, so "the same man", "same group", "the farmer from before" or
+   "as earlier" mean nothing to it and it draws a stranger. never point at
+   another picture - say again who it is: "a tall bearded engineer in his
+   fifties in a grey wool coat", every time he appears.
 9. a line that cannot be drawn on its own ("Left untreated", "Year after
    year", "Keep going for hours") still gets a concrete scene: infer from the
    subject and the neighbouring lines what is happening at that moment and
@@ -1594,8 +1661,9 @@ China about ten thousand years ago.
   thousand years ago, seeds already scattering from the stalk",
  "an ancient Chinese farmer in a straw hat crouched in the marsh, face tight
   with frustration as the ripe grains fall from his hands",
- "the same ancient farmer and two others cutting wild rice with small stone
-  blades, barefoot in the shallow water of a prehistoric paddy",
+ "an ancient Chinese farmer in a straw hat and two other barefoot farmers
+  cutting wild rice with small stone blades in the shallow water of a
+  prehistoric paddy in southern China",
  "an ancient Chinese farmer sorting the heaviest seed heads into a woven
   basket, picking out the ones still clinging to the stalk"]
 
@@ -1634,9 +1702,178 @@ The picture written for the line immediately before this section was:
 "{text}"
 
 If a person in that picture recurs here, describe them the same way (age,
-build, clothing, setting) so the pictures read as one story. Do not restart
-the cast or re-introduce anyone as though the viewer has not met them.
+build, clothing, setting) so the pictures read as one story, and do not
+invent a new cast. Write the description out again in every prompt: each
+prompt is drawn on its own, so never write "the same man" or "as before".
 """
+
+
+# 一条提示词指着别的画面说话的几种写法。"at the same time" 这类不算。
+_LEANS_ON_ANOTHER = re.compile(
+    r"\bsame\b(?!\s+(?:time|moment|instant|day|night|year)\b)"
+    r"|\b(?:as|from|like|seen)\s+(?:before|earlier)\b"
+    r"|\b(?:the\s+)?(?:previous|earlier|preceding|last)\s+"
+    r"(?:scene|picture|image|shot|frame|prompt)\b"
+    r"|\baforementioned\b",
+    re.IGNORECASE,
+)
+
+# 改写时带上前面几条：指的那个人多半就在这几条里。
+_STAND_ALONE_CONTEXT = 4
+# 一次请求改几条。实测本地模型一次改七条时，有几条被改成了完全不相干的
+# 画面；三五条一批没有这个问题。
+_STAND_ALONE_BATCH = 4
+
+_POINTER_WORDS = {"same", "before", "earlier", "previous", "preceding",
+                  "aforementioned", "again"}
+
+
+def _keeps_the_picture(original: str, rewritten: str) -> bool:
+    """改写有没有只换掉"同一个人"那几个字，而不是另画了一张。
+
+    实测：模型有时把 "the same hiker closing the diary" 改成一个在冰湖上看
+    绿光的人——人是描述出来了，这一句旁白要的画面却没了。原来那一条里的
+    实词大部分还在、长度也没有翻倍，才算是同一张画。
+    """
+    words = {word for word in re.findall(r"[a-z0-9]{4,}", str(original).lower())
+             if word not in _POINTER_WORDS}
+    if not words:
+        return True
+    text = str(rewritten).lower()
+    kept = sum(1 for word in words if word in text)
+    return kept >= 0.6 * len(words) and len(rewritten) <= 2 * len(original) + 160
+
+
+def _without_pointers(prompt: str) -> str:
+    """最后的办法：把指着别处的那几个字拿掉，别的不动。
+
+    "the same nine hikers ..." 变成 "the nine hikers ..."。出图模型本来也
+    只会把它画成"九个徒步的人"，所以这样不比原来差；只是没能把人描述出来。
+    """
+    text = re.sub(r"\b[Tt]he same\b", lambda found: found.group(0)[:3], str(prompt))
+    text = re.sub(r"^\s*[Ss]ame\s+", "", text)
+    text = re.sub(r"\bsame\s+", "", text, flags=re.IGNORECASE)
+    text = re.sub(
+        r",?\s*\b(?:as|from|like|seen)\s+(?:before|earlier)\b", "", text,
+        flags=re.IGNORECASE)
+    text = re.sub(
+        r",?\s*\b(?:from|in|of)\s+the\s+(?:previous|earlier|preceding|last)\s+"
+        r"(?:scene|picture|image|shot|frame|prompt)\b", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\baforementioned\s+", "", text, flags=re.IGNORECASE)
+    return " ".join(text.split())
+
+
+def _leans_on_another(prompt: str) -> bool:
+    """这一条是不是靠别的画面才说得通（"the same man"、"as before"）。"""
+    return bool(_LEANS_ON_ANOTHER.search(str(prompt or "")))
+
+
+def _stand_alone_request(subject: str, items: List[dict]) -> str:
+    blocks = []
+    for number, item in enumerate(items, 1):
+        earlier = "\n".join(f"   - {one}" for one in item["earlier"]) or "   - (none)"
+        blocks.append(
+            f"{number}. Earlier pictures, for reference only:\n{earlier}\n"
+            f"   Rewrite this one: {item['prompt']}"
+        )
+    return f"""
+# Role: Image Prompt Editor
+
+## Goals:
+Each prompt below is handed to an image model **on its own**. The model sees
+that one sentence and nothing else: it has never seen the other pictures. Some
+of these prompts point at another picture ("the same man", "same group", "as
+before"), which means nothing to it, so it draws a stranger.
+
+Rewrite each numbered prompt so that it stands alone.
+
+## Constrains:
+1. return a json-array of strings and nothing else, with exactly {len(items)}
+   items, in the same order.
+2. replace every reference to another picture with the full description of
+   who or what is meant - age, build, clothing, period, place - taken from the
+   earlier pictures listed with it. if they do not describe it, infer it from
+   the video subject.
+3. the result must not contain "same", "as before", "again", "previous" or
+   any other pointer to another picture.
+4. change nothing else: the action, the setting and the feeling stay as they
+   are. one sentence, english only, no style or camera words.
+
+## Context:
+### Video Subject
+{subject}
+
+### Prompts
+{chr(10).join(blocks)}
+""".strip()
+
+
+def _stand_alone(subject: str, prompts: List[str], app_config=None) -> List[str]:
+    """让每一条提示词自己就说得通，不指着别的画面。
+
+    为什么需要它
+    ------------
+    每张图是分开画的。出图模型拿到的只有这一条，"Same group of hikers
+    ..."、"The same man ..." 对它来说就是"一群人"、"一个人"——画出来的是
+    陌生人。规则里已经写了"每次都把人重新描述一遍"，但模型照样会偷这个懒，
+    而且越往后越常见：它自己记得前面写过谁。
+
+    所以写完之后再查一遍：哪一条指着别的画面，就连同它前面的几条一起交回
+    去，只改那一条，把"同一个人"换成那个人的样子。别的条一个字不动。
+
+    改写只有在"还是同一张画"时才收下（见 ``_keeps_the_picture``）。没改成
+    的单独再问一次；还不行就只把指着别处的那几个字拿掉，并且在日志里点名
+    是第几条——少一处连贯比整条片子写不出来好，但不能没人知道。
+
+    Every picture is drawn alone, so a prompt that says "the same man" gives
+    the image model a stranger. Prompts that point at another picture are sent
+    back, with the few before them, to be rewritten with the description
+    spelled out. The others are not touched.
+    """
+    prompts = list(prompts)
+    leaning = [at for at, prompt in enumerate(prompts) if _leans_on_another(prompt)]
+    if not leaning:
+        return prompts
+    logger.info(
+        f"{len(leaning)} image prompt(s) point at another picture "
+        f"(\"the same ...\"); rewriting them to stand on their own"
+    )
+    def rewrite(batch: List[int]) -> List[int]:
+        """改这几条；返回没改成的那几条。"""
+        items = [
+            {
+                "prompt": prompts[at],
+                # 前面那几条用的是已经改好的：指的那个人可能就是刚改出来的。
+                "earlier": prompts[max(0, at - _STAND_ALONE_CONTEXT):at],
+            }
+            for at in batch
+        ]
+        written = _request_terms(_stand_alone_request(subject, items), app_config)
+        failed = []
+        for place, at in enumerate(batch):
+            fresh = written[place].strip() if place < len(written) else ""
+            if (fresh and not _leans_on_another(fresh)
+                    and _keeps_the_picture(prompts[at], fresh)):
+                prompts[at] = fresh
+            else:
+                failed.append(at)
+        return failed
+
+    failed: List[int] = []
+    for start in range(0, len(leaning), _STAND_ALONE_BATCH):
+        failed.extend(rewrite(leaning[start:start + _STAND_ALONE_BATCH]))
+    # 没改成的一条一条再问一次：单独一条，模型不容易串。
+    left = [at for at in failed if rewrite([at])]
+    for at in left:
+        prompts[at] = _without_pointers(prompts[at])
+    if left:
+        logger.warning(
+            "the model could not spell out who is meant in the image prompt of "
+            f"scene(s) {', '.join(str(at + 1) for at in left)}; the words "
+            "pointing at another picture were removed and the rest left as it "
+            "was. Add the description by hand if the person matters."
+        )
+    return prompts
 
 
 def _request_terms(prompt: str, app_config=None) -> List[str]:
@@ -1705,6 +1942,7 @@ def _terms_for_chunk(
     )
     if previous_prompt:
         placement += _continuity_guidance(previous_prompt)
+    placement += _answer_numbering(start, len(lines))
 
     numbered = _numbered_lines(lines, start)
     # 文生图那条路要的是一整句画面描述，库存素材那条路要的是短查询。
@@ -1721,7 +1959,45 @@ def _terms_for_chunk(
         f"generating one {wanted} per narration line: {len(lines)} lines"
     )
 
-    terms = [term.strip() for term in _request_terms(prompt, app_config)[:len(lines)]]
+    answered = _request_terms(prompt, app_config)
+    placed = _by_line_number(answered, start, len(lines))
+    if placed is not None:
+        # 按编号配好了。中间缺的那几句（模型跳过去的）一段一段单独再问。
+        missing = [at for at, term in enumerate(placed) if not term]
+        if reask and missing and len(missing) < len(lines):
+            logger.warning(
+                f"the model wrote no {wanted} for line(s) "
+                f"{', '.join(str(start + at) for at in missing)}; asking again "
+                f"for just those"
+            )
+            runs: List[List[int]] = []
+            for at in missing:
+                if runs and runs[-1][-1] == at - 1:
+                    runs[-1].append(at)
+                else:
+                    runs.append([at])
+            for run in runs:
+                first, last = run[0], run[-1] + 1
+                again = _terms_for_chunk(
+                    subject,
+                    lines[first:last],
+                    app_config,
+                    visual_prompt=visual_prompt,
+                    image_style=image_style,
+                    start=start + first,
+                    total=total or len(lines),
+                    before=lines[max(0, first - _PER_LINE_CONTEXT):first],
+                    after=lines[last:last + _PER_LINE_CONTEXT] or after,
+                    previous_prompt=placed[first - 1] if first else previous_prompt,
+                    reask=False,
+                )
+                for offset, term in enumerate(again[:last - first]):
+                    placed[first + offset] = term
+        while placed and not placed[-1]:
+            placed.pop()
+        return placed
+
+    terms = [term.strip() for term in answered[:len(lines)]]
     # 末尾的空字符串算没给，否则再问那一步会被一个 "" 挡住。
     while terms and not terms[-1]:
         terms.pop()
@@ -1855,6 +2131,10 @@ def generate_terms_per_line(
             )
         collected.extend(_pad_to_lines(chunk, written, subject, start + 1))
 
+    if visual_prompt:
+        # 每张图是分开画的：指着别的画面说话的那几条，改成自己说得通。
+        collected = _stand_alone(subject, collected, app_config)
+
     wanted = "image prompt" if visual_prompt else "search term"
     logger.success(f"completed: {len(collected)} per-line {wanted}s")
     return collected
@@ -1975,6 +2255,12 @@ def improve_image_prompt(
             "the model returned no prompt for this picture; try again, or "
             "write the prompt yourself in the box"
         )
+    if _leans_on_another(improved):
+        # 手改的这一条也一样：出图模型只看得到它。原来那条在场，"同一个人"
+        # 指的多半就是那里面的人。
+        improved = _stand_alone(
+            subject, ([existing] if existing else []) + [improved], app_config
+        )[-1]
     logger.info(f"rewrote the image prompt for line {position}: {improved}")
     return improved
 

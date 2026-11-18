@@ -23,7 +23,7 @@ import os
 from typing import Optional
 
 from fastapi import Depends, File, Path, Query, Request, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from loguru import logger
 from starlette.background import BackgroundTask
 
@@ -1281,6 +1281,24 @@ def scene_photo_candidates(
 
 
 @router.get(
+    "/tasks/{task_id}/photos/uploaded/{token}",
+    summary="A photograph that was just uploaded or chosen, to look at",
+)
+def uploaded_scene_photo(
+    request: Request,
+    task_id: str = Path(..., description="Task ID"),
+    token: str = Path(..., max_length=80),
+):
+    """刚传上来（或者刚在 Google 里点中）的那一张：窗里要把它摆出来。"""
+    request_id = base.get_task_id(request)
+    _require_task(task_id, request_id)
+    photo = _handle(
+        task_id, request_id, lambda: scene_editor.uploaded_reference_photo(token)
+    )
+    return Response(content=photo.data, media_type="image/png")
+
+
+@router.get(
     "/tasks/{task_id}/photos/used/{name}",
     summary="The photograph a scene was drawn from",
 )
@@ -1403,6 +1421,13 @@ def keep_scene_photo_pick(
                 photo = scene_editor.kept_reference_photo(task_id, body.photo_kept)
             elif body.photo_url:
                 photo = scene_editor.chosen_reference_photo(task_id, body.photo_url)
+        if body.frame is not None:
+            if photo is None:
+                raise scene_editor.SceneError(
+                    "a size and position were given, but no photo was chosen "
+                    "to place"
+                )
+            photo = scene_editor.framed_photo(task_id, photo, body.frame.model_dump())
         return scene_editor.keep_photo_pick(
             task_id, index,
             photo=photo, skip=body.skip, search=str(body.search or ""),
@@ -1455,6 +1480,16 @@ def queue_scene_material(
             return scene_editor.chosen_reference_photo(task_id, body.photo_url)
         return None
 
+    def in_its_frame(photo):
+        # 用户在窗里摆好的大小和位置。没摆就是整张照片，一点不裁。
+        if body.frame is None:
+            return photo
+        if photo is None:
+            raise scene_editor.SceneError(
+                "a size and position were given, but no photo was chosen to place"
+            )
+        return scene_editor.framed_photo(task_id, photo, body.frame.model_dump())
+
     job = _handle(
         task_id,
         request_id,
@@ -1463,7 +1498,7 @@ def queue_scene_material(
             index,
             keyword=body.keyword,
             image_style=body.image_style,
-            photo=chosen_photo(),
+            photo=in_its_frame(chosen_photo()),
             # 照着一张真实照片重画。排进队列里而不是同步做：搜图加出图是
             # 分钟级的，而队列那边本来就一张一张地画、一张一张地报进度。
             from_photo=bool(body.from_photo),

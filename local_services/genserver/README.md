@@ -34,8 +34,11 @@ already speaks this route — MoneyPrinterTurbo's `openai_image` source — need
 client, no multipart encoder and no second base url. A client that never sends them sees
 no difference whatsoever.
 
-The picture is cover-cropped to the size being painted (letterboxing would hand the model
-black bars to denoise, and they come back as black bars), re-encoded without EXIF, and
+The picture is never cropped. All of it is scaled to fit inside the size being painted, and
+what is left over at the sides is filled with a blurred copy of the same picture (black bars
+would be handed to the model to denoise, and they come back as black bars). With
+`follow: "picture"` the editing model is given the whole picture in its own proportions
+instead. Either way it is re-encoded without EXIF, and
 refused with a 400 if it is not a picture. `strength` is how much noise is added before
 denoising: at `1.0` the picture is ignored, at `0.75` the composition survives and
 everything else is repainted, at `0.3` you get the same picture again in a slightly

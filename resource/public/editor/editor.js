@@ -591,7 +591,9 @@ const SAME_PICTURE = "picture";
 
 // 上一次选的那个。整个编辑器记着：连着重画好几段的时候，用户的意图通常
 // 是同一个，每一段都要重选一遍是白费的点击。
-let photoKeep = KEEP_THE_PHOTO;
+// 一开始是"同一张图，换成我的画风"：照片里的东西原样留着，画风是这条
+// 片子的——挑一张照片的人多半要的就是这个。
+let photoKeep = SAME_PICTURE;
 
 /** "这一张保留多少照片"的下拉框。 */
 function photoKeepPicker() {
@@ -645,7 +647,8 @@ async function queueRegeneration(index, keyword, imageStyle, fromPhoto, strength
       Object.assign(body, photo || {});
     }
     const chose = !!(photo
-      && (photo.photo_url || photo.photo_upload || photo.photo_kept));
+      && (photo.photo_url || photo.photo_upload || photo.photo_kept
+        || photo.photo_picked));
     const job = await call(
       "POST",
       `${scenePath(index)}/material/queue`,
@@ -3156,6 +3159,193 @@ photoKeepChoice.wrap.title = "Measured on this model: keeping the photograph giv
   + "the subject. Same picture gives both; it ignores the prompt.";
 ui.photoKeepSlot.appendChild(photoKeepChoice.wrap);
 
+/* ---------- 手里的那张照片，摆进画框里 ----------
+
+   照着照片画之前，照片先摆在这扇窗里的一个画框里（画框就是这条片子的
+   比例）。一开始整张照片都在框里，一点不裁；拖滑块改大小，拖照片改位置。
+   放大到出框的那一部分是用户自己决定不要的——程序自己从不裁。
+
+   这一段已经有一张照片的（照着画过的那一张，或者开画之前从 Google 挑下来
+   存着的那一张），开窗就摆着它：点"照这张画"就用，不用再去搜。 */
+const photoInHand = { extra: null, zoom: 1, x: 0, y: 0, drag: null };
+const PHOTO_ZOOM = { least: 0.3, most: 3 };
+
+const photoStage = (() => {
+  const box = document.createElement("div");
+  box.className = "photo-have";
+  box.hidden = true;
+  const view = document.createElement("div");
+  view.className = "photo-frame";
+  view.title = "Drag the photo to move it. Scroll to resize it.";
+  const behind = document.createElement("img");
+  behind.className = "photo-frame-behind";
+  const shot = document.createElement("img");
+  shot.className = "photo-frame-shot";
+  for (const one of [behind, shot]) {
+    one.alt = "";
+    one.draggable = false;
+    // 不把"我从哪个页面来的"告诉图床。
+    one.referrerPolicy = "no-referrer";
+  }
+  view.append(behind, shot);
+  const side = document.createElement("div");
+  side.className = "photo-have-side";
+  const head = document.createElement("b");
+  const line = document.createElement("span");
+  line.textContent = "It starts with the whole photo in the frame, nothing "
+    + "cropped. Drag the slider to resize it and drag the photo to move it; "
+    + "what you push outside the frame is left out.";
+  const sizeRow = document.createElement("label");
+  sizeRow.className = "photo-size";
+  const sizeName = document.createElement("span");
+  sizeName.textContent = "Photo size";
+  const size = document.createElement("input");
+  size.type = "range";
+  size.min = String(PHOTO_ZOOM.least * 100);
+  size.max = String(PHOTO_ZOOM.most * 100);
+  size.step = "1";
+  const sizeSays = document.createElement("span");
+  sizeRow.append(sizeName, size, sizeSays);
+  const buttons = document.createElement("div");
+  buttons.className = "row";
+  const whole = button("Whole photo", "small", () => setPhotoFrame(1, 0, 0));
+  whole.title = "Back to the whole photo, centred, nothing cropped.";
+  const go = button("Draw from this photo", "primary small",
+    () => redrawFromPhoto(photoInHand.extra));
+  buttons.append(go, whole);
+  side.append(head, line, sizeRow, buttons);
+  box.append(view, side);
+  ui.photoGrid.before(box);
+  return { box, view, behind, shot, head, size, sizeSays };
+})();
+
+/** 按现在的大小和位置把照片摆进画框。 */
+function placePhotoInFrame() {
+  const { view, shot, size, sizeSays } = photoStage;
+  size.value = String(Math.round(photoInHand.zoom * 100));
+  sizeSays.textContent = `${Math.round(photoInHand.zoom * 100)}%`;
+  const wide = view.clientWidth;
+  const high = view.clientHeight;
+  const w = shot.naturalWidth;
+  const h = shot.naturalHeight;
+  if (!wide || !high || !w || !h) return;
+  // 和服务端同一条式子：1 是"整张照片刚好放进画框"。
+  const fit = Math.min(wide / w, high / h) * photoInHand.zoom;
+  shot.style.width = `${w * fit}px`;
+  shot.style.height = `${h * fit}px`;
+  shot.style.left = `${wide / 2 + photoInHand.x * wide - (w * fit) / 2}px`;
+  shot.style.top = `${high / 2 + photoInHand.y * high - (h * fit) / 2}px`;
+}
+
+function setPhotoFrame(zoom, x, y) {
+  const within = (value, least, most) => Math.min(most, Math.max(least, value));
+  photoInHand.zoom = within(zoom, PHOTO_ZOOM.least, PHOTO_ZOOM.most);
+  photoInHand.x = within(x, -1, 1);
+  photoInHand.y = within(y, -1, 1);
+  placePhotoInFrame();
+}
+
+/** 用户摆的大小和位置；没动过就是 null（整张照片，什么都不用说）。 */
+function photoFrameChosen() {
+  const { zoom, x, y } = photoInHand;
+  if (zoom === 1 && !x && !y) return null;
+  const short = (value) => Math.round(value * 1000) / 1000;
+  return { zoom: short(zoom), x: short(x), y: short(y) };
+}
+
+/** 这一种挑法的那张照片，在哪能看到。看不到的（"替我挑一张"）是空的。 */
+function photoAddress(extra) {
+  const task = `${API}/tasks/${encodeURIComponent(state.taskId)}`;
+  if (!extra) return "";
+  if (extra.photo_kept) return `${task}/photos/used/${encodeURIComponent(extra.photo_kept)}`;
+  if (extra.photo_picked) return `${API}${scenePath(photoPick.at)}/photo-pick`;
+  if (extra.photo_upload) {
+    return `${task}/photos/uploaded/${encodeURIComponent(extra.photo_upload)}`;
+  }
+  return extra.photo_url || "";
+}
+
+/** 把一张照片拿在手里：摆进画框，等用户点"照这张画"。 */
+function holdPhoto(extra, title) {
+  const { box, view, behind, shot, head } = photoStage;
+  Object.assign(photoInHand, { extra, zoom: 1, x: 0, y: 0, drag: null });
+  const ratio = ASPECT_NUMBER[state.settings.aspect] || 9 / 16;
+  view.style.aspectRatio = String(ratio);
+  // 竖的片子按高算，横的按宽算：画框不该比窗还高。
+  view.style.width = ratio < 1 ? "auto" : "340px";
+  view.style.height = ratio < 1 ? "300px" : "auto";
+  head.textContent = title;
+  box.hidden = false;
+  const address = photoAddress(extra);
+  shot.src = address;
+  behind.src = address;
+  placePhotoInFrame();
+}
+
+function dropPhotoInHand() {
+  photoInHand.extra = null;
+  photoStage.box.hidden = true;
+  photoStage.shot.removeAttribute("src");
+  photoStage.behind.removeAttribute("src");
+}
+
+function samePhotoChoice(one, other) {
+  return !!one && !!other && JSON.stringify(one) === JSON.stringify(other);
+}
+
+photoStage.shot.addEventListener("load", placePhotoInFrame);
+// 照片看不了（文件不在了、图床不给）：这一块收起来，不摆一个空画框。
+photoStage.shot.addEventListener("error", () => {
+  if (photoInHand.extra) dropPhotoInHand();
+});
+photoStage.size.addEventListener("input", () => {
+  setPhotoFrame(Number(photoStage.size.value) / 100, photoInHand.x, photoInHand.y);
+});
+photoStage.view.addEventListener("pointerdown", (event) => {
+  photoInHand.drag = { x: event.clientX, y: event.clientY };
+  photoStage.view.setPointerCapture(event.pointerId);
+});
+photoStage.view.addEventListener("pointermove", (event) => {
+  const from = photoInHand.drag;
+  if (!from) return;
+  const { view } = photoStage;
+  setPhotoFrame(photoInHand.zoom,
+    photoInHand.x + (event.clientX - from.x) / (view.clientWidth || 1),
+    photoInHand.y + (event.clientY - from.y) / (view.clientHeight || 1));
+  photoInHand.drag = { x: event.clientX, y: event.clientY };
+});
+for (const done of ["pointerup", "pointercancel"]) {
+  photoStage.view.addEventListener(done, () => { photoInHand.drag = null; });
+}
+photoStage.view.addEventListener("wheel", (event) => {
+  event.preventDefault();
+  setPhotoFrame(photoInHand.zoom * (event.deltaY < 0 ? 1.06 : 1 / 1.06),
+    photoInHand.x, photoInHand.y);
+}, { passive: false });
+
+// 挑了一张之后先摆进画框再画，还是点了就画。记在这台浏览器里：一口气挑
+// 几十张的人会想关掉它。
+const photoFrameFirst = (() => {
+  const wrap = document.createElement("label");
+  wrap.className = "photo-frame-first";
+  const input = document.createElement("input");
+  input.type = "checkbox";
+  let on = true;
+  try { on = localStorage.getItem("editor.photoFrameFirst") !== "no"; } catch { /* 隐私模式 */ }
+  input.checked = on;
+  input.addEventListener("change", () => {
+    try { localStorage.setItem("editor.photoFrameFirst", input.checked ? "yes" : "no"); } catch { /* 同上 */ }
+  });
+  const words = document.createElement("span");
+  words.textContent = "Let me set the photo's size and position before it is drawn";
+  wrap.title = "On: a photo you choose is shown in the frame first, and is "
+    + "drawn when you click Draw from this photo. Off: it is drawn as soon as "
+    + "you choose it, whole and uncropped.";
+  wrap.append(input, words);
+  ui.photoKeepSlot.appendChild(wrap);
+  return input;
+})();
+
 /* ---------- 开画之前，一口气把照片挑完 ----------
 
    开片时可以定"百分之多少的画面照着照片画"。点"开画"的时候，这几段一段
@@ -3306,6 +3496,13 @@ function openPhotoPicker(scene, keyword, style, again) {
   ui.photoKept.textContent = photoPick.kept
     ? "Use this scene's current photo" : "Use the photo saved for this scene";
   ui.photoSkip.hidden = !round;
+  // 这一段已经有一张照片的，开窗就把它拿在手里。
+  dropPhotoInHand();
+  if (!round && photoPick.kept) {
+    holdPhoto({ photo_kept: photoPick.kept }, "The photo this scene was drawn from");
+  } else if (!round && photoPick.saved) {
+    holdPhoto({ photo_picked: true }, "The photo already saved for this scene");
+  }
   ui.photoGrid.innerHTML = "";
   ui.photoModal.hidden = false;
   photoPick.key = photoWordsKey(scene);
@@ -3324,7 +3521,7 @@ function openPhotoPicker(scene, keyword, style, again) {
   // "还是这张照片，换一档再画"：照片已经有了，不用去开 Google 的窗口。
   if (again) {
     photoNote("Choose how much of the photo to keep, then click "
-      + `“${ui.photoKept.textContent}”. Or search for another one.`);
+      + "“Draw from this photo”. Or search for another one.");
     return;
   }
   if (before) browseGoogle(before);
@@ -3363,6 +3560,7 @@ async function writePhotoWords() {
 
 function closePhotoPicker() {
   closePhotoBrowser();
+  dropPhotoInHand();
   ui.photoModal.hidden = true;
   photoPick.at = -1;
   // 挑到一半关了窗：什么都没排。挑过的那几张记着，下次接着挑。
@@ -3457,9 +3655,21 @@ function drawPhotos() {
 function redrawFromPhoto(extra) {
   const { at, keyword, style } = photoPick;
   if (at < 0) return;
+  // 刚挑的一张先摆进画框里，等用户看过、摆好再画。已经在手里的那一张
+  // （点的是"照这张画"）就带着摆好的大小和位置去画。
+  const held = samePhotoChoice(extra, photoInHand.extra);
+  if (extra && !held && photoFrameFirst.checked && photoAddress(extra)) {
+    holdPhoto(extra, "The photo you chose");
+    photoNote("Set its size and position if you like, then click "
+      + "“Draw from this photo”.");
+    return;
+  }
+  const frame = held ? photoFrameChosen() : null;
   const strength = photoKeepOf(photoKeepChoice.input);
   const search = ui.photoSearch.value.trim();
-  const photo = { ...(extra || {}), ...(search ? { search } : {}) };
+  const photo = {
+    ...(extra || {}), ...(search ? { search } : {}), ...(frame ? { frame } : {}),
+  };
   // 开画之前挑照片的那一轮：记下来，下一段。全挑完才排队。
   if (photoRound.on) {
     keepRoundPhoto({ strength, photo });

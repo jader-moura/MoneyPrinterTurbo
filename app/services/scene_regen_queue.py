@@ -597,6 +597,9 @@ def _run_prompt(job: _Job) -> None:
             job.index,
             direction=job.direction,
             current=job.keyword,
+            # 框里那条没递过来就是"Suggest another"：从这一句旁白重新想，
+            # 不照着存着的那条改。
+            fresh=not str(job.keyword or "").strip(),
         )
         scene_editor.update_scene(job.task_id, job.index, keyword=written)
         job.prompt = written

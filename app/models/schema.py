@@ -746,6 +746,22 @@ class SceneUpdateRequest(BaseModel):
     locked: Optional[bool] = None
 
 
+class PhotoFrame(BaseModel):
+    """照片在画框里摆多大、摆在哪。
+
+    ``zoom`` 是相对于"整张照片刚好放进画框"的倍数：1 就是整张都在、一点不
+    裁；大于 1 是放大（出框的部分是用户自己决定不要的）；小于 1 是缩小。
+    ``x``、``y`` 是照片中心离画框中心多远，按画框的宽、高算（0.5 就是半个
+    画框）。三个都是默认值等于没有这个框。
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    zoom: float = Field(default=1.0, ge=0.25, le=4)
+    x: float = Field(default=0.0, ge=-1, le=1)
+    y: float = Field(default=0.0, ge=-1, le=1)
+
+
 class SceneRegenerateRequest(BaseModel):
     """重新生成这一个场景的素材。
 
@@ -807,6 +823,8 @@ class SceneRegenerateRequest(BaseModel):
     # "outlines"：同一张照片，换成我的画风——只跟着照片的轮廓，按画风从头
     # 画。给了它就不看 ``strength``。
     follow: Optional[str] = Field(default=None, pattern="^(outlines|picture)$")
+    # 用户在窗里把照片摆好的大小和位置。只对挑好的那一张有意义。
+    frame: Optional[PhotoFrame] = None
 
 
 class ScenePhotoPickRequest(BaseModel):
@@ -826,6 +844,8 @@ class ScenePhotoPickRequest(BaseModel):
     photo_upload: Optional[str] = Field(default=None, max_length=80)
     photo_kept: Optional[str] = Field(default=None, max_length=40)
     follow: Optional[str] = Field(default=None, pattern="^(outlines|picture)$")
+    # 用户在窗里把照片摆好的大小和位置。只对挑好的那一张有意义。
+    frame: Optional[PhotoFrame] = None
 
 
 class ScenePromptSuggestRequest(BaseModel):
