@@ -785,6 +785,18 @@ body {
   display: block;
 }
 
+/* 换片段时盖在 <video> 上的上一帧，和它一样大、一样适配。 */
+.hold {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+  background: #000;
+  pointer-events: none;
+}
+.hold[hidden] { display: none; }
+
 /* 转场近似层。真正的转场是渲染时逐片段加的，没有烘进素材，
    所以预览只能近似，并且界面上会标明这一点。 */
 .fx {

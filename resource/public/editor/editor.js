@@ -29,7 +29,7 @@ const ui = {
   scriptClose: el("script-close"), scriptNote: el("script-note"),
   musicToggle: el("music-toggle"), musicPanel: el("music-panel"),
   musicTrack: el("music-track"), musicVolume: el("music-volume"),
-  musicUpload: el("music-upload"),
+  musicUpload: el("music-upload"), hold: el("hold"),
   musicPreview: el("music-preview"), musicSave: el("music-save"),
   musicClose: el("music-close"), musicNote: el("music-note"),
   musicLane: el("music-lane"), musicBed: el("music-bed"),
@@ -5341,6 +5341,32 @@ function clipAt(seconds) {
   return { index: -1, offset: 0 };
 }
 
+/** 第几次换片段。晚到的回调拿它认出自己已经过期。 */
+let clipSwap = 0;
+
+/** 把 <video> 眼下这一帧画到盖在它上面的画布上，换片段的空当里看到的是它。 */
+function holdCurrentFrame() {
+  const video = ui.preview;
+  // 还没有一帧可画（刚打开、上一段也没加载完）：没有东西可留。
+  if (!ui.hold || !video.videoWidth || video.readyState < 2) return;
+  try {
+    ui.hold.width = video.videoWidth;
+    ui.hold.height = video.videoHeight;
+    ui.hold.getContext("2d").drawImage(video, 0, 0);
+    ui.hold.style.objectFit = video.style.objectFit || "contain";
+    ui.hold.hidden = false;
+  } catch { /* 画不了就照旧：黑一下，不挡播放 */ }
+}
+
+function releaseHeldFrame() {
+  if (ui.hold) ui.hold.hidden = true;
+}
+
+/** 放着的时候是不是旁白在走时间（和 ``tick`` 里的判断是同一个）。 */
+function narrationIsTheClock() {
+  return !!ui.narration.src && !ui.narration.paused;
+}
+
 /** 把 <video> 对到播放头所在的位置。``force`` 时即使还是同一段也重新定位。 */
 function syncPreview(force) {
   const { index, offset } = clipAt(state.playhead);
@@ -5353,6 +5379,7 @@ function syncPreview(force) {
     ui.gap.hidden = false;
     ui.preview.pause();
     ui.preview.style.visibility = "hidden";
+    releaseHeldFrame();
     state.loadedClip = -1;
     return;
   }
@@ -5361,22 +5388,41 @@ function syncPreview(force) {
 
   if (!scene || !scene.exists) {
     ui.frame.classList.remove("ready");
+    releaseHeldFrame();
     return;
   }
   ui.frame.classList.add("ready");
   if (index !== state.loadedClip) {
     const advancing = state.loadedClip >= 0;
     state.loadedClip = index;
+    // 换 src 的那一刻 <video> 是空的，新片段的第一帧到之前露出黑底：每换一段
+    // 就黑一下。所以先把眼下这一帧留在上面，新的一帧出来了再撤。
+    holdCurrentFrame();
+    const swap = ++clipSwap;
     ui.preview.src = scene.url;
     // 元数据到位之前 currentTime 写不进去，所以等一次 loadedmetadata。
     ui.preview.addEventListener("loadedmetadata", () => {
+      // 等的这一会儿里又换了一段：这一次的定位已经不作数了。
+      if (swap !== clipSwap) return;
       seekWithin(scene, offset);
       if (state.playing) ui.preview.play().catch(() => {});
+      const shown = () => { if (swap === clipSwap) releaseHeldFrame(); };
+      if (typeof ui.preview.requestVideoFrameCallback === "function") {
+        ui.preview.requestVideoFrameCallback(shown);
+      } else {
+        ui.preview.addEventListener("seeked", shown, { once: true });
+      }
     }, { once: true });
+    // 片段加载不出来也不能一直盖着上一段的画面。
+    setTimeout(() => { if (swap === clipSwap) releaseHeldFrame(); }, 2000);
     if (advancing && state.playing) playTransition();
     return;
   }
-  if (force) seekWithin(scene, offset);
+  if (force) {
+    seekWithin(scene, offset);
+    // 片段停在了自己的最后一帧（等旁白走完这一段）之后又被拖回段内：接着放。
+    if (state.playing && ui.preview.paused) ui.preview.play().catch(() => {});
+  }
 }
 
 /** 切片段时放一下转场的近似效果。
@@ -5483,7 +5529,19 @@ ui.play.addEventListener("click", () => (state.playing ? stop() : play()));
 ui.zoom.addEventListener("input", () => {
   state.pxPerSecond = Number(ui.zoom.value);
   draw();
+  centerOnPlayhead();
 });
+
+/** 缩放之后把红线摆回可视区正中。
+ *
+ * 缩放改的是每秒多少像素，滚动条的像素位置却不变，于是同一个 scrollLeft 换了
+ * 一个时间：人正看着的那一段一下子跑到别处去了。红线是"我在看这里"，所以
+ * 以它为中心；靠近开头或结尾时浏览器自己把滚动量收在边界上。
+ */
+function centerOnPlayhead() {
+  const at = state.playhead * state.pxPerSecond;
+  ui.scroll.scrollLeft = Math.max(0, at - ui.scroll.clientWidth / 2);
+}
 
 /** 把播放头放到某一秒——放着的时候也能放。
  *
@@ -5559,6 +5617,10 @@ document.addEventListener("visibilitychange", () => {
 // 一段播完就接下一段。这里只推进一帧的量，剩下的交给 tick。
 ui.preview.addEventListener("ended", () => {
   if (!state.playing) return;
+  // 旁白在走时间的时候，片段比它该占的时间早放完就停在最后一帧等着。在这里
+  // 把播放头推到下一段的话，下一帧 tick 又照旁白把它拉回来：两段来回重新
+  // 加载，一直闪到旁白真的走过这条边界。
+  if (narrationIsTheClock()) return;
   const { index } = clipAt(state.playhead);
   const offsets = sceneOffsets();
   if (index >= 0 && index + 1 < state.scenes.length) {
@@ -5575,6 +5637,8 @@ ui.preview.addEventListener("timeupdate", () => {
   if (!scene) return;
   const limit = (scene.trim_start || 0) + screenDuration(scene) * state.speed;
   if (ui.preview.currentTime >= limit - 0.03) {
+    // 同上：旁白在走时间时停在出点这一帧，换段的事交给 tick。
+    if (narrationIsTheClock()) { ui.preview.pause(); return; }
     const offsets = sceneOffsets();
     if (index + 1 < state.scenes.length) {
       state.playhead = offsets[index + 1];

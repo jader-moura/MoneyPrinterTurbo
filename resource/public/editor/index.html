@@ -576,6 +576,8 @@
            去约束一个 flex 里的竖版视频，高度解析不出来就会把容器撑破。 -->
       <div id="frame" class="frame">
         <video id="preview" playsinline></video>
+        <!-- 换片段的空当里留住上一帧，免得每换一段黑一下。 -->
+        <canvas id="hold" class="hold" hidden></canvas>
         <!-- 画面用完、旁白还在时显示。预览继续放声音，而不是停下来，
              否则用户既听不到剩下的旁白，也看不出缺了多少画面。 -->
         <div id="gap" class="gap-note" hidden>
