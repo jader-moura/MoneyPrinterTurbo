@@ -41,7 +41,7 @@ from app.config import config
 from app.models import image_style as image_style_model
 from app.models.llm_provider import LLM_PROVIDER_REGISTRY
 from app.models.schema import MaterialInfo, TaskVideoRequest, VideoAspect
-from app.services import bgm, finishing, local_defaults, material, transition_sound, voice
+from app.services import bgm, finishing, local_defaults, material, scene_plan, transition_sound, voice
 from app.services import task as tm
 from app.utils import utils
 
@@ -652,6 +652,13 @@ def form() -> dict:
         # ``side``：这一页不在右边的页签里，而是收在左边脚本框底下——它讲的
         # 是"说什么"，和主题、脚本是一回事。
         {"id": "script", "label": "More script settings", "side": True, "fields": [
+            _field("scene_plan", "Scene plan (written outside the app)",
+                   "textarea",
+                   placeholder="Optional. Paste the JSON a scene plan was "
+                               "exported as: it carries the narration, one "
+                               "picture prompt per scene, and which scenes "
+                               "are drawn from a real photo. The script box "
+                               "and the keywords are then not used."),
             _field("video_terms", "Picture keywords", "textarea",
                    placeholder="Optional, comma separated. Leave empty and "
                                "they are written from the script."),
@@ -746,7 +753,7 @@ def build_params(choices: Mapping) -> TaskVideoRequest:
 
     subject = str(chosen.get("video_subject") or "").strip()
     script = str(chosen.get("video_script") or "").strip()
-    if not subject and not script:
+    if not subject and not script and not str(chosen.get("scene_plan") or "").strip():
         raise NewVideoError(
             "say what the video is about, or paste a script — both are empty"
         )
@@ -803,6 +810,31 @@ def build_params(choices: Mapping) -> TaskVideoRequest:
     terms = str(chosen.get("video_terms") or "").strip()
     if terms:
         params["video_terms"] = terms
+
+    plan_text = str(chosen.get("scene_plan") or "").strip()
+    if plan_text:
+        # 分镜自己带着旁白、每段的提示词、哪几段照着照片画：这三样都照它来，
+        # 不再问模型。
+        if source not in IMAGE_SOURCES:
+            raise NewVideoError(
+                "a scene plan carries picture prompts, so it needs generated "
+                f"pictures, and {source} is not one; choose one of "
+                f"{', '.join(IMAGE_SOURCES)}"
+            )
+        if script:
+            raise NewVideoError(
+                "the scene plan carries its own narration; empty the script "
+                "box, or remove the scene plan"
+            )
+        try:
+            plan = scene_plan.parse(plan_text)
+        except scene_plan.ScenePlanError as exc:
+            raise NewVideoError(str(exc)) from exc
+        params["video_subject"] = subject or plan["subject"]
+        params["video_script"] = scene_plan.script_of(plan)
+        params["video_terms"] = scene_plan.prompts_of(plan)
+        params["scene_plan"] = scene_plan.stored(plan)
+        params["photo_scene_percent"] = scene_plan.photo_percent(params["scene_plan"])
 
     mode = str(chosen.get("voice_mode") or _saved_voice_mode(ui)).strip()
     if mode not in (VOICE_TTS, VOICE_UPLOAD, VOICE_NONE):
@@ -878,6 +910,9 @@ def stop_stage(params, review_prompts: Optional[bool] = None) -> str:
     source = str(getattr(params, "video_source", "") or "")
     if source not in material.GENERATED_IMAGE_SOURCES:
         return "materials"
+    if getattr(params, "scene_plan", None):
+        # 分镜里照着照片画的那几段，要在开画之前挑照片：一定先停下来。
+        return "subtitle"
     wanted = tm.reviews_prompts_first(params) if review_prompts is None else review_prompts
     return "subtitle" if wanted else "materials"
 

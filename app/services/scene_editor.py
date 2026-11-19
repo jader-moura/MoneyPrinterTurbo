@@ -46,7 +46,7 @@ from app.models.schema import (
     VideoTransitionMode,
 )
 from app.services import llm, material, picture_shelf, reference_image
-from app.services import edit_history, scene_manifest, task_artifacts, timeline
+from app.services import edit_history, scene_manifest, scene_plan, task_artifacts, timeline
 from app.services import bgm, finishing, transition_sound, voice
 from app.utils import subtitle_reader, subtitle_writer
 from app.services import state as sm
@@ -367,6 +367,13 @@ def reference_photo_words(task_id: str, index: Any) -> dict:
         before = " ".join(str(recorded.get("query") or "").split())
     if before:
         return {"query": before, "from": "last"}
+    # 外面写好的分镜给这一段写了要搜什么：用它的，不问模型。
+    planned = task_artifacts.read_script_data(task_id).get(_CANDIDATES_KEY)
+    entry = planned.get(scene_manifest.scene_id(scene)) if isinstance(planned, dict) else None
+    if isinstance(entry, dict):
+        wanted = " ".join(str(entry.get("search") or "").split())
+        if wanted:
+            return {"query": wanted, "from": "plan"}
     words, _ = _photo_search_words(task_id, index, "", None)
     return {"query": words, "from": "model"}
 
@@ -421,6 +428,20 @@ def photo_candidates(task_id: str, *, again: bool = False) -> dict:
                for name, default in _NO_CANDIDATE.items()},
         })
     return {"scenes": listed}
+
+
+def keep_planned_photo_scenes(task_id: str, planned: list) -> int:
+    """照外面写好的分镜记下"哪几段照着照片画、找什么"，返回有几段。
+
+    和 ``photo_candidates`` 记的是同一项，所以"开画"时挑照片的那一轮读到的
+    就是分镜点的那几段——不问模型，分镜说了算。
+    """
+    scenes = scene_manifest.load(task_id)["scenes"]
+    found = scene_plan.photo_candidates(
+        list(planned or []), [scene_manifest.scene_id(scene) for scene in scenes]
+    )
+    task_artifacts.patch_script_data(task_id, **{_CANDIDATES_KEY: found})
+    return sum(1 for one in found.values() if one["kind"] != "none")
 
 
 def _photo_pick_file(task_id: str, name: str) -> str:

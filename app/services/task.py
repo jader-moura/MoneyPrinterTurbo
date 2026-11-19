@@ -387,6 +387,9 @@ def reviews_prompts_first(params, app_config=None) -> bool:
     source = str(getattr(params, "video_source", "") or "")
     if source not in material.GENERATED_IMAGE_SOURCES:
         return False
+    if getattr(params, "scene_plan", None):
+        # 外面写好的分镜：场景要照它摆，照片要在开画之前挑。
+        return True
     settings = config.ui if app_config is None else app_config
     value = settings.get("review_prompts_before_images")
     if value is None:
@@ -653,6 +656,9 @@ def generate_terms(task_id, params, video_script):
     # 顺序匹配模式下关键词顺序本身就是脚本叙事顺序，必须保持原样，故跳过。
     # 逐句生成同样必须跳过：那组词是和旁白逐句对齐的，重排一次就全错位了，
     # 恰好会把这个功能要解决的问题重新制造出来。
+    if getattr(params, "scene_plan", None):
+        # 分镜里的提示词是一段对一段写好的：重排一次就全错位了。
+        aligned_per_line = True
     if not params.match_materials_to_script and not aligned_per_line:
         video_terms = twelvelabs.rerank_terms_by_subject(
             video_subject=params.video_subject,
@@ -2340,6 +2346,11 @@ def _run_pipeline(
             # comes through start_from="audio", whose scenes already have
             # pictures, and replacing them with empty slots would throw away
             # everything the user has drawn.
+            # A scene plan written outside the app fixes the scenes itself.
+            planned_lines = [
+                str(one.get("narration") or "")
+                for one in getattr(params, "scene_plan", None) or []
+            ] or None
             scene_manifest.record_planned_scenes(
                 task_id,
                 video_script=video_script,
@@ -2349,6 +2360,7 @@ def _run_pipeline(
                 audio_file=audio_file,
                 subtitle_path=subtitle_path,
                 video_source=getattr(params, "video_source", "") or "",
+                narrations=planned_lines,
             )
             _find_scenes_for_photos(task_id, params)
         elif runs("audio") and scene_manifest.load(task_id)["scenes"]:
@@ -2620,10 +2632,20 @@ def _find_scenes_for_photos(task_id: str, params) -> None:
     没算成不挡这条片子——配音、字幕、提示词都已经做完了。第一次点"开画"
     时会补算，那时没算成才报错（见 ``scene_editor.photo_candidates``）。
     """
-    if int(getattr(params, "photo_scene_percent", 0) or 0) <= 0:
-        return
     # 这里才导入：scene_editor 自己要导入这个模块。
     from app.services import scene_editor
+
+    planned = getattr(params, "scene_plan", None)
+    if planned:
+        # 分镜自己说了哪几段照着照片画、找什么：照它记，不问模型。
+        named = scene_editor.keep_planned_photo_scenes(task_id, planned)
+        logger.info(
+            f"the scene plan draws {named} of {len(planned)} scenes of "
+            f"{task_id} from a photo"
+        )
+        return
+    if int(getattr(params, "photo_scene_percent", 0) or 0) <= 0:
+        return
 
     try:
         found = scene_editor.photo_candidates(task_id, again=True)["scenes"]

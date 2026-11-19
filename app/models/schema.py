@@ -208,6 +208,11 @@ class VideoParams(BaseModel):
     # Share of this video's scenes drawn from photos the user chooses. The
     # pipeline does not read it; the editor does, when the pictures are drawn.
     photo_scene_percent: int = Field(default=0, ge=0, le=100)
+    # 在外面写好的分镜（见 app/services/scene_plan.py）：每段的旁白，和照着
+    # 照片画的那几段要找什么。有它的时候场景照它切，不照脚本重新断句。
+    # A scene plan written outside the app: each scene's narration and, for
+    # the scenes drawn from a photo, what to look for.
+    scene_plan: Optional[List[dict]] = None
 
     # 一张图最多停多久（秒）。
     #
@@ -913,6 +918,7 @@ class NewVideoRequest(BaseModel):
     video_subject: str = Field(default="", max_length=2000)
     video_script: str = Field(default="", max_length=20000)
     video_terms: Optional[str] = Field(default=None, max_length=4000)
+    scene_plan: Optional[str] = Field(default=None, max_length=400000)
     video_language: Optional[str] = Field(default=None, max_length=20)
     paragraph_number: Optional[int] = Field(default=None, ge=1, le=10)
     video_script_prompt: Optional[str] = Field(default=None, max_length=2000)

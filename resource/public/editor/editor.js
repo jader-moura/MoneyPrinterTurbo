@@ -2084,7 +2084,8 @@ async function writeNewScript() {
 
 async function createNewVideo() {
   const choices = newVideoChoices();
-  if (!choices.video_subject && !choices.video_script) {
+  if (!choices.video_subject && !choices.video_script
+      && !String(choices.scene_plan || "").trim()) {
     newVideoProblem("Say what the video is about, or paste a script.");
     ui.newSubject.focus();
     return;

@@ -179,6 +179,7 @@ def build_planned_scenes(
     audio_duration: Any,
     clip_duration: Any,
     video_source: str = "",
+    narrations: list[str] | None = None,
 ) -> list[dict]:
     """还没出图时的场景列表：一段一个位置，写着**将要**画什么。
 
@@ -211,13 +212,26 @@ def build_planned_scenes(
     needed = max(needed, len(terms))
     if not terms:
         return []
+    spoken = [str(line or "").strip() for line in narrations or []]
+    if spoken:
+        # 外面写好的分镜（``scene_plan``）：一段就是它的一段，不多不少，旁白
+        # 也是它定的——时间线照每段存着的这句旁白去数它占几条字幕，所以这里
+        # 要存。条数对不上是调用方的错，说出来，不悄悄轮播提示词。
+        # A plan written outside the app: one scene per planned scene, with the
+        # narration it gave, which the timeline counts subtitle lines from.
+        if len(spoken) != len(terms):
+            raise SceneError(
+                f"the scene plan has {len(spoken)} narration lines for "
+                f"{len(terms)} picture prompts"
+            )
+        needed = len(terms)
 
     return [
         {
             "index": position,
             "id": new_scene_id(),
             "keyword": terms[position % len(terms)],
-            "narration": "",
+            "narration": spoken[position] if spoken else "",
             "material": "",
             "kind": "",
             "source": str(video_source or ""),
@@ -238,6 +252,7 @@ def record_planned_scenes(
     audio_file: Any,
     subtitle_path: Any,
     video_source: str = "",
+    narrations: list[str] | None = None,
 ) -> bool:
     """把"等着出图"的那份场景清单连同配音、字幕一起落盘。
 
@@ -250,6 +265,7 @@ def record_planned_scenes(
         audio_duration=audio_duration,
         clip_duration=clip_duration,
         video_source=video_source,
+        narrations=narrations,
     )
     return task_artifacts.patch_script_data(
         task_id,
