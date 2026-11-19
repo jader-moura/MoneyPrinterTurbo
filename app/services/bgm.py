@@ -1,7 +1,9 @@
+import json
 import math
 import os
 import subprocess
 import tempfile
+import threading
 from pathlib import Path
 from typing import BinaryIO
 from uuid import uuid4
@@ -14,6 +16,13 @@ from app.utils import file_security, utils
 # Streamlit 默认允许较大的上传文件，但背景音乐通常只有几 MB。这里设置明确的
 # 服务端上限，避免 API 或 WebUI 把超大文件完整写入磁盘，影响同一进程中的视频任务。
 MAX_BGM_UPLOAD_BYTES = 30 * 1024 * 1024
+# 编辑器里传的曲子放宽到 200 MB，和它那里上传配音的上限一样：一首无损的
+# WAV/FLAC、一段半小时的氛围音乐都远超 30 MB。WebUI 和 ``POST /musics`` 不变。
+# The editor accepts larger songs (a lossless track or a long ambient bed is
+# well over 30 MB); the WebUI and POST /musics keep the limit above.
+MAX_EDITOR_BGM_UPLOAD_BYTES = 200 * 1024 * 1024
+# 整首解码一遍来验：文件大了要多给些时间。
+_EDITOR_BGM_VALIDATE_SECONDS = 180
 _COPY_CHUNK_BYTES = 1024 * 1024
 _INTERNAL_UPLOAD_PREFIX = ".bgm-upload-"
 _WINDOWS_INVALID_FILENAME_CHARS = frozenset('<>:"|?*')
@@ -214,7 +223,9 @@ def validate_audio_file(file_path: str, timeout_seconds: int = 120) -> None:
     _validate_audio(file_path, timeout_seconds=timeout_seconds)
 
 
-def _stage_bgm_upload(filename: str, source: BinaryIO) -> tuple[str, str, int]:
+def _stage_bgm_upload(
+    filename: str, source: BinaryIO, max_bytes: int | None = None
+) -> tuple[str, str, int]:
     """
     将上传流写入同目录临时文件，并返回安全文件名、临时路径和字节数。
 
@@ -229,6 +240,7 @@ def _stage_bgm_upload(filename: str, source: BinaryIO) -> tuple[str, str, int]:
         raise BgmServiceError("failed to prepare background music storage") from exc
     temp_path = ""
     total_bytes = 0
+    limit = int(max_bytes or MAX_BGM_UPLOAD_BYTES)
 
     try:
         try:
@@ -251,8 +263,11 @@ def _stage_bgm_upload(filename: str, source: BinaryIO) -> tuple[str, str, int]:
                 if not isinstance(chunk, (bytes, bytearray, memoryview)):
                     raise BgmUploadError("background music upload must be binary")
                 total_bytes += len(chunk)
-                if total_bytes > MAX_BGM_UPLOAD_BYTES:
-                    raise BgmUploadError("background music file exceeds the 30 MB limit")
+                if total_bytes > limit:
+                    raise BgmUploadError(
+                        "background music file exceeds the "
+                        f"{limit // (1024 * 1024)} MB limit"
+                    )
                 output.write(chunk)
             output.flush()
             os.fsync(output.fileno())
@@ -290,7 +305,13 @@ def validate_bgm_upload(filename: str, source: BinaryIO) -> str:
         _remove_staged_file(temp_path)
 
 
-def save_bgm_upload(filename: str, source: BinaryIO) -> str:
+def save_bgm_upload(
+    filename: str,
+    source: BinaryIO,
+    *,
+    max_bytes: int | None = None,
+    validate_seconds: int | None = None,
+) -> str:
     """
     以分块、限量和原子替换的方式保存用户背景音乐。
 
@@ -299,12 +320,17 @@ def save_bgm_upload(filename: str, source: BinaryIO) -> str:
     并发上传或进程中断留下半个音频文件，也会让同名上传获得不同的 UUID 存储键，
     已排队或运行中的任务因此始终引用原来的不可变文件。
     """
-    safe_name, temp_path, total_bytes = _stage_bgm_upload(filename, source)
+    safe_name, temp_path, total_bytes = _stage_bgm_upload(
+        filename, source, max_bytes=max_bytes
+    )
     stored_name = f"{uuid4().hex}{Path(safe_name).suffix.lower()}"
     target_path = os.path.join(os.path.dirname(temp_path), stored_name)
 
     try:
-        _validate_audio(temp_path)
+        if validate_seconds:
+            _validate_audio(temp_path, timeout_seconds=int(validate_seconds))
+        else:
+            _validate_audio(temp_path)
         try:
             os.replace(temp_path, target_path)
         except OSError as exc:
@@ -414,3 +440,61 @@ def resolve_bgm_file(unsafe_path: str) -> str:
             except ValueError as exc:
                 last_error = exc
     raise ValueError(str(last_error)) from last_error
+
+
+# ---------------------------------------------------------------------------
+# 上传的曲子叫什么
+# ---------------------------------------------------------------------------
+#
+# 上传的文件存成一串 UUID（见 ``save_bgm_upload``：同名上传互不覆盖）。那串字
+# 在下拉框里谁也认不出，所以把原来的名字另记一份。只是给人看的：解析、播放、
+# 渲染认的仍然是存下来的那个文件名，这份记录丢了也只是显示回 UUID。
+#
+# Uploads are stored under a UUID so two files with one name never collide.
+# The original name is kept beside them for display only.
+
+_UPLOAD_NAMES_FILE = "names.json"
+_UPLOAD_NAMES_LOCK = threading.Lock()
+_UPLOAD_NAME_LIMIT = 120
+
+
+def uploaded_bgm_names() -> dict[str, str]:
+    """``{存下来的文件名: 上传时的名字}``。读不出来就当没有。"""
+    path = os.path.join(uploaded_bgm_dir(create=False), _UPLOAD_NAMES_FILE)
+    try:
+        with open(path, encoding="utf-8") as handle:
+            data = json.load(handle)
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    return {str(key): str(value) for key, value in data.items() if value}
+
+
+def remember_uploaded_bgm_name(stored_name: str, original_name: str) -> str:
+    """记下这首上传的曲子原来叫什么，返回记下的那个名字。
+
+    记不上不挡上传：曲子已经存好了，名字只是显示用的。
+    """
+    label = os.path.basename(str(original_name or "").replace("\\", "/")).strip()
+    label = label[:_UPLOAD_NAME_LIMIT] or stored_name
+    folder = uploaded_bgm_dir()
+    path = os.path.join(folder, _UPLOAD_NAMES_FILE)
+    with _UPLOAD_NAMES_LOCK:
+        names = uploaded_bgm_names()
+        names[os.path.basename(str(stored_name))] = label
+        # 文件已经删掉的曲子不留名字。
+        names = {key: value for key, value in names.items()
+                 if os.path.isfile(os.path.join(folder, key))}
+        staged = f"{path}.{uuid4().hex}.tmp"
+        try:
+            with open(staged, "w", encoding="utf-8") as handle:
+                json.dump(names, handle, ensure_ascii=False, indent=2)
+            os.replace(staged, path)
+        except OSError as exc:
+            logger.warning(f"could not remember the name of an uploaded song: {exc}")
+            try:
+                os.remove(staged)
+            except OSError:
+                pass
+    return label

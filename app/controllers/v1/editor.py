@@ -997,6 +997,40 @@ def read_background_music(
     return utils.get_response(200, data)
 
 
+@router.post(
+    "/music",
+    summary="Upload a song to the music library from the editor",
+)
+def upload_background_music(request: Request, file: UploadFile = File(...)):
+    """往曲库里加一首。加进去的是整个曲库的，不只是这一条片子的：传完它出现
+    在每条片子的下拉框里，选不选、存不存仍然是 ``PUT /tasks/{id}/music`` 的事。
+
+    存、验都走 ``bgm.save_bgm_upload``（和 ``POST /musics`` 同一条路）；这里多
+    做的一件事是记下原来的文件名——存下来的是一串 UUID，下拉框里认不出。
+    """
+    request_id = base.get_task_id(request)
+    try:
+        stored = bgm_service.save_bgm_upload(
+            file.filename, file.file,
+            max_bytes=bgm_service.MAX_EDITOR_BGM_UPLOAD_BYTES,
+            validate_seconds=bgm_service._EDITOR_BGM_VALIDATE_SECONDS,
+        )
+    except bgm_service.BgmUploadError as exc:
+        raise HttpException(
+            task_id=request_id, status_code=400, message=f"{request_id}: {exc}"
+        ) from exc
+    except bgm_service.BgmServiceError as exc:
+        logger.error(
+            f"song upload failed: request_id={request_id}, error={str(exc)}"
+        )
+        raise HttpException(
+            task_id=request_id, status_code=500,
+            message=f"{request_id}: the song could not be checked or stored",
+        ) from exc
+    name = bgm_service.remember_uploaded_bgm_name(stored, file.filename or "")
+    return utils.get_response(200, {"file": stored, "name": name})
+
+
 @router.get(
     "/music/{name}",
     summary="Play one background music file",

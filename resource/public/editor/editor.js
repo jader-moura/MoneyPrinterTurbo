@@ -29,6 +29,7 @@ const ui = {
   scriptClose: el("script-close"), scriptNote: el("script-note"),
   musicToggle: el("music-toggle"), musicPanel: el("music-panel"),
   musicTrack: el("music-track"), musicVolume: el("music-volume"),
+  musicUpload: el("music-upload"),
   musicPreview: el("music-preview"), musicSave: el("music-save"),
   musicClose: el("music-close"), musicNote: el("music-note"),
   musicLane: el("music-lane"), musicBed: el("music-bed"),
@@ -6999,12 +7000,19 @@ function musicPath() {
   return `/tasks/${encodeURIComponent(state.taskId)}/music`;
 }
 
+/** 面板上现在摆着的那一份：传了一首新的之后照它重画，不用再问服务端。 */
+let shownMusic = {};
+
 function drawMusic(music) {
+  shownMusic = music || {};
   ui.musicTrack.innerHTML = "";
+  // 上传的曲子存成一串 UUID，显示它原来的名字。
+  const names = music.names || {};
   const entries = [
     [NO_MUSIC, "No music"],
     [RANDOM_MUSIC, "A different one each render"],
-    ...(music.tracks || []).map((name) => [name, name.replace(/\.[^.]+$/, "")]),
+    ...(music.tracks || []).map(
+      (name) => [name, (names[name] || name).replace(/\.[^.]+$/, "")]),
   ];
   for (const [value, label] of entries) {
     const option = document.createElement("option");
@@ -7018,6 +7026,7 @@ function drawMusic(music) {
   // 这条片子的配乐交给了外部服务（Sonilo / ElevenLabs）时别假装能在这里换：
   // 换了也只是被那边生成的曲子盖掉。
   ui.musicTrack.disabled = !!music.external;
+  ui.musicUpload.disabled = !!music.external;
   ui.musicSave.disabled = !!music.external;
   ui.musicNote.textContent = music.external
     ? `This video gets its music from ${music.kind}; change that in the main `
@@ -7111,6 +7120,37 @@ ui.musicToggle.addEventListener("click", () => {
 });
 ui.musicClose.addEventListener("click", closeMusic);
 ui.musicTrack.addEventListener("change", syncMusicPreview);
+
+/* 往曲库里加一首。文件一选就传，服务端当场验（格式、大小、是不是真的音频）；
+   传完选中它、能试听，但还没用到这条片子上——那是"Save sound"的事，和在
+   下拉框里换一首是同一个动作。 */
+ui.musicUpload.addEventListener("change", async () => {
+  const file = ui.musicUpload.files[0];
+  if (!file) return;
+  ui.musicUpload.disabled = true;
+  ui.musicNote.textContent = `Uploading ${file.name}…`;
+  try {
+    const data = await upload("/music", file);
+    if (!data || !data.file) throw new Error("the upload was not accepted");
+    const tracks = [...(shownMusic.tracks || [])];
+    if (!tracks.includes(data.file)) tracks.push(data.file);
+    drawMusic({
+      ...shownMusic,
+      tracks,
+      names: { ...(shownMusic.names || {}), [data.file]: data.name || file.name },
+      track: data.file,
+      // 音量框里刚改过、还没存的数别冲掉。
+      volume: Number(ui.musicVolume.value) || shownMusic.volume,
+    });
+    ui.musicNote.textContent =
+      `Added ${data.name || file.name}. Save sound to use it in this video.`;
+  } catch (error) {
+    ui.musicNote.textContent = `Could not add that song: ${error.message || error}`;
+  } finally {
+    ui.musicUpload.value = "";
+    ui.musicUpload.disabled = !!shownMusic.external;
+  }
+});
 
 ui.musicSave.addEventListener("click", () => run("Saving the sound", async () => {
   // 两项分开提交：一项被拒时另一项不该跟着丢掉。

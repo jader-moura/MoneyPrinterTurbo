@@ -2930,6 +2930,8 @@ def background_music(task_id: str) -> dict:
         "kind": kind,
         "volume": float(getattr(params, "bgm_volume", 0.0) or 0.0),
         "tracks": [os.path.basename(path) for path in tracks],
+        # 上传的曲子存成一串 UUID：这是它们原来的名字，给下拉框显示用。
+        "names": bgm.uploaded_bgm_names(),
         # 这条片子交给外部服务生成配乐时，界面不该假装能在这里换曲子。
         "external": kind in {"sonilo", "elevenlabs"},
     }
