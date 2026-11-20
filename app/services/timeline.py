@@ -31,6 +31,7 @@ stretching the baked MP4.
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import os
 from typing import Any, Iterable
@@ -358,6 +359,32 @@ def ensure_image_length(task_id: str, material: str, needed_source: float) -> st
     return rendered
 
 
+def _extend_images(task_id: str, wanted: list[tuple[str, float]]) -> dict:
+    """把要停更久的那些图片片段按新时长重渲，几段同时渲。
+
+    返回 ``{(素材, 要的长度): 渲好的片段}``。每一段的结果和一段一段渲出来的
+    完全一样（同一个函数、同样的参数、内容寻址的同一个文件名），只是不排队。
+    同一组参数只渲一次。
+    """
+    unique = list(dict.fromkeys(wanted))
+    if not unique:
+        return {}
+    from app.services import video as video_service
+    from app.utils import logging_utils
+
+    def extend(pair):
+        material, needed = pair
+        return ensure_image_length(task_id, material, needed)
+
+    workers = min(video_service._get_clip_processing_concurrency(), len(unique))
+    if workers <= 1:
+        return {pair: extend(pair) for pair in unique}
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="image-length") as pool:
+        # 日志要归到发起出片的那个任务上（见 bind_log_scope）。
+        rendered = list(pool.map(logging_utils.bind_log_scope(extend), unique))
+    return dict(zip(unique, rendered))
+
+
 def build_edit_list(
     task_id: str,
     scenes: Iterable[dict],
@@ -372,8 +399,11 @@ def build_edit_list(
     没编辑过时长的场景同样会进剪辑表(用素材全长),这样"用户只拖了第 3 段"
     也不会让其余片段回到自动切片逻辑、长度全变。
     """
-    edit_list: list[dict] = []
-    for position, scene in enumerate(scenes):
+    # 先把每一段看一遍：素材是哪个、多长、要不要按新时长重渲。重渲放到下面
+    # 一起做，几段同时渲——一段一段排着队来的时候，一条 140 段的片子光这一步
+    # 就是十几分钟，而机器的大半核心都闲着。
+    prepared: list[dict] = []
+    for scene in scenes:
         material = scene_manifest.resolve_material(task_id, scene.get("material"))
         source_duration = probe_duration(material)
 
@@ -411,9 +441,29 @@ def build_edit_list(
             scene_manifest.material_kind(material) != "video"
             or source_image_for(task_id, material) is not None
         ):
-            extended = ensure_image_length(
-                task_id, material, float(trim_start) + needed_source
-            )
+            extend_to = float(trim_start) + needed_source
+        else:
+            extend_to = None
+        prepared.append({
+            "scene": scene, "material": material, "source_duration": source_duration,
+            "requested": requested, "trim_start": trim_start, "extend_to": extend_to,
+        })
+
+    extended_clips = _extend_images(
+        task_id,
+        [(item["material"], item["extend_to"]) for item in prepared
+         if item["extend_to"] is not None],
+    )
+
+    edit_list: list[dict] = []
+    for position, item in enumerate(prepared):
+        scene = item["scene"]
+        material = item["material"]
+        source_duration = item["source_duration"]
+        requested = item["requested"]
+        trim_start = item["trim_start"]
+        if item["extend_to"] is not None:
+            extended = extended_clips[(material, item["extend_to"])]
             if extended != material:
                 material = extended
                 source_duration = probe_duration(material)

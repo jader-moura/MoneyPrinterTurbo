@@ -1,4 +1,5 @@
 import itertools
+import json
 import hashlib
 from concurrent.futures import ThreadPoolExecutor
 import io
@@ -1150,6 +1151,115 @@ def _subclips_from_edit_list(edit_list: List[dict]) -> List[SubClippedVideoClip]
     return items
 
 
+# ---------------------------------------------------------------------------
+# 处理好的片段留着下次用
+#
+# 时间线出片时，每一段都要裁剪、缩到成片尺寸、重新编码一遍，一段七八秒，140 段
+# 就是二十分钟。可是人在编辑器里通常只改了几段就再出一次片：其余一百多段的
+# 素材、入出点、尺寸一个都没变，重新编码出来的还是同样的字节。
+#
+# 所以把处理好的片段留在任务目录的 ``render-cache`` 里，名字是"决定这一段长
+# 什么样的所有东西"的摘要：素材文件（路径、大小、修改时间）、入出点、要不要
+# 带叠化的尾巴、变速、成片尺寸和铺法、帧率、编码器。任何一样变了就是另一个
+# 名字，于是重新做；都没变，就直接拿上次的文件。
+#
+# 只有"做出来一定一样"的才留：带随机方向的滑入、随机挑的转场每次出来都不同，
+# 那些不进缓存。一键出片那条路（自动切片、随机排序）也不进。
+#
+# 每次出片成功之后，把这一次没用到的旧文件删掉：留着的始终只是"这条片子现在
+# 这一版"用到的那些，不会越攒越多。
+#
+# Processed clips are kept in ``<task>/render-cache`` and reused when nothing
+# that decides their content has changed, so a second render after editing a
+# few scenes only re-encodes those scenes.
+# ---------------------------------------------------------------------------
+_CLIP_CACHE_DIR = "render-cache"
+# 处理片段的方式变了（会让同样的输入做出不同的结果）就加一。
+_CLIP_CACHE_VERSION = 1
+
+
+def _clip_cache_key(source_path: str, **decides) -> str:
+    """这一段处理出来长什么样，由哪些东西决定：它们的摘要。素材不在就是空串。"""
+    try:
+        stat = os.stat(source_path)
+    except OSError:
+        return ""
+    described = {
+        "version": _CLIP_CACHE_VERSION,
+        "source": os.path.normcase(os.path.abspath(source_path)),
+        "size": int(stat.st_size),
+        "modified": int(stat.st_mtime_ns),
+        **decides,
+    }
+    return hashlib.sha256(
+        json.dumps(described, sort_keys=True, default=str).encode("utf-8")
+    ).hexdigest()
+
+
+def _cached_clip(cache_dir: str, key: str) -> dict | None:
+    """上次处理好的这一段：``{"path", "duration", "width", "height"}``，没有是 None。"""
+    if not key:
+        return None
+    clip_path = os.path.join(cache_dir, f"{key}.mp4")
+    try:
+        with open(os.path.join(cache_dir, f"{key}.json"), encoding="utf-8") as handle:
+            noted = json.load(handle)
+        duration = float(noted["duration"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return None
+    # 写到一半被打断的文件不能交给拼接：真打开一次确认它解得出来。
+    if duration <= 0 or not _rendered_clip_is_usable(clip_path):
+        return None
+    return {
+        "path": clip_path, "duration": duration,
+        "width": noted.get("width"), "height": noted.get("height"),
+    }
+
+
+def _keep_clip(cache_dir: str, key: str, clip_file: str, duration: float,
+               width, height) -> str:
+    """把刚处理好的这一段挪进缓存，返回它的新位置。挪不了就原地用，不算错。"""
+    if not key:
+        return clip_file
+    kept = os.path.join(cache_dir, f"{key}.mp4")
+    try:
+        os.makedirs(cache_dir, exist_ok=True)
+        os.replace(clip_file, kept)
+    except OSError as exc:
+        logger.warning(f"a processed clip could not be kept for the next render: {exc}")
+        return clip_file
+    try:
+        note = os.path.join(cache_dir, f"{key}.json")
+        partial = f"{note}.{os.getpid()}.{threading.get_ident()}.part"
+        with open(partial, "w", encoding="utf-8") as handle:
+            json.dump({"duration": duration, "width": width, "height": height}, handle)
+        os.replace(partial, note)
+    except OSError as exc:
+        # 没有这张小纸条，下次就认不出它：这一次照用，下次重做。
+        logger.warning(f"a processed clip could not be noted for the next render: {exc}")
+    return kept
+
+
+def _prune_clip_cache(cache_dir: str, used: List[str]) -> None:
+    """这一次出片没用到的旧片段删掉。"""
+    keep = {os.path.splitext(os.path.basename(path))[0] for path in used}
+    try:
+        names = os.listdir(cache_dir)
+    except OSError:
+        return
+    stale = [
+        os.path.join(cache_dir, name) for name in names
+        if name.split(".", 1)[0] not in keep
+    ]
+    if stale:
+        delete_files(stale)
+        logger.info(f"removed {len(stale)} processed clip files no longer in the timeline")
+
+
+def _in_clip_cache(path: str) -> bool:
+    return os.path.basename(os.path.dirname(os.path.abspath(path))) == _CLIP_CACHE_DIR
+
+
 def combine_videos(
     combined_video_path: str,
     video_paths: List[str],
@@ -1317,12 +1427,49 @@ def combine_videos(
         if transition_of(subclipped_items[position + 1]) == crossfade_value
     }
 
+    clip_cache_dir = os.path.join(output_dir or ".", _CLIP_CACHE_DIR)
+
     def process_one_clip(indexed_item):
         """把一个源片段裁剪、变速、转场后写出，失败时返回 None。"""
         index, subclipped_item = indexed_item
         source_clip = None
         clip = None
         clip_file = None
+        # 这一段上次是不是已经处理过、而且什么都没变（见 _clip_cache_key）。
+        own_transition = getattr(subclipped_item, "transition", None)
+        planned_transition = transition_value
+        if own_transition:
+            planned_transition = None if own_transition == "none" else own_transition
+        cache_key = ""
+        if render_edit_list and planned_transition in (None, crossfade_value):
+            cache_key = _clip_cache_key(
+                subclipped_item.file_path,
+                start=round(float(subclipped_item.start_time), 4),
+                end=round(float(subclipped_item.end_time), 4),
+                tail=index in crossfades_out,
+                speed=normalized_clip_speed,
+                canvas=[video_width, video_height],
+                fit=fit_mode.value,
+                transition=planned_transition,
+                fps=fps,
+                codec=_get_configured_video_codec(),
+            )
+            kept = _cached_clip(clip_cache_dir, cache_key)
+            if kept is not None:
+                logger.debug(
+                    f"clip {index + 1} is unchanged since the last render: reusing "
+                    f"{os.path.basename(kept['path'])}"
+                )
+                reused = SubClippedVideoClip(
+                    file_path=kept["path"],
+                    duration=kept["duration"],
+                    width=kept["width"],
+                    height=kept["height"],
+                    source_file_path=subclipped_item.source_file_path,
+                    cut_sound=getattr(subclipped_item, "cut_sound", None),
+                )
+                reused.crossfade_in = planned_transition == crossfade_value
+                return reused
         try:
             logger.debug(
                 f"processing clip {index + 1}: {subclipped_item.width}x{subclipped_item.height}, "
@@ -1434,6 +1581,10 @@ def combine_videos(
             )
 
             clip_duration_saved = clip.duration - tail
+            # 编码器已经写完、放手了：挪进缓存，下次什么都没变就直接用它。
+            clip_file = _keep_clip(
+                clip_cache_dir, cache_key, clip_file, clip_duration_saved, clip_w, clip_h
+            )
             processed_clip = SubClippedVideoClip(
                 file_path=clip_file,
                 duration=clip_duration_saved,
@@ -1608,8 +1759,12 @@ def combine_videos(
     finally:
         # FFmpeg failures and timeouts must not strand one encoded MP4 per clip.
         # Repeated clips share a path; delete_files already deduplicates them.
-        delete_files(clip_files)
+        # 留给下次出片的那些不删（见 _clip_cache_key）。
+        delete_files([path for path in clip_files if not _in_clip_cache(path)])
             
+    if render_edit_list:
+        # 拼成了才清：这一次没用到的旧片段不再属于这条时间线。
+        _prune_clip_cache(clip_cache_dir, clip_files)
     logger.info("video combining completed")
     return combined_video_path
 
