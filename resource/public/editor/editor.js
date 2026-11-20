@@ -144,6 +144,8 @@ const ui = {
 };
 
 const state = {
+  // 预览放多快（1、1.5、2）。只管预览，见 applyRate。
+  rate: 1,
   taskId: "",
   data: null,
   scenes: [],
@@ -5489,7 +5491,7 @@ function tick() {
       const within = ui.preview.currentTime - (scene.trim_start || 0);
       state.playhead = sceneOffsets()[index] + Math.max(0, within / state.speed);
     } else {
-      state.playhead += 1 / 60;
+      state.playhead += state.rate / 60;
     }
     void offset;
   }
@@ -5510,10 +5512,53 @@ function tick() {
   requestAnimationFrame(tick);
 }
 
+/* ---------- 预览的播放速度 ----------
+   十几分钟的片子按原速审一遍就是十几分钟。这里只让预览放快：旁白是时间基准，
+   它快了播放头就快了，画面、配乐、环境声和重音都跟着同一个倍数走。出片不受
+   影响（那是 state.speed，片段本身的速度，另一回事）。 */
+const RATES = [1, 1.5, 2];
+const RATE_KEY = "mpt_preview_rate";
+
+function savedRate() {
+  let saved = 1;
+  try { saved = Number(localStorage.getItem(RATE_KEY)); } catch { /* 记不住就原速 */ }
+  return RATES.includes(saved) ? saved : 1;
+}
+
+/** 预览里出声、出画面的每一个元素。 */
+function pacedMedia() {
+  return [
+    ui.narration, ui.preview, ui.musicBed,
+    ...Object.values(directionSounds.beds), ...directionSounds.hits,
+  ];
+}
+
+/** 把倍数写到每个元素上。换 src 会把 playbackRate 重置成 defaultPlaybackRate，
+    所以两个都写。 */
+function applyRate() {
+  for (const media of pacedMedia()) {
+    if (!media) continue;
+    media.defaultPlaybackRate = state.rate;
+    media.playbackRate = state.rate;
+  }
+  const button = document.getElementById("rate");
+  if (button) {
+    button.textContent = `${state.rate}×`;
+    button.classList.toggle("fast", state.rate !== 1);
+  }
+}
+
+function nextRate() {
+  state.rate = RATES[(RATES.indexOf(state.rate) + 1) % RATES.length];
+  try { localStorage.setItem(RATE_KEY, String(state.rate)); } catch { /* 下次从原速开始 */ }
+  applyRate();
+}
+
 function play() {
   if (!state.scenes.length) return;
   state.playing = true;
   ui.play.textContent = "Pause";
+  applyRate();
   if (ui.narration.src) {
     try { ui.narration.currentTime = state.playhead; } catch { /* 元数据未就绪 */ }
     ui.narration.play().catch(() => {});
@@ -5553,6 +5598,9 @@ ui.task.addEventListener("keydown", (event) => {
 });
 
 ui.play.addEventListener("click", () => (state.playing ? stop() : play()));
+document.getElementById("rate").addEventListener("click", nextRate);
+state.rate = savedRate();
+applyRate();
 
 ui.zoom.addEventListener("input", () => {
   state.pxPerSecond = Number(ui.zoom.value);
@@ -5937,6 +5985,8 @@ function prepareDirectionSounds() {
       sounds.hits.push(hit);
     }
   }
+  // 新做出来的这几个也照预览的倍数放。
+  applyRate();
 }
 
 function strike(offset) {

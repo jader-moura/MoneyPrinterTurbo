@@ -864,6 +864,8 @@ body {
   white-space: nowrap;
 }
 .chip.off { color: var(--warn); border-color: #4a3c1e; }
+.rate { min-width: 44px; font-variant-numeric: tabular-nums; }
+.rate.fast { color: var(--accent, #6aa3ff); border-color: currentColor; }
 .zoom { margin-left: auto; color: var(--muted); font-size: 12px; display: flex; gap: 8px; align-items: center; }
 
 .inspector {

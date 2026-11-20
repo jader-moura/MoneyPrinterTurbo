@@ -322,5 +322,27 @@ configure_browser_access(app, cors_allowed_origins)
 task_dir = utils.task_dir()
 app.mount("/tasks", StaticFiles(directory=task_dir, html=True), name="")
 
+
+class PageFiles(StaticFiles):
+    """页面自己的文件（html、js、css）：每次都向服务端问一声"变了没有"。
+
+    StaticFiles 只给 ETag，不给 Cache-Control，浏览器就自己估一个"还新鲜"的
+    时长——文件越久没改估得越长。结果是页面更新之后，刷新拿到的是新的 html
+    配旧的 js：新加的按钮在，点了没反应，要强制刷新才好。``no-cache`` 不是
+    不缓存，是用之前先核对；没变就是一个 304，不重新下载。
+
+    Pages are revalidated on every load, so an updated editor never runs a
+    stale script against new markup. Unchanged files still answer 304.
+    """
+
+    _REVALIDATED = (".html", ".js", ".css")
+
+    def file_response(self, full_path, *args, **kwargs):
+        response = super().file_response(full_path, *args, **kwargs)
+        if str(full_path).lower().endswith(self._REVALIDATED):
+            response.headers["Cache-Control"] = "no-cache"
+        return response
+
+
 public_dir = utils.public_dir()
-app.mount("/", StaticFiles(directory=public_dir, html=True), name="")
+app.mount("/", PageFiles(directory=public_dir, html=True), name="")
