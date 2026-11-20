@@ -1237,6 +1237,82 @@ def replace_material(task_id: str, index: Any, material_path: str) -> dict:
         return scene
 
 
+def place_map(task_id: str, index: Any, place: dict) -> dict:
+    """把这一段的画面换成一张定位地图（``locator_map``）。
+
+    地图就是一张图：画成 PNG 放进任务目录，再走和别的图一样的路烘成片段
+    （慢慢推近）。所以它在编辑器里看得见、换得掉，原来那张图也照旧记在这一
+    段的历史里，能换回去。同一张地图（同一个地方、同样的范围和画幅）只画
+    一次；这一段已经是它了就什么都不做。
+    """
+    import hashlib
+    import json
+
+    from app.models.schema import ImageMotion
+    from app.services import locator_map
+    from app.services import video as video_service
+
+    _require_idle(task_id)
+    place = locator_map.checked(place)
+    aspect = VideoAspect(getattr(load_params(task_id), "video_aspect", None)
+                         or VideoAspect.portrait)
+    size = tuple(int(side) for side in aspect.to_resolution())
+    digest = hashlib.sha1(
+        json.dumps([place, size], sort_keys=True).encode("utf-8")).hexdigest()[:16]
+    picture = os.path.join(utils.task_dir(task_id), f"map-{digest}.png")
+    if not os.path.isfile(picture):
+        locator_map.save(place, picture, size)
+
+    with _editing(task_id):
+        scenes = _scenes_or_fail(task_id)
+        scene = scenes[_scene_at(scenes, index)]
+        current = scene.get("material")
+        seconds = scene.get("duration") or scene.get("clip_duration") or 5
+    if current and os.path.basename(
+            timeline.source_image_for(task_id, scene_manifest.resolve_material(
+                task_id, current)) or "") == os.path.basename(picture):
+        return scene
+    clip = video_service.render_image_zoom_video(
+        picture, round(max(1.0, float(seconds)), 2), image_motion=ImageMotion.zoom)
+
+    with _editing(task_id):
+        scenes = _scenes_or_fail(task_id)
+        scene = scenes[_scene_at(scenes, index)]
+        if scene.get("material") and scene_manifest.material_key(
+                scene.get("material")) != scene_manifest.material_key(clip):
+            scene_manifest.remember_material(scene)
+        scene["material"] = clip
+        scene["kind"] = scene_manifest.material_kind(clip)
+        scene["source"] = "local"
+        # 锁上：批量重画、"开画"都不该把一张地图换成画出来的图。
+        scene["locked"] = True
+        scene_manifest.save_scenes(task_id, scenes)
+        logger.info(
+            f"scene {int(index) + 1} of {task_id} now shows a map of {place['label']}")
+        return scene
+
+
+def place_planned_maps(task_id: str, planned: list) -> int:
+    """分镜里写了地图的那几段，现在就画上，返回画了几张。
+
+    在"开画"之前做：地图不用出图模型，一秒钟一张；画上之后这几段就不再是
+    "还没有画面"的占位，开画时自然跳过它们。
+    """
+    placed = 0
+    for position, scene in enumerate(planned or []):
+        wanted = (scene.get("direction") or {}).get("map") if isinstance(scene, dict) else None
+        if not wanted:
+            continue
+        try:
+            place_map(task_id, position, wanted)
+            placed += 1
+        except Exception as exc:  # 一张地图画不了不该挡住整条片子
+            logger.warning(
+                f"the map on scene {position + 1} of {task_id} could not be drawn; "
+                f"the scene is left for the picture model: {exc}")
+    return placed
+
+
 def _adopt_into_task(task_id: str, source: str) -> str:
     """把任务目录之外的替换素材复制进任务目录。
 

@@ -31,8 +31,8 @@ from typing import Dict, Tuple
 
 from loguru import logger
 
-from app.services import finishing, scene_editor, scene_manifest, scene_plan, sound_design
-from app.services import task_artifacts
+from app.services import finishing, narration_pauses, scene_editor, scene_manifest, scene_plan
+from app.services import sound_design, task_artifacts
 from app.services import voice as voice_service
 from app.utils import utils
 
@@ -211,21 +211,53 @@ def redirect(task_id: str, text: str) -> str:
     留一份在旁边（:data:`BACKUP`）。返回写完之后该看一眼的那几行。
     """
     payload, plan = _stored_plan(task_id)
-    directed = scene_plan.redirected(plan, text)
+    spoken = narration_pauses.recorded(task_id)
+    directed = scene_plan.redirected(plan, text, recorded=spoken)
 
     task_dir = utils.task_dir(task_id)
     backup = os.path.join(task_dir, BACKUP)
     if not os.path.exists(backup):
         with open(backup, "w", encoding="utf-8") as handle:
             json.dump(payload, handle, ensure_ascii=False, indent=4)
+
+    # 停顿是往录好的旁白里插静音：声音、字幕、时间线都跟着动（见
+    # narration_pauses）。先做它——做不成就什么都还没改；做成了它会改清单，
+    # 所以清单要重新读一遍再写分镜。
+    wanted = {
+        number: float(scene["direction"]["pause_after"])
+        for number, scene in enumerate(directed, start=1)
+        if (scene.get("direction") or {}).get("pause_after")
+    }
+    paused = None
+    if any(seconds > spoken.get(number, 0.0) for number, seconds in wanted.items()) or (
+            os.path.isfile(os.path.join(task_dir, narration_pauses.SIDECAR))):
+        try:
+            paused = narration_pauses.apply(task_id, wanted)
+        except narration_pauses.PauseError as exc:
+            raise scene_plan.ScenePlanError(str(exc)) from exc
+        payload = scene_manifest.load_raw(task_id)
     payload["params"]["scene_plan"] = directed
     task_artifacts.write_script_data(task_id, payload)
+    mapped = _place_maps(task_id, plan, directed)
 
     # 报告里讲画面的那几行（几段照着照片画、哪几段太长）对一条做完的片子没用。
     said = scene_plan.report({"scenes": directed}).splitlines()
     start = next(at for at, line in enumerate(said)
                  if line.startswith(("direction:", "no direction")))
     lines = said[start:]
+    if paused is not None:
+        if paused["inserted"]:
+            whole = paused["duration"] or 0.0
+            lines.append(
+                f"{len(paused['inserted'])} pause"
+                f"{'' if len(paused['inserted']) == 1 else 's'} spliced into the "
+                f"narration (+{paused['added']:.1f}s); it now runs "
+                f"{int(whole // 60)}:{int(whole % 60):02d}. The pictures on screen "
+                "at each pause hold for it"
+            )
+        else:
+            lines.append("the pauses spliced into the narration earlier were removed")
+    lines.extend(mapped)
     try:
         finished = bool(finishing.wanted(scene_editor.load_params(task_id)))
     except finishing.FinishError:
@@ -245,6 +277,43 @@ def redirect(task_id: str, text: str) -> str:
         "changes when it is rendered again"
     )
     return "\n".join(lines)
+
+
+def _place_maps(task_id: str, before: list, directed: list) -> list:
+    """分镜里写了地图的那几段，把时间线上念那句话的画面换成地图。返回要说的话。
+
+    时间线是人排的，所以按台词找那一段（和停顿一样）。找不到（那一段被删了、
+    台词改了）就说一声，不猜。原来有地图、这一次不要了的：画面不自动换回去
+    ——原来那张图在这一段的历史里，在编辑器里点一下就回来。
+    """
+    said = []
+    scenes = scene_manifest.load(task_id).get("scenes") or []
+    shown = [" ".join(str(scene.get("narration") or "").lower().split()) for scene in scenes]
+    cursor = 0
+    for number, (old, new) in enumerate(zip(before, directed), start=1):
+        key = " ".join(str(new.get("narration") or "").lower().split())
+        at = next((n for n in range(cursor, len(shown)) if key and shown[n] == key), None)
+        if at is not None:
+            cursor = at + 1
+        wanted = (new.get("direction") or {}).get("map")
+        had = (old.get("direction") or {}).get("map")
+        if wanted:
+            if at is None:
+                said.append(
+                    f"scene {number}: its narration is not on the timeline any more, "
+                    "so the map was not placed")
+                continue
+            try:
+                scene_editor.place_map(task_id, at, wanted)
+                said.append(f"scene {number} now shows a map of {wanted['label']}")
+            except Exception as exc:
+                said.append(f"scene {number}: the map could not be placed ({exc})")
+        elif had:
+            said.append(
+                f"scene {number} no longer has a map in the file; its picture was "
+                "left as it is - put the earlier picture back from the scene's "
+                "history in the editor")
+    return said
 
 
 def sound_file(name: str) -> str:

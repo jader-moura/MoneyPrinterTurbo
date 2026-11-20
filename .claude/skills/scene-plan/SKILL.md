@@ -1,6 +1,6 @@
 ---
 name: scene-plan
-description: Write a scene plan for a MoneyPrinterTurbo video - the narration divided into scenes, one image prompt per scene, which scenes are drawn from a real photo (image-to-image) instead of from text, and the direction of the edit (title, title cards, pauses, impacts, music dropouts, ambience) - and export it as a JSON file to paste into the editor's new-video form. Also add or change the direction of a video that already exists, without re-recording it. Use when asked to plan, storyboard, direct or divide a video into scenes, to turn a topic or a finished script into a scene plan, or to add a title, cards, impacts, silence or ambience to an existing video.
+description: Write a scene plan for a MoneyPrinterTurbo video - the narration divided into scenes, one image prompt per scene, which scenes are drawn from a real photo (image-to-image) instead of from text, and the direction of the edit (title, title cards, pauses, impacts, music dropouts, ambience, locator maps) - and export it as a JSON file to paste into the editor's new-video form. Also add or change the direction of a video that already exists, without re-recording it. Use when asked to plan, storyboard, direct or divide a video into scenes, to turn a topic or a finished script into a scene plan, or to add a title, cards, impacts, pauses, silence, ambience or a map to an existing video.
 ---
 
 # Scene plan
@@ -9,8 +9,9 @@ A scene plan does, outside the app, the things the app's own language model
 otherwise does: divide the narration into scenes, write one picture prompt per
 scene, and choose which scenes are drawn from a real photo. It also **directs
 the edit**: where the title appears, which scenes carry a title card, where the
-narrator pauses, where a low impact lands, where the music drops out, and where
-wind or room tone sits under the picture. The app then records the narration,
+narrator pauses, where a low impact lands, where the music drops out, where
+wind or room tone sits under the picture, and which scenes show a locator map
+in place of a picture. The app then records the narration,
 draws the pictures and renders the video from it.
 
 The user pastes the exported JSON into the editor's new-video form, under
@@ -155,6 +156,10 @@ same file:
       "ambience": "wind"
     },
     {
+      "narration": "The house stands in Norwood Park, on the north west edge of the city.",
+      "map": {"lat": 41.99, "lon": -87.81, "label": "Norwood Park", "sublabel": "Chicago, Illinois", "zoom": "area"}
+    },
+    {
       "narration": "He starts to dig.",
       "prompt": "...",
       "music": "off",
@@ -180,6 +185,7 @@ same file:
 | `impact` | a scene | A low hit: `"end"` lands just after the scene's last word, `"start"` just before its first. |
 | `music` | a scene | `"off"`: no music under this scene. It fades out before the scene and returns after it; neighbouring `"off"` scenes make one stretch. |
 | `ambience` | a scene | `"wind"` (exteriors, cold, open places) or `"room"` (a low, close interior tone) under this scene. Neighbouring scenes with the same ambience make one stretch. |
+| `map` | a scene | This scene's picture is a **locator map** the app draws, not a generated image: dark land and sea, a red marker, the place name, and a small inset showing where on the continent it is. `lat`, `lon` and `label` (at most 40 characters) are required. Optional: `sublabel` (one short line), `zoom` (`city`, `area`, `region`, `country`, `continent` or `world`; default `region`), `width_km` (the exact width of the view, 40 to 18000, in place of `zoom`), `also` (up to six other places, each `lat`, `lon`, `label`, shown as small dots), `modern: false` (hide today's borders and country names). A map scene needs no `prompt`. |
 
 How to use them:
 
@@ -221,6 +227,45 @@ How to use them:
   dropout: `"room"` for a crawl space, a cell, an interview room; `"wind"` for a
   winter street, a riverbank, a graveyard. Also under establishing exteriors.
   It is quiet by design; do not put it under every scene.
+- **Maps.** When the story names a place the viewer cannot picture: the first
+  time the setting is named, when the story moves somewhere new, when distance
+  matters (how far apart two places are, how far someone travelled). One to
+  three in a video; a map is information, and a video that keeps cutting to
+  maps feels like a lecture. Put it on the scene whose narration says the
+  place.
+  - `zoom` decides what the viewer learns. `city` (120 km across) shows a
+    city and its surroundings; `area` (400 km) an island or a stretch of
+    coast; `region` (900 km) a state or a small country; `country` (2200 km) a
+    large country; `continent` (6500 km) and `world` (17000 km) the big
+    picture. Pick the level at which the place is recognisable against its
+    surroundings. When none fits, give `width_km` instead; it wins over
+    `zoom`. Up to `country` the app adds the continent inset by itself. The
+    picture also pushes in slowly while it is on screen, like every other
+    scene.
+  - `label` is the place as the story calls it; `sublabel` is what locates it
+    for a modern viewer ("North Carolina", "Hatteras Island today").
+  - Use `also` when the point is a relationship: where the colonists were, and
+    where the message said they had gone.
+  - For a story set before the modern states existed, consider
+    `"modern": false`: a map of Rome in 897 should not say "Italy" and
+    "Kosovo". Keep the modern borders when they are how the viewer will find
+    the place ("what is now North Carolina").
+  - **Coordinates are claims, and you are writing them from memory.** The
+    checker prints where each map's point really is, as a country and the
+    nearest named town with the distance. Read that line for every map. If it
+    says the point is at sea, in the wrong country, or hundreds of kilometres
+    from where the place should be, the numbers are wrong. To check a pair of
+    numbers before writing the plan:
+
+    ```
+    .venv/Scripts/python.exe -m app.services.locator_map <lat> <lon>
+    ```
+
+    If you are not sure where a place was (a lost settlement, a disputed
+    site), do not put a marker on a guess: map the nearest place that is
+    certain and say so in the `sublabel`, or leave the map out.
+  - A map scene cannot also be a `"photo"` scene. It can carry a `card`, but
+    the map already names the place, so usually it should not.
 - **Respect.** With real victims, direction should make the moment quieter,
   not louder. No impact on a victim's name or on a death itself; drop the music
   and pause instead.
@@ -249,6 +294,10 @@ The app refuses a plan that breaks any of these, so check them yourself first:
   least one of `photo_name` and `photo_search`;
 - `pause_after` is a number from 0.2 to 4; `impact` is `"start"` or `"end"`;
   `music` is `"off"` or absent; `ambience` is `"wind"` or `"room"`;
+- every `map` has `lat` from -85 to 85, `lon` from -180 to 180 and a `label`
+  of at most 40 characters; `zoom`, if given, is one of `city`, `area`,
+  `region`, `country`, `continent`, `world`; `width_km`, if given, is from 40
+  to 18000; a map scene is not also a photo scene;
 - every `card` has a `title` of at most 40 characters; the `title` has a
   `text` of at most 40 characters and a `scene` that exists and has no card;
 - the whole file is under 400,000 characters.
@@ -263,7 +312,9 @@ the app will:
 It prints the number of scenes, the estimated length, which scenes are drawn
 from photos, any scene that holds one picture too long, and a `direction:`
 line listing the title, cards, pauses, impacts, music-off scenes and ambience
-it read. Under that line it remarks on direction that breaks the rules above:
+it read, and one `map on scene N:` line for each map saying where its
+coordinates really are. Under that it remarks on direction that breaks the
+rules above:
 more cards or impacts than the length carries, two cards on screen at once, a
 music-off stretch too short to hear, two stretches the music cannot return
 between. Those are remarks, not refusals: fix each one, or be able to say why
@@ -294,8 +345,9 @@ Do not start the video yourself, and do not call the app's API.
 ## Directing a video that already exists
 
 When the narration is recorded and the user wants a title, cards or sound
-added or changed, the scenes stay as they are. You write a **direction file**
-that says what goes on which scene, and one command stores it with the video.
+added or changed, or wants the narrator to pause where it reads straight
+through, the scenes stay as they are. You write a **direction file** that says
+what goes on which scene, and one command stores it with the video.
 This only works for a video that was made from a scene plan.
 
 1. List the video's scenes. The task is the id in the editor's address
@@ -325,8 +377,9 @@ This only works for a video that was made from a scene plan.
    ```
 
    `scenes` is keyed by scene number, or by a run like `"5-7"`. A scene named
-   by several keys gets all of them. The fields are `card`, `impact`, `music`
-   and `ambience`, with the same meanings and the same rules as above.
+   by several keys gets all of them. The fields are `card`, `impact`, `music`,
+   `ambience`, `pause_after` and `map`, with the same meanings and the same
+   rules as above.
 
 3. Store it:
 
@@ -342,12 +395,27 @@ What to know, and tell the user:
 - **The file is the whole direction.** Whatever the video's plan directed
   before is replaced, so when changing one card, start from the earlier
   direction file, or rebuild it from the listing.
-- **Pauses cannot be added.** A pause is silence recorded with the voice. The
-  command refuses `pause_after`; pauses the video already has are kept. If the
-  user wants pauses, the narration has to be recorded again.
-- Nothing else changes: not the narration, the pictures or the timeline. The
-  video's file as it was before the first change is kept beside it as
-  `script.before-direction.json`.
+- **Pauses are spliced into the recording.** A `pause_after` here does not
+  re-record anything: real silence is cut into the narration after that
+  scene's last word, at the quietest point of the gap, and the subtitles, the
+  word timings and the timeline move with it. The picture showing that line
+  holds for the pause, and the video gets longer by the sum of the pauses.
+  Because it is rebuilt from the untouched recording each time, changing a
+  pause or leaving it out of the next file is all it takes to change or remove
+  it. A pause that was recorded with the voice when the video was made cannot
+  be removed or shortened this way.
+- **A map replaces that scene's picture.** The scene that speaks the line gets
+  the map in place of the image it had. The earlier picture is not lost: it is
+  in the scene's picture history in the editor and can be put back there.
+  Leaving the map out of the next file does not put it back by itself; the
+  command says so. Tell the user which pictures were replaced.
+- A pause needs the narration to have been timed word by word. If it never
+  was, the command does that first, which takes a few minutes.
+- Without pauses in the file, nothing else changes: not the narration, the
+  pictures or the timeline. The video's file as it was before the first change
+  is kept beside it as `script.before-direction.json`; the untouched narration
+  and subtitles are kept as `narration.before-pauses.mp3` and
+  `subtitle.before-pauses.srt`.
 - The editor shows the new direction on its **Direction** track as soon as the
   page is reloaded. The finished video changes only when it is rendered again.
 - The command says so if the video has no **Finish look** (nothing would be

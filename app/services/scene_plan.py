@@ -55,6 +55,7 @@ import math
 import re
 from typing import Any, List, Optional
 
+from app.services import locator_map
 from app.utils import utils
 
 #: 一份分镜最多多少段。一段四五秒，这已经是半个多小时的片子。
@@ -156,6 +157,13 @@ def _direction(entry: dict, number: int) -> dict:
             )
         card["subtitle"] = card["subtitle"][:_CARD_SUBTITLE_CHARS]
         found["card"] = card
+
+    # 这一段的画面是一张定位地图（``locator_map``），不是画出来的图。
+    if entry.get("map") not in (None, "", False):
+        try:
+            found["map"] = locator_map.checked(entry["map"], number)
+        except locator_map.MapError as exc:
+            raise ScenePlanError(str(exc)) from None
     return found
 
 
@@ -243,10 +251,23 @@ def parse(text: str) -> dict:
             raise ScenePlanError(
                 f"scene {number}: the narration {narration!r} has nothing to say"
             )
+        direction = _direction(entry, number)
         prompt = _words(entry.get("prompt"))
+        image = _words(entry.get("image")).lower()
+        if image == "map":
+            # ``"image": "map"`` 只是把话说明白：这一段的画面是地图。
+            if "map" not in direction:
+                raise ScenePlanError(
+                    f'scene {number} says its image is a map but has no "map" '
+                    '(lat, lon and label)'
+                )
+            image = "text"
+        if not prompt and "map" in direction:
+            # 地图不用提示词。留一句话在那儿：以后想把这一段改回画出来的图，
+            # 编辑器里有东西可改。
+            prompt = f"A dark documentary locator map showing {direction['map']['label']}"
         if not prompt:
             raise ScenePlanError(f"scene {number} has no prompt for its picture")
-        image = _words(entry.get("image")).lower()
         if image in _IMAGE_PHOTO:
             kind = _words(entry.get("photo_kind")).lower() or "thing"
             if kind not in PHOTO_KINDS:
@@ -270,8 +291,13 @@ def parse(text: str) -> dict:
                 f'scene {number}: image is {image!r}; it is "text" (drawn from '
                 'the prompt) or "photo" (drawn from a real photo)'
             )
+        if photo is not None and "map" in direction:
+            raise ScenePlanError(
+                f"scene {number} is both a map and drawn from a photo; it is one "
+                "or the other"
+            )
         scenes.append({"narration": narration, "prompt": prompt, "photo": photo,
-                       "direction": _direction(entry, number)})
+                       "direction": direction})
     _title(data, scenes)
 
     # 配音和字幕是按分句来的，画面按段来：每一段占几条字幕，加起来必须正好
@@ -330,7 +356,7 @@ def directed(plan_scenes: Any) -> bool:
 
 
 #: 给一条已经做出来的片子补导演项时，一段上能写的那几样。
-_REDIRECT_FIELDS = ("card", "impact", "music", "ambience")
+_REDIRECT_FIELDS = ("card", "impact", "music", "ambience", "pause_after", "map")
 
 
 def _scene_numbers(key: Any, total: int) -> List[int]:
@@ -353,7 +379,9 @@ def _scene_numbers(key: Any, total: int) -> List[int]:
     return numbers
 
 
-def redirected(plan_scenes: List[dict], text: str) -> List[dict]:
+def redirected(
+    plan_scenes: List[dict], text: str, recorded: Optional[dict] = None,
+) -> List[dict]:
     """给一条已经做出来的片子换一份导演项，返回新的那份分镜（原来的不动）。
 
     旁白已经录好了，所以这里不重写分镜，只写"哪几段上加什么"::
@@ -368,12 +396,18 @@ def redirected(plan_scenes: List[dict], text: str) -> List[dict]:
           }
         }
 
-    这一份就是全部：没写到的段，原来的导演项去掉。只有停顿留着——它已经录在
-    旁白里了，也正因为这样不能在这里新加。
+    这一份就是全部：没写到的段，原来的导演项去掉。
+
+    停顿（``pause_after``）也可以写：它是往录好的旁白里插一段静音
+    （``narration_pauses``），不用重新配音。``recorded`` 是配音时就录进去的那些
+    ``{段号: 秒}``——它们在声音里，去不掉也缩不短，所以每一段至少是这么长。
+    不给 ``recorded`` 时，分镜里现有的停顿都当成录进去的。
 
     A direction file for a video that already exists: what to add, keyed by
-    scene number or run. It replaces all the direction the plan had, except
-    the pauses, which are part of the recording and cannot be added here.
+    scene number or run. It replaces all the direction the plan had. A
+    ``pause_after`` is spliced into the recorded narration as silence;
+    ``recorded`` names the pauses that were spoken with the voice, which can
+    be neither removed nor shortened.
     """
     if not plan_scenes:
         raise ScenePlanError(
@@ -401,11 +435,6 @@ def redirected(plan_scenes: List[dict], text: str) -> List[dict]:
     for key, entry in listed.items():
         if not isinstance(entry, dict):
             raise ScenePlanError(f'"{key}" is not an object')
-        if "pause_after" in entry:
-            raise ScenePlanError(
-                f'"{key}": a pause cannot be added to a video that is already '
-                "narrated; it is recorded with the voice"
-            )
         unknown = sorted(set(entry) - set(_REDIRECT_FIELDS))
         if unknown:
             raise ScenePlanError(
@@ -418,9 +447,12 @@ def redirected(plan_scenes: List[dict], text: str) -> List[dict]:
     scenes = []
     for number, (old, entry) in enumerate(zip(plan_scenes, wanted), start=1):
         direction = _direction(entry, number)
-        pause = (old.get("direction") or {}).get("pause_after")
-        if pause:
-            direction["pause_after"] = pause
+        if recorded is None:
+            spoken = (old.get("direction") or {}).get("pause_after") or 0.0
+        else:
+            spoken = recorded.get(number) or 0.0
+        if spoken and spoken > direction.get("pause_after", 0.0):
+            direction["pause_after"] = spoken
         scenes.append({**old, "direction": direction})
     _title(data, scenes)
     for scene in scenes:
@@ -440,6 +472,8 @@ def outline(plan_scenes: List[dict]) -> str:
             marks.append(f"title: {direction['title'].get('text', '')}")
         if direction.get("card"):
             marks.append(f"card: {direction['card'].get('title', '')}")
+        if direction.get("map"):
+            marks.append(f"map: {direction['map'].get('label', '')}")
         if direction.get("impact"):
             marks.append(f"impact {direction['impact']}")
         if direction.get("music"):
@@ -603,7 +637,22 @@ def report(plan: dict) -> str:
         for kind in AMBIENCES:
             if having("ambience", kind):
                 noted.append(f"{kind} under scenes {_runs(having('ambience', kind))}")
+        if having("map"):
+            noted.append(f"map on scene{'' if len(having('map')) == 1 else 's'} "
+                         f"{_runs(having('map'))}")
         lines.append("direction: " + "; ".join(noted))
+        # 每张地图标在了哪儿，用数据说一遍：坐标写错了（标到了海里、标到了
+        # 另一个国家）这一行一眼就看得出来。
+        for at in having("map"):
+            place = scenes[at - 1]["direction"]["map"]
+            try:
+                said = locator_map.where_is(place["lat"], place["lon"])
+            except locator_map.MapError as exc:
+                said = f"not checked ({exc})"
+            lines.append(
+                f"map on scene {at}: {place['label']} at {place['lat']:g}, "
+                f"{place['lon']:g} is {said}; the view is {place['width_km']:g} km wide"
+            )
         lines.extend(direction_notes(scenes))
     else:
         lines.append(

@@ -440,7 +440,7 @@ class TestDirectingAVideoThatExists:
         assert old[0]["direction"]["card"]["title"] == "November 2001"  # 原来的没动
 
     @pytest.mark.parametrize("wanted, said", [
-        ({"scenes": {"2": {"pause_after": 1}}}, "already narrated"),
+        ({"scenes": {"2": {"pause_after": 9}}}, "between 0.2 and 4"),
         ({"scenes": {"9": {"music": "off"}}}, "scenes 1 to 3"),
         ({"scenes": {"two": {"music": "off"}}}, "not a scene number"),
         ({"scenes": {"2": {"musik": "off"}}}, "'musik' is not something"),

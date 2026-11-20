@@ -2639,6 +2639,10 @@ def _find_scenes_for_photos(task_id: str, params) -> None:
     if planned:
         # 分镜自己说了哪几段照着照片画、找什么：照它记，不问模型。
         named = scene_editor.keep_planned_photo_scenes(task_id, planned)
+        # 写了地图的那几段现在就画上：不用出图模型，开画时跳过它们。
+        maps = scene_editor.place_planned_maps(task_id, planned)
+        if maps:
+            logger.info(f"{maps} scenes of {task_id} show a map")
         logger.info(
             f"the scene plan draws {named} of {len(planned)} scenes of "
             f"{task_id} from a photo"
