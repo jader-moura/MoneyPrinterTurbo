@@ -5481,6 +5481,7 @@ function movePlayhead() {
 
 function tick() {
   if (!state.playing) return;
+  const now = performance.now();
   // 旁白是成片的时间基准，所以有配音时以它为准；没有就用画面自己走。
   if (ui.narration.src && !ui.narration.paused) {
     state.playhead = ui.narration.currentTime;
@@ -5491,10 +5492,13 @@ function tick() {
       const within = ui.preview.currentTime - (scene.trim_start || 0);
       state.playhead = sceneOffsets()[index] + Math.max(0, within / state.speed);
     } else {
-      state.playhead += state.rate / 60;
+      // 照真的过了多久走，不是"一帧六十分之一秒"：120Hz 的屏幕上那样就是
+      // 两倍速。切到别的标签页再回来那一下不算（封顶十分之一秒）。
+      state.playhead += Math.min(0.1, (now - (state.tickAt || now)) / 1000) * state.rate;
     }
     void offset;
   }
+  state.tickAt = now;
 
   // 走到画面和旁白里更长的那个才算放完。只按画面长度收尾的话，画面比
   // 旁白短时后面那段旁白永远听不到。
@@ -5504,11 +5508,13 @@ function tick() {
     state.loadedClip = -1;
     syncPreview(true);
     movePlayhead();
+    followPlayhead(true);
     return;
   }
   const { index } = clipAt(state.playhead);
   if (index !== state.loadedClip) syncPreview(false);
   movePlayhead();
+  followPlayhead();
   requestAnimationFrame(tick);
 }
 
@@ -5559,6 +5565,9 @@ function play() {
   state.playing = true;
   ui.play.textContent = "Pause";
   applyRate();
+  state.tickAt = 0;
+  // 一按播放，红线就该在眼前——哪怕刚才滚到别处去了。
+  followPlayhead(true);
   if (ui.narration.src) {
     try { ui.narration.currentTime = state.playhead; } catch { /* 元数据未就绪 */ }
     ui.narration.play().catch(() => {});
@@ -5618,6 +5627,62 @@ function centerOnPlayhead() {
   const at = state.playhead * state.pxPerSecond;
   ui.scroll.scrollLeft = Math.max(0, at - ui.scroll.clientWidth / 2);
 }
+
+/* ---------- 放的时候时间线跟着红线走 ----------
+   不跟的话，红线几秒钟就走出可视区，人得一边看一边自己横向滚，一松手就又
+   找不到它了。做法是"平滑滚动"：红线先自己往右走，走到可视区正中就停在那里，
+   之后是时间线从它底下往左流过去——红线一直在同一个地方，前后各看得见半屏。
+   （试过"翻页"：红线到右边缘、时间线一下子跳一页。跳的那一下人会跟丢。）
+
+   人自己滚走了（想看看后面、去改别的段）就先不跟，过几秒再接着跟；不然
+   每一帧都被拽回来，放着的时候就哪儿也去不了。 */
+const FOLLOW_HOLD_MS = 4000;
+const follow = { expected: -1, holdUntil: 0, lag: 0, at: 0 };
+/** 落后了多少，每秒追回去的比例（指数）：大约半秒追上大半。 */
+const FOLLOW_CATCH_UP = 5;
+/** 一帧里红线多走出这么多像素，就不是在"放"，是被点到前面去了。 */
+const FOLLOW_JUMP_PX = 24;
+
+function followPlayhead(force = false) {
+  const view = ui.scroll;
+  const width = view.clientWidth;
+  if (!width) return;
+  const now = performance.now();
+  if (!force && now < follow.holdUntil) { follow.lag = 0; return; }
+  const elapsed = Math.min(0.1, (now - (follow.at || now)) / 1000);
+  follow.at = now;
+  const at = state.playhead * state.pxPerSecond;
+  const left = view.scrollLeft;
+  // 红线在正中时时间线该在的位置。
+  const target = Math.max(0, at - width / 2);
+  const put = (where) => {
+    view.scrollLeft = where;
+    follow.expected = view.scrollLeft;
+  };
+  // 红线不在眼前（滚走过）：没有什么可"滑"的，直接摆到正中。
+  if (at < left || at > left + width) {
+    follow.lag = 0;
+    put(target);
+    return;
+  }
+  // 时间线比"红线在正中"落后多少。还没走到正中就是不落后：让红线自己走。
+  const behind = target - left;
+  if (behind <= 0) { follow.lag = 0; return; }
+  // 放着的时候往前面点了一下：红线一下子到了正中右边。这时候把时间线直接
+  // 摆过去就是"跳"——人刚点的那个地方从手底下跑了。改成追：红线先留在点的
+  // 地方，时间线加快流过去，半秒左右红线回到正中。
+  if (behind > follow.lag + FOLLOW_JUMP_PX) follow.lag = behind;
+  follow.lag *= Math.exp(-FOLLOW_CATCH_UP * elapsed);
+  if (follow.lag < 0.5) follow.lag = 0;
+  put(target - follow.lag);
+}
+
+ui.scroll.addEventListener("scroll", () => {
+  // 自己翻的页不算"人滚走了"。
+  if (Math.abs(ui.scroll.scrollLeft - follow.expected) < 2) return;
+  follow.expected = -1;
+  if (state.playing) follow.holdUntil = performance.now() + FOLLOW_HOLD_MS;
+}, { passive: true });
 
 /** 把播放头放到某一秒——放着的时候也能放。
  *

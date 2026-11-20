@@ -48,7 +48,11 @@ def test_it_is_applied_when_playing_and_to_sounds_made_later():
 
 
 def test_the_clock_without_a_narration_runs_at_the_rate_too():
-    assert "state.playhead += state.rate / 60;" in _function("tick")
+    body = _function("tick")
+    # 照真的过了多久走：按"一帧六十分之一秒"算，120Hz 的屏幕上就是两倍速。
+    assert "(now - (state.tickAt || now)) / 1000) * state.rate;" in body
+    assert "state.rate / 60" not in body
+    assert "state.tickAt = 0;" in _function("play")
 
 
 def test_the_choice_is_remembered_and_a_bad_one_is_ignored():
