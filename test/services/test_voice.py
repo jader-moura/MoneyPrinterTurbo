@@ -2728,7 +2728,7 @@ class TestElevenLabsVoice(unittest.TestCase):
         self.assertEqual(utils.MIN_PAUSE_DURATION_SECONDS, 0.1)
 
     def test_tts_provider_limitation_to_azure_v1(self):
-        """验证仅 Azure TTS v1 (Edge TTS) 进入分段链路，Gemini/Fish Audio/SiliconFlow/Kokoro 保持单次请求。"""
+        """验证仅 Azure TTS v1 (Edge TTS) 和本机的 Kokoro 进入分段链路，Gemini/Fish Audio/SiliconFlow 保持单次请求。"""
         # 1. 声音提供商判断
         self.assertTrue(vs.is_azure_v1_voice("zh-CN-XiaoxiaoNeural"))
         self.assertTrue(vs.is_azure_v1_voice("es-ES-AlvaroNeural"))
@@ -2743,9 +2743,21 @@ class TestElevenLabsVoice(unittest.TestCase):
             "gemini:Puck-Male",
             "fish_audio:default",
             "siliconflow:fishaudio/fish-speech-1.5:alex-Male",
-            "kokoro:af_bella",
         ]
         script_with_pause = "Part 1. [pause: 2s] Part 2."
+
+        # Kokoro 是本机的、按请求不花钱、原生 24 kHz：分段合成，停顿是真的。
+        with (
+            patch.object(vs, "_single_tts") as mock_single,
+            patch.object(vs, "_tts_with_pauses", return_value="pieces") as mock_split,
+        ):
+            self.assertEqual(
+                vs.tts(text=script_with_pause, voice_name="kokoro:af_bella",
+                       voice_rate=1.0, voice_file="dummy.mp3"),
+                "pieces",
+            )
+            mock_split.assert_called_once()
+            mock_single.assert_not_called()
 
         for voice in non_azure_voices:
             with (

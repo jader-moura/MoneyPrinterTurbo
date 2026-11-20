@@ -13,17 +13,21 @@
 * 句子之间是纯数字静音 → 配乐垫在旁白下面约 11 LU，旁白响的时候再往下压
   （sidechain），停顿里自己浮上来；
 * 画面平、数字味重 → 调色、暗角、胶片颗粒；
-* 开头结尾硬切 → 淡入、淡出；
+* 结尾硬切 → 淡出；画面比旁白短 → 最后一帧定住，等旁白说完再淡；
 * 字幕 → 写成 ASS 交给 libass 烧（``utils/ass_subtitles.py``），包括"念到
-  哪个词哪个词变色"和左上角的标题卡。
+  哪个词哪个词变色"、左上角的标题卡和片名；
+* 从头到尾一个样 → 分镜（``scene_plan.py``）里写的导演项：片名、标题卡、
+  重音、"这几段不要配乐"、环境声（声音在 ``sound_design.py`` 里合成）。
 
 每一项都有开关，在 ``config.toml`` 的 ``[finish]`` 里；没写的项用下面
 ``DEFAULTS`` 里的值。
 
 A second way to make the final file, entirely in ffmpeg: voice EQ and
 compression, music ducked under the narration, two-pass loudness to -14 LUFS,
-a colour grade with vignette and grain, fades, and subtitles burned from an
-ASS file. Used when the task's ``finish_look`` is set; the MoviePy renderer is
+a colour grade with vignette and grain, a fade out after the narrator has
+finished, and subtitles burned from an ASS file. A scene plan's direction is
+carried out here too: its title and cards, impacts, music dropouts and
+ambience. Used when the task's ``finish_look`` is set; the MoviePy renderer is
 untouched and remains what runs when it is empty.
 """
 
@@ -35,6 +39,8 @@ import os
 import re
 import subprocess
 import tempfile
+import threading
+from dataclasses import dataclass, field
 from functools import lru_cache
 from typing import Any, List, Optional, Sequence, Tuple
 
@@ -43,6 +49,7 @@ from loguru import logger
 from app.config import config
 from app.models.schema import VideoAspect, VideoParams
 from app.services import bgm as bgm_service
+from app.services import scene_plan, sound_design
 from app.services import transition_sound as transition_sound_service
 from app.services.utils import ass_subtitles
 from app.utils import file_security, utils
@@ -92,11 +99,15 @@ DEFAULTS: dict[str, Any] = {
     # 胶片颗粒的强度，0 = 不加。只在带质感的调色上用。
     "grain": 5,
     "vignette": True,
-    # 开头淡入、结尾淡出各多少秒，0 = 不要。
-    "fade_in": 1.0,
+    # 开头淡入、结尾淡出各多少秒，0 = 不要。开头默认不淡入：第一句是钩子，
+    # 第一帧就该是亮的。
+    "fade_in": 0.0,
     "fade_out": 2.0,
-    # 让写脚本的模型挑三到五处，在左上角打出标题卡。
+    # 让写脚本的模型挑三到五处，在左上角打出标题卡。分镜自己带了导演项的
+    # 片子不问模型，照分镜来。
     "title_cards": True,
+    # 分镜里写的重音、环境声、"这几段不要配乐"、片名：照着做。
+    "sound_design": True,
     # 词的时间从哪来：cues = 按字幕文件摊；whisper = 再跑一遍语音识别对齐。
     "word_timing": "whisper",
     # "念到哪个词哪个词变色"那种字幕要不要全大写。
@@ -109,9 +120,17 @@ DEFAULTS: dict[str, Any] = {
 
 # 旁白处理完之后的响度，配乐相对它的位置。
 _VOICE_LUFS = -18.0
-_MUSIC_BELOW_VOICE = 11.0
-# ``bgm_volume`` 的这个值对应"比旁白低 11 LU"；调大调小按分贝算。
+_MUSIC_BELOW_VOICE = 10.0
+# ``bgm_volume`` 的这个值对应"比旁白低 10 LU"（句子之间浮上来的那个位置；
+# 旁白响的时候还要再压七八个分贝）。
 _REFERENCE_BGM_VOLUME = 0.2
+# 滑块每变一个分贝，配乐只变这么多。照实算的话 5% 就是再低 12 dB，压完之后
+# 比旁白低三十多 LU——实测就是听不见，整条片子等于没有配乐。
+# How much of the slider's change in dB reaches the music. Taken at face value
+# a 5% setting put the music 36 LU under the voice once ducked: inaudible.
+_BGM_VOLUME_SLOPE = 0.3
+# 片子的最后一帧最多定住多久，等旁白说完、配乐淡掉。
+_MAX_END_HOLD_SECONDS = 6.0
 _TITLE_CARD_SECONDS = 6.0
 _TITLE_CARD_MIN_VIDEO_SECONDS = 60.0
 _TITLE_CARDS_FILE = "title-cards.json"
@@ -267,8 +286,14 @@ def mix_graph(
     cut_volume: float = 0.0,
     voice_processing: bool = True,
     ducking: bool = True,
+    music_off: Sequence[Tuple[float, float]] = (),
+    hits: Optional[Tuple[int, Sequence[float]]] = None,
+    beds: Sequence[Tuple[int, Sequence[Tuple[float, float]]]] = (),
 ) -> str:
     """混音那张滤镜图。输入 0 是旁白，1 是配乐（有的话），后面是转场音效。
+
+    ``music_off`` 是配乐让开的那几段；``hits`` 是重音那个输入和它落在哪几秒；
+    ``beds`` 是每一种环境声的输入（循环着读）和它响的那几段。
 
     出来两路一样的：``[mix]`` 写成文件，``[meter]`` 只是量响度。
     """
@@ -276,6 +301,11 @@ def mix_graph(
     if voice_processing:
         voice.append(_VOICE_CHAIN)
     voice.append(f"volume={_decibels(voice_gain)}")
+    # 垫到整条片子那么长：让位那一节是跟着旁白走的，旁白一结束它就停，
+    # 配乐会跟着在最后一个字上被掐掉，而不是淡出去。
+    # Padded to the full length: the ducker ends with its key, which cut the
+    # music off on the narrator's last word instead of letting it fade.
+    voice.append(f"apad=whole_dur={duration:.3f}")
     parts: List[str] = []
     layers = ["[voice]"]
     if music_gain is None:
@@ -283,24 +313,39 @@ def mix_graph(
     else:
         parts.append(f"[0:a]{','.join(voice)},asplit=2[voice][key]")
         music = [_STEREO_48K, f"volume={_decibels(music_gain)}"]
+        riding = sound_design.music_filter(music_off)
+        if riding:
+            music.append(riding)
         # 淡的是整条时间线的结尾，不是每一遍循环的结尾。
         fade = min(3.0, duration / 2)
         music.append(f"atrim=duration={duration:.3f}")
         music.append(f"afade=t=out:st={max(0.0, duration - fade):.3f}:d={fade:.3f}")
         parts.append(f"[1:a]{','.join(music)}[bed]")
         if ducking:
+            # 压七八个分贝：旁白底下还听得见有音乐，停顿里它自己浮上来。
             parts.append(
-                "[bed][key]sidechaincompress=threshold=0.02:ratio=6:attack=40:"
-                "release=600[music]"
+                "[bed][key]sidechaincompress=threshold=0.05:ratio=4:attack=40:"
+                "release=700[music]"
             )
         else:
             parts.append("[key]anullsink")
             parts.append("[bed]anull[music]")
         layers.append("[music]")
-    for input_index, times in cut_sounds:
+    for input_index, windows in beds:
+        if not windows:
+            continue
+        parts.append(
+            f"[{input_index}:a]{_STEREO_48K},{sound_design.bed_filter(windows)},"
+            f"atrim=duration={duration:.3f}[amb{input_index}]"
+        )
+        layers.append(f"[amb{input_index}]")
+    placed = [(index, times, max(0.0, cut_volume)) for index, times in cut_sounds]
+    if hits and hits[1]:
+        placed.append((hits[0], hits[1], 1.0))
+    for input_index, times, volume in placed:
         names = [f"[cut{input_index}x{n}]" for n in range(len(times))]
         parts.append(
-            f"[{input_index}:a]{_STEREO_48K},volume={max(0.0, cut_volume):.3f},"
+            f"[{input_index}:a]{_STEREO_48K},volume={volume:.3f},"
             f"asplit={len(times)}{''.join(f'[raw{input_index}x{n}]' for n in range(len(times)))}"
         )
         for n, at in enumerate(times):
@@ -321,10 +366,18 @@ def mix_graph(
 
 def picture_filters(
     *, look: str, duration: float, subtitle_file: str = "", fonts_dir: str = "",
+    hold: float = 0.0,
 ) -> str:
-    """画面那一串滤镜：调色、暗角、颗粒、字幕、淡入淡出。"""
+    """画面那一串滤镜：调色、暗角、颗粒、字幕、淡入淡出。
+
+    ``hold`` 是最后一帧要定住多少秒：画面比旁白短的时候，等旁白说完再淡出，
+    而不是把最后几个字一起淡掉。``duration`` 是定住之后的总长。
+    """
     spec = LOOKS[look]
     chain: List[str] = []
+    if hold > 0.05:
+        # 多垫半秒，由编码时的 -t 截齐：宁可多一帧，不能少一帧露出黑。
+        chain.append(f"tpad=stop_mode=clone:stop_duration={hold + 0.5:.3f}")
     if spec["grade"]:
         chain.append(spec["grade"])
     if spec["texture"]:
@@ -370,6 +423,18 @@ def _contrast_colour(colour: str) -> str:
     return "#FFD73F" if blue > 150 else "#FFFFFF"
 
 
+def _card_font() -> Tuple[str, int]:
+    """标题卡和片名用什么字体、横向压到百分之几。
+
+    Windows 自带的 Bahnschrift 是 DIN 那一路的字，压到 78% 就是纪录片里常见的
+    窄体标题字。别的系统上没有它：用字幕的字体，不压。
+    """
+    windows = os.environ.get("WINDIR") or os.environ.get("SystemRoot") or ""
+    if windows and os.path.isfile(os.path.join(windows, "Fonts", "bahnschrift.ttf")):
+        return "Bahnschrift", 78
+    return "", 100
+
+
 def subtitle_style(params: VideoParams) -> ass_subtitles.Style:
     """把任务里的字幕设置翻成 ASS 的样式。"""
     font_name = params.font_name or "STHeitiMedium.ttc"
@@ -382,7 +447,10 @@ def subtitle_style(params: VideoParams) -> ass_subtitles.Style:
     elif background is True:
         box = "#000000"
     highlight = str(setting("highlight_color") or "").strip()
+    card_font, card_squeeze = _card_font()
     return ass_subtitles.Style(
+        card_font=card_font,
+        card_squeeze=card_squeeze,
         font=_font_family(font_path),
         # libass 的字号是"上沿到下沿"，PIL 的是 em：同一个数字看起来小一圈。
         size=round(float(params.font_size or 60) * 1.12, 1),
@@ -430,21 +498,48 @@ def _spoken_words_once(audio_path: str, task_dir: str) -> List[Tuple[float, floa
     Recognition takes a minute or two for a long narration; the result is kept
     beside the video and reused until the audio file changes.
     """
-    saved_path = os.path.join(task_dir, _SPOKEN_WORDS_FILE)
+    # 编辑器的预览和出片可能同时要这份结果：排队，后到的那个等前一个听完，
+    # 直接读它存下的，不再听第二遍。
+    # 已经听过的不排队：不然别的片子正在听的那几分钟里，这一条明明有现成的
+    # 结果，编辑器的请求也得跟着等。
+    saved = _saved_spoken_words(audio_path, task_dir)
+    if saved is not None:
+        return saved
+    with _LISTENING:
+        saved = _saved_spoken_words(audio_path, task_dir)
+        if saved is not None:
+            return saved
+        logger.info("timing the subtitle words against the narration (whisper)")
+        spoken = _spoken_words(audio_path)
+        target = os.path.join(task_dir, _SPOKEN_WORDS_FILE)
+        partial = f"{target}.{os.getpid()}.{threading.get_ident()}.part"
+        with open(partial, "w", encoding="utf-8") as handle:
+            json.dump({"audio": _audio_stamp(audio_path), "words": spoken}, handle,
+                      ensure_ascii=False)
+        os.replace(partial, target)
+        return spoken
+
+
+_LISTENING = threading.Lock()
+
+
+def _audio_stamp(audio_path: str) -> list:
     stat = os.stat(audio_path)
-    stamp = [int(stat.st_size), int(stat.st_mtime)]
+    return [int(stat.st_size), int(stat.st_mtime)]
+
+
+def _saved_spoken_words(
+    audio_path: str, task_dir: str,
+) -> Optional[List[Tuple[float, float, str]]]:
+    """这条配音已经听过的结果；没听过、或者配音换过了，是 ``None``。"""
     try:
-        with open(saved_path, encoding="utf-8") as handle:
+        with open(os.path.join(task_dir, _SPOKEN_WORDS_FILE), encoding="utf-8") as handle:
             saved = json.load(handle)
-        if saved.get("audio") == stamp:
+        if saved.get("audio") == _audio_stamp(audio_path):
             return [(float(a), float(b), str(c)) for a, b, c in saved["words"]]
-    except (OSError, ValueError, KeyError, TypeError):
+    except (OSError, ValueError, KeyError, TypeError, AttributeError):
         pass
-    logger.info("timing the subtitle words against the narration (whisper)")
-    spoken = _spoken_words(audio_path)
-    with open(saved_path, "w", encoding="utf-8") as handle:
-        json.dump({"audio": stamp, "words": spoken}, handle, ensure_ascii=False)
-    return spoken
+    return None
 
 
 def _script_of(task_dir: str, params: VideoParams) -> Tuple[str, str]:
@@ -462,16 +557,116 @@ def _script_of(task_dir: str, params: VideoParams) -> Tuple[str, str]:
     return subject, script
 
 
+@dataclass
+class Direction:
+    """分镜里的导演项，换算成了成片上的秒数。什么都没写就是全空的。"""
+
+    # 这条片子的导演是不是分镜管的：是的话标题卡照它来，不问模型。
+    planned: bool = False
+    title: Optional[ass_subtitles.Title] = None
+    # ``(几秒, 大字, 小字)``
+    cards: List[Tuple[float, str, str]] = field(default_factory=list)
+    hits: List[float] = field(default_factory=list)
+    music_off: List[Tuple[float, float]] = field(default_factory=list)
+    beds: dict = field(default_factory=dict)
+
+    @property
+    def sounds(self) -> bool:
+        return bool(self.hits or self.music_off or any(self.beds.values()))
+
+
+def _plan_scenes(task_dir: str, params: VideoParams) -> List[dict]:
+    """这条片子的分镜（没有就是空的）。任务目录里的清单比参数里的新。"""
+    scenes = getattr(params, "scene_plan", None)
+    try:
+        with open(os.path.join(task_dir, "script.json"), encoding="utf-8") as handle:
+            saved = (json.load(handle).get("params") or {}).get("scene_plan")
+        if saved:
+            scenes = saved
+    except (OSError, ValueError, AttributeError):
+        pass
+    return [scene for scene in scenes or [] if isinstance(scene, dict)]
+
+
+def direct(
+    scenes: Sequence[dict], words: Sequence[ass_subtitles.Word], duration: float,
+) -> Direction:
+    """把分镜每一段的导演项落到时间上。
+
+    每一段靠它自己的旁白在念出来的词里找位置，所以在编辑器里挪过、拆过画面
+    都不影响；旁白被改掉、找不到的那一段，它的导演项不做，并且在日志里说。
+
+    Places each scene's direction in time by finding its narration among the
+    spoken words. A scene whose narration is no longer spoken is skipped and
+    named in the log.
+    """
+    if not scene_plan.directed(scenes):
+        return Direction()
+    found = Direction(planned=True)
+    if not words:
+        return found
+    places = ass_subtitles.locate_lines(
+        words, [str(scene.get("narration") or "") for scene in scenes])
+    sound = setting("sound_design")
+    for number, (scene, place) in enumerate(zip(scenes, places), start=1):
+        wanted = scene.get("direction") or {}
+        if not wanted:
+            continue
+        if place is None:
+            logger.warning(
+                f"scene {number}'s direction ({', '.join(wanted)}) is not carried "
+                "out: its narration is not in the recording any more"
+            )
+            continue
+        start, end = place
+        card = wanted.get("card")
+        if isinstance(card, dict) and card.get("title"):
+            found.cards.append(
+                (start, str(card["title"]), str(card.get("subtitle") or "")))
+        title = wanted.get("title")
+        if isinstance(title, dict) and title.get("text"):
+            found.title = ass_subtitles.Title(
+                max(0.0, start - 0.15), min(end + 0.55, duration - 2.5),
+                str(title["text"]), str(title.get("tagline") or ""))
+            if sound:
+                found.hits.append(max(0.0, start - 0.1))
+        if not sound:
+            continue
+        if wanted.get("impact") == "start":
+            found.hits.append(max(0.0, start - 0.1))
+        elif wanted.get("impact") == "end":
+            found.hits.append(end + 0.05)
+        if wanted.get("music") == "off":
+            found.music_off.append((start, end))
+        if wanted.get("ambience") in sound_design.BED_RMS_DB:
+            found.beds.setdefault(wanted["ambience"], []).append((start, end))
+    # 片名和"这一句开头落一记"会落在同一处：只落一记，不然就是两倍响。
+    hits: List[float] = []
+    for at in sorted(at for at in found.hits if at < duration - 1.0):
+        if not hits or at - hits[-1] > 0.2:
+            hits.append(at)
+    found.hits = hits
+    found.music_off = sound_design.merged(found.music_off, gap=4.0)
+    found.beds = {kind: sound_design.merged(windows, gap=2.0)
+                  for kind, windows in found.beds.items()}
+    return found
+
+
 def title_cards(
     task_dir: str, params: VideoParams, words: Sequence[ass_subtitles.Word],
-    duration: float,
+    duration: float, planned: Optional[Sequence[Tuple[float, str, str]]] = None,
+    ask: bool = True,
 ) -> List[ass_subtitles.TitleCard]:
     """这条片子的标题卡。
 
-    挑哪几处是模型定的，定完存在任务目录的 ``title-cards.json`` 里：以后每次
-    重新出片用的都是同一份，想改就改这个文件（删掉它就重新挑一遍，写成 ``[]``
-    就是不要）。每一张都要在旁白里找到它那句话才显示——找不到的那张不显示，
-    并且在日志里说是哪一张。
+    分镜自己管导演的片子（``planned`` 不是 ``None``）：照分镜写的那几张来，
+    不问模型。
+
+    其余的，挑哪几处是模型定的，定完存在任务目录的 ``title-cards.json`` 里：
+    以后每次重新出片用的都是同一份，想改就改这个文件（删掉它就重新挑一遍，
+    写成 ``[]`` 就是不要）。每一张都要在旁白里找到它那句话才显示——找不到的
+    那张不显示，并且在日志里说是哪一张。这个文件在的时候，它说了算，分镜里
+    的也让它。
     """
     if not setting("title_cards") or not words:
         return []
@@ -484,6 +679,13 @@ def title_cards(
         except (OSError, ValueError) as exc:
             logger.warning(f"{_TITLE_CARDS_FILE} cannot be read and is ignored: {exc}")
             return []
+    elif planned is not None:
+        return _placed_cards(
+            [(start, {"title": title, "subtitle": subtitle})
+             for start, title, subtitle in planned], duration)
+    elif not ask:
+        # 编辑器的预览：还没挑过就是还没有，不为了看一眼去问模型。
+        return []
     elif duration >= _TITLE_CARD_MIN_VIDEO_SECONDS:
         subject, script = _script_of(task_dir, params)
         if not script.strip():
@@ -500,7 +702,7 @@ def title_cards(
         with open(saved_path, "w", encoding="utf-8") as handle:
             json.dump(chosen, handle, ensure_ascii=False, indent=2)
         logger.info(f"chose {len(chosen)} title cards, saved to {_TITLE_CARDS_FILE}")
-    cards: List[ass_subtitles.TitleCard] = []
+    found: List[Tuple[float, dict]] = []
     for entry in chosen or []:
         if not isinstance(entry, dict):
             continue
@@ -511,8 +713,25 @@ def title_cards(
                 f"{entry.get('phrase')!r} is not in the narration"
             )
             continue
+        found.append((start, entry))
+    return _placed_cards(found, duration)
+
+
+def _placed_cards(
+    found: List[Tuple[float, dict]], duration: float,
+) -> List[ass_subtitles.TitleCard]:
+    """``(几秒, {"title", "subtitle"})`` 排成不互相叠着的标题卡。"""
+    # 给的顺序不一定是念到的顺序：先按时间排，再判断叠不叠。不排的话，
+    # 排在后面、念得却更早的那张会被当成"和上一张叠了"悄悄丢掉。
+    found = sorted(found, key=lambda item: item[0])
+    cards: List[ass_subtitles.TitleCard] = []
+    for start, entry in found:
         # 两张不叠在一起，也不拖到片尾的淡出里。
         if cards and start < cards[-1].end + 1.0:
+            logger.warning(
+                f"title card {entry.get('title')!r} is not shown: it would overlap "
+                f"{cards[-1].title!r}"
+            )
             continue
         end = min(start + _TITLE_CARD_SECONDS, duration - 2.5)
         if end - start < 2.0:
@@ -522,28 +741,175 @@ def title_cards(
     return cards
 
 
-def write_subtitles(
-    params: VideoParams, subtitle_path: str, audio_path: str, output_file: str,
-    width: int, height: int, duration: float,
-) -> str:
-    """把要烧进画面的字写成 ASS，返回文件路径；没有要烧的返回空串。"""
+def _strict_captions(params: VideoParams, cues: Sequence) -> bool:
+    """字幕是不是"念到哪个词哪个词变色"那一类：它们非要真的词时间不可。"""
+    mode = str(getattr(params, "subtitle_display_mode", "sentence") or "sentence")
+    return bool(params.subtitle_enabled) and bool(cues) and mode != "sentence"
+
+
+def narration_words(
+    params: VideoParams, subtitle_path: str, audio_path: str, task_dir: str,
+    precise: bool = False, listen: bool = True,
+) -> Tuple[list, List[ass_subtitles.Word]]:
+    """``(字幕, 带时间的词)``。
+
+    词的时间先从字幕里摊；"念到哪个词哪个词变色"的字幕、以及分镜带着导演项
+    的片子（``precise``），再拿语音识别对一遍——很多配音不给每个词的时间，
+    字幕里的时间是按字数估的，实测能差到两秒，重音落在那上面就是错的。
+
+    识别跑不了的时候：变色字幕照旧报错（它没有别的办法）；导演项退回估的
+    时间，在日志里说一声。
+    """
     cues = []
     if subtitle_path and os.path.exists(subtitle_path):
         cues = moviepy_subtitles(subtitle_path)
     words = ass_subtitles.words_from_cues(cues)
+    strict = _strict_captions(params, cues)
+    if listen and words and (strict or precise) and setting("word_timing") == "whisper":
+        try:
+            words = ass_subtitles.align_spoken_words(
+                words, _spoken_words_once(audio_path, task_dir))
+        except FinishError as exc:
+            if strict:
+                raise
+            logger.warning(
+                f"the direction is timed from the subtitle estimates, not the "
+                f"recording: {exc}"
+            )
+    return cues, words
+
+
+def waits_for_listening(
+    params: VideoParams, subtitle_path: str, audio_path: str, task_dir: str,
+) -> bool:
+    """编辑器要把这条片子的导演项摆对位置，是不是得先听一遍配音。
+
+    听一遍要几分钟，所以编辑器不在请求里做：这里说"要"，它就放到后台去听
+    （:func:`listen`），听完再来拿。已经听过的、用不着听的，都是"不要"。
+    """
+    if setting("word_timing") != "whisper":
+        return False
+    if not (subtitle_path and os.path.exists(subtitle_path)):
+        return False
+    directed = scene_plan.directed(_plan_scenes(task_dir, params))
+    chosen = os.path.isfile(os.path.join(task_dir, _TITLE_CARDS_FILE))
+    if not directed and not (
+            chosen and _strict_captions(params, moviepy_subtitles(subtitle_path))):
+        return False
+    return _saved_spoken_words(audio_path, task_dir) is None
+
+
+def listen(audio_path: str, task_dir: str) -> None:
+    """把配音听一遍、存下每个词的时间。出片时用的就是这一份，不再听第二遍。"""
+    _spoken_words_once(audio_path, task_dir)
+
+
+def editor_direction(
+    params: VideoParams, subtitle_path: str, audio_path: str, task_dir: str,
+    voice_seconds: float,
+) -> dict:
+    """成片里会加上去的片名、标题卡和声音，各在第几秒——给编辑器预览用。
+
+    和 :func:`render` 走的是同一套：同一份分镜、同一份词时间、同一个
+    :func:`direct`。两处不一样：这里不问模型要标题卡（还没挑过就是没有），
+    片长按旁白算（成片的画面还没合出来）。这里**从不**去听配音（那要几分钟，
+    见 :func:`waits_for_listening`）：听过就用听到的，没听过位置照字幕估的
+    时间摆，返回里的 ``timing`` 说是哪一种。
+
+    What the finished video will add and when, for the editor's preview. The
+    same plan, word timings and :func:`direct` as the render.
+    """
+    scenes = _plan_scenes(task_dir, params)
+    directed = scene_plan.directed(scenes)
+    fade_out = setting("fade_out")
+    duration = max(0.0, float(voice_seconds)) + (fade_out if fade_out > 0 else 0.3)
+    heard = (
+        setting("word_timing") == "whisper"
+        and _saved_spoken_words(audio_path, task_dir) is not None
+    )
+    cues, words = narration_words(
+        params, subtitle_path, audio_path, task_dir, precise=directed, listen=heard)
+    # 听过不等于用了：只有带导演项的分镜和逐词变色的字幕才照听到的时间摆。
+    heard = heard and bool(words) and (directed or _strict_captions(params, cues))
+    direction = direct(scenes, words, duration)
+    cards = title_cards(
+        task_dir, params, words, duration,
+        planned=direction.cards if direction.planned else None, ask=False)
+    font, squeeze = _card_font()
+    title = direction.title
+    if title is not None and title.end - title.start < 1.0:
+        title = None
+    return {
+        "planned": direction.planned,
+        "timing": "recording" if heard else "estimate",
+        "duration": round(duration, 3),
+        "title": None if title is None else {
+            "start": round(title.start, 3), "end": round(title.end, 3),
+            "text": title.text, "tagline": title.tagline,
+        },
+        "cards": [
+            {"start": round(card.start, 3), "end": round(card.end, 3),
+             "title": card.title, "subtitle": card.subtitle}
+            for card in cards
+        ],
+        "hits": [round(at, 3) for at in direction.hits],
+        "hit_seconds": sound_design.HIT_SECONDS,
+        "music_off": _windows(direction.music_off),
+        "music": {
+            "ramps": _windows(sound_design.ramps(
+                direction.music_off, sound_design.MUSIC_GATE["fall"],
+                sound_design.MUSIC_GATE["lead"], sound_design.MUSIC_GATE["hold"])),
+            "rise": sound_design.MUSIC_GATE["rise"],
+            "fall": sound_design.MUSIC_GATE["fall"],
+            "floor_db": sound_design.MUSIC_OFF_DB,
+        },
+        "beds": [
+            {
+                "kind": kind,
+                "windows": _windows(windows),
+                "ramps": _windows(sound_design.ramps(
+                    windows, sound_design.BED_GATE["fall"],
+                    sound_design.BED_GATE["lead"], sound_design.BED_GATE["hold"])),
+                "rise": sound_design.BED_GATE["rise"],
+                "fall": sound_design.BED_GATE["fall"],
+            }
+            for kind, windows in sorted(direction.beds.items()) if windows
+        ],
+        "card_font": font,
+        "card_squeeze": squeeze,
+    }
+
+
+def _windows(windows: Sequence[Tuple[float, float]]) -> List[List[float]]:
+    return [[round(float(a), 3), round(float(b), 3)] for a, b in windows]
+
+
+def write_subtitles(
+    params: VideoParams, subtitle_path: str, audio_path: str, output_file: str,
+    width: int, height: int, duration: float,
+    timed: Optional[Tuple[list, List[ass_subtitles.Word]]] = None,
+    direction: Optional[Direction] = None,
+) -> str:
+    """把要烧进画面的字写成 ASS，返回文件路径；没有要烧的返回空串。
+
+    ``timed`` 是 :func:`narration_words` 已经算好的那一对（不给就在这里算）；
+    ``direction`` 是分镜的导演项：片名，和它自己定的标题卡。
+    """
+    task_dir = os.path.dirname(output_file)
+    cues, words = timed or narration_words(params, subtitle_path, audio_path, task_dir)
     mode = str(getattr(params, "subtitle_display_mode", "sentence") or "sentence")
     captions = bool(params.subtitle_enabled) and bool(cues)
-    if captions and mode != "sentence" and setting("word_timing") == "whisper":
-        words = ass_subtitles.align_spoken_words(
-            words, _spoken_words_once(audio_path, os.path.dirname(output_file)))
-    cards = title_cards(os.path.dirname(output_file), params, words, duration)
-    if not captions and not cards:
+    direction = direction or Direction()
+    cards = title_cards(
+        task_dir, params, words, duration,
+        planned=direction.cards if direction.planned else None)
+    if not captions and not cards and direction.title is None:
         return ""
     style = subtitle_style(params)
     content = ass_subtitles.build(
         cues if captions else [], width=width, height=height, style=style, mode=mode,
         max_lines=int(getattr(params, "subtitle_max_lines", 0) or 0),
-        words=words, title_cards=cards,
+        words=words, title_cards=cards, title=direction.title,
     )
     target = os.path.splitext(output_file)[0] + ".ass"
     with open(target, "w", encoding="utf-8") as handle:
@@ -574,7 +940,24 @@ def render(
     from app.services import video as video_service
 
     width, height = VideoAspect(params.video_aspect).to_resolution()
-    duration = _duration_of(video_path)
+    picture_seconds = _duration_of(video_path)
+    # 画面常常比旁白短一点（实测短过 0.8 秒），结尾的淡出又有两秒：最后一句
+    # 就被淡掉了。让最后一帧定住，等旁白说完再淡。
+    # The picture is often a little shorter than the narration, and the fade
+    # out then swallows the last sentence. Hold the last frame until the
+    # narrator has finished, then fade.
+    from app.services import voice as voice_service
+
+    fade_out = setting("fade_out")
+    try:
+        voice_seconds = float(voice_service.get_audio_duration(audio_path) or 0.0)
+    except Exception:
+        voice_seconds = 0.0
+    duration = min(
+        max(picture_seconds, voice_seconds + (fade_out if fade_out > 0 else 0.3)),
+        picture_seconds + _MAX_END_HOLD_SECONDS,
+    )
+    hold = duration - picture_seconds
     output_dir = os.path.dirname(os.path.abspath(output_file))
     logger.info(f"finishing video: {width} x {height}, look: {look}")
     logger.info(f"  ① video: {video_path}")
@@ -603,7 +986,7 @@ def render(
             volume = max(float(params.bgm_volume or 0.0), 1e-3)
             target = (
                 _VOICE_LUFS - _MUSIC_BELOW_VOICE
-                + 20.0 * math.log10(volume / _REFERENCE_BGM_VOLUME)
+                + _BGM_VOLUME_SLOPE * 20.0 * math.log10(volume / _REFERENCE_BGM_VOLUME)
             )
             music_gain = target - music_level
             logger.info(
@@ -632,19 +1015,53 @@ def render(
         for position, times in enumerate(sounds.values())
     ]
 
-    descriptor, mix_file = tempfile.mkstemp(prefix=".finish-mix-", suffix=".wav",
-                                            dir=output_dir)
-    os.close(descriptor)
-    descriptor, temp_output = tempfile.mkstemp(prefix=".finish-", suffix=".mp4",
-                                               dir=output_dir)
-    os.close(descriptor)
+    def temporary(prefix: str, suffix: str) -> str:
+        descriptor, name = tempfile.mkstemp(prefix=prefix, suffix=suffix, dir=output_dir)
+        os.close(descriptor)
+        return name
+
+    mix_file = temporary(".finish-mix-", ".wav")
+    temp_output = temporary(".finish-", ".mp4")
+    made: List[str] = []
     subtitle_file = ""
     try:
+        # 分镜的导演项：先把每一段落到时间上，声音和画面都要用。
+        timed = narration_words(
+            params, subtitle_path, audio_path, output_dir,
+            precise=scene_plan.directed(_plan_scenes(output_dir, params)))
+        direction = direct(_plan_scenes(output_dir, params), timed[1], duration)
+        if direction.planned:
+            logger.info(
+                f"  ⑥ʹ direction from the scene plan: "
+                f"{'a title, ' if direction.title else ''}{len(direction.cards)} cards, "
+                f"{len(direction.hits)} impacts, music off {len(direction.music_off)} "
+                f"times, ambience under "
+                f"{sum(len(found) for found in direction.beds.values())} stretches"
+            )
+        next_input = inputs.count("-i")
+        hit_input = None
+        if direction.hits:
+            made.append(sound_design.write_wav(
+                temporary(".finish-hit-", ".wav"), sound_design.hit()))
+            inputs += ["-i", made[-1]]
+            hit_input = (next_input, direction.hits)
+            next_input += 1
+        bed_inputs = []
+        for kind, windows in direction.beds.items():
+            if not windows:
+                continue
+            made.append(sound_design.write_wav(
+                temporary(f".finish-{kind}-", ".wav"), sound_design.bed(kind)))
+            inputs += ["-stream_loop", "-1", "-i", made[-1]]
+            bed_inputs.append((next_input, windows))
+            next_input += 1
         graph = mix_graph(
             duration=duration, voice_gain=voice_gain, music_gain=music_gain,
             cut_sounds=cut_inputs,
             cut_volume=float(params.transition_sound_volume or 0.0),
             voice_processing=voice_processing, ducking=setting("music_ducking"),
+            music_off=direction.music_off if music else (),
+            hits=hit_input, beds=bed_inputs,
         )
         measured = _loudness_report(_run(
             [*inputs, "-filter_complex", graph, "-map", "[mix]", "-c:a", "pcm_s24le",
@@ -662,25 +1079,25 @@ def render(
             # 没有旁白也没有配乐：没有东西可以归一。
             logger.info("  ⑦ mix: silent, loudness is left alone")
         elif target < 0:
-            # 第二遍：带着第一遍量出来的数，线性地推到目标响度。
-            audio_chain.append(
-                f"loudnorm=I={target:g}:TP=-1.5:LRA=11:"
-                f"measured_I={measured['input_i']}:measured_TP={measured['input_tp']}:"
-                f"measured_LRA={measured['input_lra']}:"
-                f"measured_thresh={measured['input_thresh']}:"
-                f"offset={measured['target_offset']}:linear=true"
-            )
+            # 第二遍：一个固定的增益，加一个只管峰值的限幅器。不用 loudnorm 的
+            # 第二遍——压过的旁白峰值高，它的线性模式推不上去，就会悄悄换成
+            # 动态模式，每一记重音之后都在拉音量。
+            # A fixed gain and a peak limiter. loudnorm's second pass cannot push
+            # a compressed voice this far in its linear mode, and silently falls
+            # back to the dynamic one, which rides the level after every impact.
+            audio_chain.append(f"volume={_decibels(target - mixed_level)}")
+            audio_chain.append("alimiter=limit=-2.5dB:attack=5:release=80:level=false")
             audio_chain.append("aresample=48000")
             logger.info(
                 f"  ⑦ mix: {measured['input_i']} LUFS, bringing it to {target:g}"
             )
-        fade_out = setting("fade_out")
         if fade_out > 0 and duration > fade_out * 2:
             audio_chain.append(f"afade=t=out:st={duration - fade_out:.3f}:d={fade_out:.2f}")
         audio_chain.append("anull")
 
         subtitle_file = write_subtitles(
-            params, subtitle_path, audio_path, output_file, width, height, duration)
+            params, subtitle_path, audio_path, output_file, width, height, duration,
+            timed=timed, direction=direction)
         if subtitle_file and not _has_filter("ass"):
             raise FinishError(
                 "this ffmpeg was built without libass, so it cannot burn the "
@@ -690,6 +1107,7 @@ def render(
             look=look, duration=duration,
             subtitle_file=os.path.basename(subtitle_file),
             fonts_dir=utils.font_dir() if subtitle_file else "",
+            hold=hold,
         )
         final_graph = f"[0:v]{picture}[v];[1:a]{','.join(audio_chain)}[a]"
 
@@ -720,7 +1138,7 @@ def render(
         os.replace(temp_output, output_file)
         temp_output = ""
     finally:
-        for leftover in (mix_file, temp_output):
+        for leftover in (mix_file, temp_output, *made):
             if leftover and os.path.exists(leftover):
                 try:
                     os.remove(leftover)

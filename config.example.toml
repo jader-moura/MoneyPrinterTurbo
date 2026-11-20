@@ -960,14 +960,24 @@ voice_id = "default"
 # vignette = true
 
 # Fade from black at the start and to black at the end, in seconds. 0 = none.
-# fade_in = 1.0
+# There is no fade in by default: the first line is the hook, and it opens at
+# full brightness. The last frame is held until the narrator has finished and
+# the fade out starts after that.
+# fade_in = 0.0
 # fade_out = 2.0
 
 # Let the language model pick three to five moments for a title card in the
 # top-left corner (a date and place, or a name and role). The choice is saved
 # as title-cards.json in the task folder: edit that file to change the cards,
-# write [] in it to have none, delete it to choose again.
+# write [] in it to have none, delete it to choose again. A video made from a
+# scene plan that directs the edit (.claude/skills/scene-plan) shows the plan's
+# own cards and title instead, and no model is asked.
 # title_cards = true
+
+# Carry out the sound a scene plan directs: a low impact on a line, scenes with
+# no music, wind or room tone under scenes. The sounds are synthesised, no
+# files are needed. false keeps the plan's title and cards and drops the sound.
+# sound_design = true
 
 # Where word timings for "a word at a time" and "the spoken one lit up"
 # subtitles come from. "whisper" listens to the narration with the [whisper]
@@ -977,6 +987,9 @@ voice_id = "default"
 # line's time over its words: instant, but the lit word can run well ahead of
 # or behind the voice. If the whisper model cannot be loaded the render stops
 # with an error naming this setting.
+# A scene plan's direction is timed the same way, because voices that give no
+# word timings leave subtitle times up to two seconds off; there, a whisper
+# model that cannot be loaded only costs the precision, not the render.
 # word_timing = "whisper"
 
 # "The spoken one lit up" subtitles: upper case, and the colour the spoken

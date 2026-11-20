@@ -1284,6 +1284,170 @@ body {
   color: var(--muted);
 }
 
+/* ---------- 导演项的预览 ----------
+
+   片名和标题卡是精修那一遍烧进成片的（``ass_subtitles.py`` 的 ``_title`` 和
+   ``_cards``）。下面每一个数都是那边的数：成片上以 1080 为基准的一个单位，
+   在预览框里是 ``--u`` 像素（JS 量出来的）。压在字幕下面、画面上面。 */
+.direction {
+  position: absolute;
+  inset: 0;
+  z-index: 2;
+  pointer-events: none;
+  overflow: hidden;
+  --u: 1px;
+  --squeeze: 1;
+  --card-font: "Bahnschrift", "DIN Alternate", "Arial Narrow", sans-serif;
+  font-family: var(--card-font);
+  color: #fff;
+}
+.dir-dim {
+  position: absolute;
+  inset: 0;
+  background: #000;
+  opacity: 0;
+}
+.dir-title { position: absolute; inset: 0; opacity: 0; }
+.dir-title-text,
+.dir-tagline {
+  position: absolute;
+  left: 50%;
+  white-space: nowrap;
+  line-height: 1;
+  text-transform: uppercase;
+}
+.dir-title-text {
+  top: 46%;
+  font-weight: 700;
+  font-size: calc(170 * var(--u) * var(--shrink, 1));
+  letter-spacing: calc(12 * var(--u));
+  text-shadow: calc(3 * var(--u)) calc(3 * var(--u)) 0 rgba(0, 0, 0, .53);
+  transform: translate(-50%, -50%) scale(var(--squeeze), var(--grow, 1));
+}
+.dir-rule {
+  position: absolute;
+  left: 50%;
+  top: calc(46% + 106 * var(--u) * var(--shrink, 1));
+  width: calc(160 * var(--u));
+  height: calc(5 * var(--u));
+  margin-left: calc(-80 * var(--u));
+  background: #c83a3a;
+}
+.dir-tagline {
+  top: calc(46% + 106 * var(--u) * var(--shrink, 1) + 56 * var(--u));
+  font-size: calc(46 * var(--u));
+  letter-spacing: calc(14 * var(--u));
+  color: #e8e8e8;
+  text-shadow: calc(2 * var(--u)) calc(2 * var(--u)) 0 rgba(0, 0, 0, .53);
+  transform: translate(-50%, -50%) scaleX(min(1, calc(var(--squeeze) + .14)));
+}
+.dir-card { position: absolute; inset: 0; opacity: 0; }
+/* 暗底：让白字在雪地、天空上也读得出来。宽度跟着字走。 */
+.dir-plate {
+  position: absolute;
+  left: calc(40 * var(--u));
+  top: calc(50 * var(--u));
+  width: calc(60 * var(--u) + var(--wide, 0px));
+  height: calc(180 * var(--u));
+  background: rgba(0, 0, 0, .4);
+  filter: blur(calc(30 * var(--u)));
+}
+.dir-bar {
+  position: absolute;
+  left: calc(96 * var(--u));
+  top: calc(92 * var(--u));
+  width: calc(9 * var(--u));
+  height: calc(98 * var(--u));
+  background: #c83a3a;
+}
+.dir-card.with-sub .dir-plate { height: calc(240 * var(--u)); }
+.dir-card.with-sub .dir-bar { height: calc(158 * var(--u)); }
+.dir-card-title,
+.dir-card-sub {
+  position: absolute;
+  left: 0;
+  white-space: nowrap;
+  line-height: 1;
+  transform-origin: 0 0;
+}
+.dir-card-title {
+  top: calc(84 * var(--u));
+  font-weight: 700;
+  font-size: calc(96 * var(--u));
+  letter-spacing: calc(3 * var(--u));
+  text-transform: uppercase;
+  text-shadow: calc(2 * var(--u)) calc(2 * var(--u)) 0 rgba(0, 0, 0, .53);
+  transform: translateX(var(--slide, 0px)) scaleX(var(--squeeze));
+}
+.dir-card-sub {
+  top: calc(192 * var(--u));
+  font-size: calc(48 * var(--u));
+  letter-spacing: calc(2 * var(--u));
+  color: #e8e8e8;
+  text-shadow: calc(2 * var(--u)) calc(2 * var(--u)) 0 rgba(0, 0, 0, .53);
+  transform: translateX(var(--slide-sub, 0px)) scaleX(min(1, calc(var(--squeeze) + .1)));
+}
+
+/* 时间线上的导演项。两排：上面是画面上看得见的（片名、标题卡）和重音，
+   下面是声音（配乐让开、环境声）。点一下跳到那里。 */
+.direction-lane { height: 34px; }
+#direction-cell { height: 34px; }
+.dir-mark {
+  position: absolute;
+  height: 14px;
+  box-sizing: border-box;
+  border-radius: 3px;
+  font-size: 10px;
+  line-height: 13px;
+  padding: 0 5px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+.dir-mark.row-a { top: 2px; }
+.dir-mark.row-b { top: 18px; }
+.dir-mark.card { background: #4a2f33; border: 1px solid #c83a3a; color: #f1d5d5; }
+.dir-mark.title { background: #c83a3a; border: 1px solid #e06a6a; color: #fff; font-weight: 600; }
+.dir-mark.music-off {
+  background: repeating-linear-gradient(135deg, #24382e 0 5px, #1b2a23 5px 10px);
+  border: 1px dashed #3d6350;
+  color: #9fc4ae;
+}
+.dir-mark.bed { background: #2c3a4d; border: 1px solid #47607f; color: #c9d8ec; }
+.dir-mark:hover { filter: brightness(1.25); }
+/* 重音是一个时刻，不是一段：一个小菱形。 */
+.dir-hit {
+  position: absolute;
+  top: 4px;
+  width: 9px;
+  height: 9px;
+  margin-left: -5px;
+  background: #e0b04a;
+  transform: rotate(45deg);
+  cursor: pointer;
+  z-index: 1;
+}
+.dir-hit:hover { background: #ffd67a; }
+/* 还在算位置、或者这条片子出片时不会做：一条虚线说明原因。 */
+.dir-note {
+  position: absolute;
+  top: 5px;
+  bottom: 5px;
+  left: 0;
+  box-sizing: border-box;
+  border: 1px dashed var(--line);
+  border-radius: 5px;
+  font-size: 11px;
+  line-height: 20px;
+  padding: 0 8px;
+  color: var(--muted);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.dir-note.warn { color: var(--warn); }
+
 .drop-marker { position: absolute; top: 0; bottom: 0; width: 2px; background: var(--accent); z-index: 6; }
 
 .playhead {

@@ -11,6 +11,12 @@
 const API = "/api/v1";
 const MIN_DURATION = 0.2;
 
+// 导演项的预览（见下面"导演项的预览"那一节）。放在最上面：页面一加载就会
+// 画一遍，那时候这几个名字必须已经在了。
+const DIRECTION_POLL = 5000;
+const directionSounds = { beds: {}, hits: [], turn: 0, last: 0 };
+const unit = (value) => Math.min(1, Math.max(0, value));
+
 const el = (id) => document.getElementById(id);
 const ui = {
   task: el("task"), load: el("load"), totals: el("totals"),
@@ -34,6 +40,11 @@ const ui = {
   musicClose: el("music-close"), musicNote: el("music-note"),
   musicLane: el("music-lane"), musicBed: el("music-bed"),
   subs: el("subs"), subsText: el("subs-text"),
+  direction: el("direction"), dirDim: el("dir-dim"), dirTitle: el("dir-title"),
+  dirTitleText: el("dir-title-text"), dirTagline: el("dir-tagline"),
+  dirCard: el("dir-card"), dirCardTitle: el("dir-card-title"),
+  dirCardSub: el("dir-card-sub"),
+  directionLane: el("direction-lane"), directionCell: el("direction-cell"),
   yt: el("yt"), subsYt: el("subs-yt"), subsSafe: el("subs-safe"),
   captionPanel: el("caption-panel"), captionText: el("caption-text"),
   captionWhen: el("caption-when"), captionSave: el("caption-save"),
@@ -150,6 +161,11 @@ const state = {
   queueWatching: false,
   // 已经重读过时间线的那些活，免得同一张图反复触发重读。
   queueSeen: [],
+  // 成片里才加上去的片名、标题卡和声音，各在第几秒（见 loadDirection）。
+  direction: null,
+  directionTimer: 0,
+  directionCard: "",
+  musicLevel: 0.2,
   // 这条片子的配乐。时间线上要画出来，预览时要跟着响。
   music: null,
   // 屏幕上那条字幕是第几条。-1 表示此刻没有字幕。
@@ -305,6 +321,7 @@ async function call(method, path, body) {
 async function load(taskId) {
   if (!taskId) return;
   state.taskId = taskId.trim();
+  forgetDirection();
   loadLimit();
   say("Loading…");
   try {
@@ -333,6 +350,8 @@ async function load(taskId) {
     // 配乐单独读一次：它存在任务参数里，不在场景清单里。读不到也不挡着
     // 审片，所以不等它，画完再补上那一条轨道。
     loadMusic();
+    // 导演项也是：位置可能还要在后台算几分钟，不能让它挡着时间线出来。
+    loadDirection();
     // 打开时就查一次：别人(或刚才的自己)可能正在渲染这条任务。
     watchTask();
     // 队列在服务端，所以上一次开着这个页面时排的活可能还在跑。刷新页面、
@@ -370,6 +389,8 @@ async function refresh() {
     say("");
   }
   draw();
+  // 旁白可能刚重录过，导演项的位置跟着旁白走：重新问一次。
+  loadDirection();
 }
 
 /** 盯着任务状态，直到它不再运行。
@@ -1094,6 +1115,7 @@ function draw() {
   drawClips();
   drawVoice();
   drawMusicTrack();
+  drawDirectionTrack();
   drawInspector();
   drawTotals();
   paintLimit();
@@ -5451,6 +5473,8 @@ function movePlayhead() {
   ui.clock.textContent = `${fmt(state.playhead)} / ${fmt(projectTotal())}`;
   // 字幕跟着播放头走：播放时每帧都会走到这里，拖动时也一样。
   drawSubtitle();
+  drawDirection();
+  soundDirection();
 }
 
 function tick() {
@@ -5506,6 +5530,9 @@ function play() {
     ui.musicBed.play().catch(() => {});
   }
   ui.preview.play().catch(() => {});
+  // 重音：正响到一半的那一记从中途接上；环境声由 soundDirection 每帧管。
+  directionSounds.last = state.playhead;
+  startHitsUnder(state.playhead);
   requestAnimationFrame(tick);
 }
 
@@ -5515,6 +5542,7 @@ function stop() {
   ui.preview.pause();
   ui.narration.pause();
   ui.musicBed.pause();
+  quietDirection();
 }
 
 /* ---------- wiring ---------- */
@@ -5795,6 +5823,307 @@ function placeSubtitle(style, frameHeight) {
   ui.subs.style.top = Math.max(0, top) + "px";
 }
 
+/* ---------- 导演项的预览 ----------
+
+   片名、标题卡、重音、环境声、配乐让开的那几段，都是精修那一遍出片时才加
+   上去的：预览放的只是每一段的素材和旁白。所以以前一张摆错位置的标题卡，
+   要等整条片子渲完才看得见。
+
+   这里把它们照成片的位置和时间在预览上做一遍。各在第几秒是服务端算的
+   （``GET /tasks/{id}/direction``，和出片走同一套），这里只负责画和放：
+
+   * 片名、标题卡——画在预览框上（样式在 editor.css 的 .direction 里）；
+   * 配乐让开——预览那条配乐的音量照同一条线走；
+   * 环境声、重音——服务端合成的那几个文件，跟着播放头放；
+   * 时间线上多一条轨道，标出它们各在哪里。
+
+   这是照着做的，不是成片本身：调色、压低配乐让人声、整体响度这些只有渲出来
+   才有，这里的音量比例只是接近。 */
+/** 摆好了位置、可以照着画的那一份；没有就是 null。 */
+function directionReady() {
+  const found = state.direction;
+  return found && found.state === "ready" ? found : null;
+}
+
+/** 读回这条片子的导演项。位置还在算（服务端在后台听配音）就过一会儿再问。 */
+async function loadDirection() {
+  const taskId = state.taskId;
+  if (!taskId) return;
+  clearTimeout(state.directionTimer);
+  let found = null;
+  try {
+    found = await call("GET", `/tasks/${encodeURIComponent(taskId)}/direction`);
+  } catch (error) {
+    // 读不到不该挡住审片，但也不能一声不吭：轨道上说一句，不然看起来就像
+    // 这条片子没有导演项（服务端是旧的、还没重启时就是这样）。
+    found = {
+      state: "off",
+      note: "The direction could not be loaded"
+        + (error && error.message ? ` (${error.message})` : "")
+        + ". If the app was just updated, restart it.",
+    };
+  }
+  if (taskId !== state.taskId) return;
+  state.direction = found;
+  if (found && found.state === "listening") {
+    state.directionTimer = setTimeout(loadDirection, DIRECTION_POLL);
+  }
+  state.directionCard = "";
+  prepareDirectionSounds();
+  drawDirectionTrack();
+  drawDirection();
+  soundDirection();
+}
+
+/** 换任务时把上一条片子的导演项清掉，声音也停掉。 */
+function forgetDirection() {
+  clearTimeout(state.directionTimer);
+  state.direction = null;
+  state.directionCard = "";
+  prepareDirectionSounds();
+  drawDirectionTrack();
+  drawDirection();
+}
+
+/** 几段斜线加起来的那条 0..1 的线，和 ffmpeg 那边的 ``gate`` 是同一个式子。 */
+function envelopeAt(shape, at) {
+  let level = 0;
+  for (const [up, down] of (shape && shape.ramps) || []) {
+    level += unit((at - up) / Math.max(shape.rise, 0.01))
+      - unit((at - down) / Math.max(shape.fall, 0.01));
+  }
+  return unit(level);
+}
+
+/** 配乐在这一刻要乘上多少：让开的那几段里一路压到听不见。 */
+function musicDip(at) {
+  const found = directionReady();
+  if (!found || !found.music || !(found.music.ramps || []).length) return 1;
+  return Math.pow(10, (found.music.floor_db / 20) * envelopeAt(found.music, at));
+}
+
+function applyMusicLevel() {
+  const level = Number.isFinite(state.musicLevel) ? state.musicLevel : 0.2;
+  ui.musicBed.volume = unit(level * musicDip(state.playhead));
+}
+
+/** 准备好这条片子用得上的那几种声音；用不上的停掉、放掉。 */
+function prepareDirectionSounds() {
+  const found = directionReady();
+  const sounds = directionSounds;
+  const kinds = new Set(((found && found.beds) || []).map((bed) => bed.kind));
+  for (const kind of Object.keys(sounds.beds)) {
+    if (kinds.has(kind)) continue;
+    sounds.beds[kind].pause();
+    delete sounds.beds[kind];
+  }
+  for (const kind of kinds) {
+    if (sounds.beds[kind]) continue;
+    const bed = new Audio(`${API}/direction/sounds/${encodeURIComponent(kind)}`);
+    bed.loop = true;
+    bed.preload = "auto";
+    bed.volume = 0;
+    sounds.beds[kind] = bed;
+  }
+  const hits = ((found && found.hits) || []).length;
+  if (!hits) {
+    sounds.hits.forEach((hit) => hit.pause());
+    sounds.hits = [];
+  } else if (!sounds.hits.length) {
+    // 两个：前一记的尾音还没完，后一记就来了的时候各放各的。
+    for (let count = 0; count < 2; count += 1) {
+      const hit = new Audio(`${API}/direction/sounds/hit`);
+      hit.preload = "auto";
+      sounds.hits.push(hit);
+    }
+  }
+}
+
+function strike(offset) {
+  const sounds = directionSounds;
+  if (!sounds.hits.length) return;
+  const hit = sounds.hits[sounds.turn % sounds.hits.length];
+  sounds.turn += 1;
+  try { hit.currentTime = Math.max(0, offset); } catch { /* 元数据未就绪 */ }
+  hit.play().catch(() => {});
+}
+
+/** 从这一秒开始放：正响到一半的那一记，从它的中途接上。 */
+function startHitsUnder(at) {
+  const found = directionReady();
+  directionSounds.hits.forEach((hit) => hit.pause());
+  if (!found) return;
+  const length = Number(found.hit_seconds) || 5;
+  for (const hit of found.hits || []) {
+    if (at >= hit && at - hit < length - 0.2) strike(at - hit);
+  }
+}
+
+function quietDirection() {
+  Object.values(directionSounds.beds).forEach((bed) => bed.pause());
+  directionSounds.hits.forEach((hit) => hit.pause());
+}
+
+/** 每一帧：配乐、环境声的音量照线走，播放头越过哪一记重音就放哪一记。 */
+function soundDirection() {
+  applyMusicLevel();
+  const found = directionReady();
+  const sounds = directionSounds;
+  const at = state.playhead;
+  for (const bed of (found && found.beds) || []) {
+    const audio = sounds.beds[bed.kind];
+    if (!audio) continue;
+    const level = envelopeAt(bed, at);
+    audio.volume = level;
+    if (state.playing && level > 0) {
+      if (audio.paused) audio.play().catch(() => {});
+    } else if (!audio.paused) {
+      audio.pause();
+    }
+  }
+  const before = sounds.last;
+  sounds.last = at;
+  if (!state.playing || !found || !(found.hits || []).length) return;
+  // 往回走了、或者一下子跳了一截，就是拖动过：按新位置重新接上。
+  if (at < before || at - before > 0.5) { startHitsUnder(at); return; }
+  for (const hit of found.hits) {
+    if (hit > before && hit <= at) strike(0);
+  }
+}
+
+/** 这一刻该在画面上的片名和标题卡。位置、字号、淡入淡出都照成片的数。 */
+function drawDirection() {
+  const found = directionReady();
+  const cards = (found && found.cards) || [];
+  const title = found && found.title;
+  const unitPx = Math.min(ui.frame.clientWidth || 0, ui.frame.clientHeight || 0) / 1080;
+  if (!found || !unitPx || (!title && !cards.length)) {
+    ui.direction.hidden = true;
+    return;
+  }
+  ui.direction.hidden = false;
+  const at = state.playhead;
+  const squeeze = Math.min(100, Math.max(50, Number(found.card_squeeze) || 100)) / 100;
+  const box = ui.direction.style;
+  box.setProperty("--u", unitPx + "px");
+  box.setProperty("--squeeze", String(squeeze));
+  if (found.card_font) {
+    box.setProperty("--card-font",
+      `"${String(found.card_font).replace(/"/g, "")}", "Arial Narrow", sans-serif`);
+  }
+
+  // 片名：整个画面压暗，正中一行大字。长的缩到放得下（字宽照字数估，和
+  // 成片是同一个估法，所以缩的比例也一样）。
+  let shown = 0;
+  if (title && at >= title.start && at < title.end) {
+    shown = unit((at - title.start) / 0.5) * unit((title.end - at) / 0.7);
+    const text = String(title.text || "");
+    ui.dirTitleText.textContent = text;
+    ui.dirTagline.textContent = String(title.tagline || "");
+    ui.dirTagline.hidden = !String(title.tagline || "").trim();
+    const advance = 170 * 0.62 * squeeze + 12;
+    const wide = ui.frame.clientWidth / unitPx;
+    const shrink = Math.min(1, 0.86 * wide / Math.max(1, text.length * advance));
+    const grow = 0.96 + 0.04 * unit((at - title.start) / Math.max(0.1, title.end - title.start));
+    box.setProperty("--shrink", String(shrink));
+    box.setProperty("--grow", String(grow));
+  }
+  ui.dirTitle.style.opacity = String(shown);
+  ui.dirDim.style.opacity = String(0.64 * shown);
+
+  // 标题卡：左上角，从左边滑进来 20 个单位。
+  const index = cards.findIndex((card) => at >= card.start && at < card.end);
+  if (index < 0) {
+    ui.dirCard.style.opacity = "0";
+    return;
+  }
+  const card = cards[index];
+  const key = `${index}:${unitPx}:${card.title}:${card.subtitle}`;
+  if (state.directionCard !== key) {
+    state.directionCard = key;
+    ui.dirCardTitle.textContent = String(card.title || "");
+    ui.dirCardSub.textContent = String(card.subtitle || "");
+    ui.dirCard.classList.toggle("with-sub", !!String(card.subtitle || "").trim());
+    // 暗底跟着字的宽度走（成片里是估的，这里量得到）。
+    const text = Math.max(
+      ui.dirCardTitle.getBoundingClientRect().width,
+      ui.dirCardSub.getBoundingClientRect().width);
+    const most = ui.frame.clientWidth - 140 * unitPx;
+    box.setProperty("--wide", Math.min(text + 150 * unitPx, most) + "px");
+  }
+  const since = at - card.start;
+  ui.dirCard.style.opacity = String(unit(since / 0.45) * unit((card.end - at) / 0.45));
+  box.setProperty("--slide", (112 + 20 * unit(since / 0.6)) * unitPx + "px");
+  box.setProperty("--slide-sub", (112 + 20 * unit(since / 0.75)) * unitPx + "px");
+}
+
+/* 时间线上的那条导演轨道。上排：片名、标题卡、重音；下排：配乐让开、环境声。
+   没有导演项的片子这条轨道不出现，不占地方。 */
+function drawDirectionTrack() {
+  const lane = ui.directionLane;
+  lane.innerHTML = "";
+  const found = state.direction;
+  const total = projectTotal();
+  const ready = directionReady();
+  const show = !!found && total > 0 && (!!ready || !!found.note);
+  lane.hidden = !show;
+  ui.directionCell.hidden = !show;
+  if (!show) return;
+  const px = state.pxPerSecond;
+
+  if (!ready) {
+    const note = document.createElement("div");
+    note.className = "dir-note" + (found.state === "off" ? " warn" : "");
+    note.textContent = found.note;
+    note.title = found.note;
+    note.style.width = Math.max(14, total * px - 2) + "px";
+    lane.appendChild(note);
+    ui.directionCell.textContent = "Direction";
+    return;
+  }
+  // 位置是照字幕估的时候在轨道名上说一声：估的能差到两秒。
+  ui.directionCell.textContent = ready.note ? "Direction ≈" : "Direction";
+  ui.directionCell.title = ready.note
+    || "What the finished video adds: the title, title cards, impacts, "
+      + "ambience and where the music drops out.";
+
+  const span = (kind, row, start, end, label, tip) => {
+    const mark = document.createElement("div");
+    mark.className = `dir-mark ${kind} ${row}`;
+    mark.style.left = start * px + "px";
+    mark.style.width = Math.max(6, (end - start) * px) + "px";
+    mark.textContent = label;
+    mark.title = `${tip} · ${fmt(start)}–${fmt(end)}`;
+    mark.addEventListener("click", () => scrubTo(start));
+    lane.appendChild(mark);
+  };
+  if (ready.title) {
+    span("title", "row-a", ready.title.start, ready.title.end,
+      ready.title.text, `Title: ${ready.title.text}`);
+  }
+  for (const card of ready.cards || []) {
+    span("card", "row-a", card.start, card.end, card.title,
+      `Title card: ${card.title}${card.subtitle ? " — " + card.subtitle : ""}`);
+  }
+  for (const [start, end] of ready.music_off || []) {
+    span("music-off", "row-b", start, end, "music off",
+      "The music fades out before this and comes back after it");
+  }
+  for (const bed of ready.beds || []) {
+    for (const [start, end] of bed.windows || []) {
+      span("bed", "row-b", start, end, bed.kind, `Ambience: ${bed.kind}`);
+    }
+  }
+  for (const at of ready.hits || []) {
+    const hit = document.createElement("div");
+    hit.className = "dir-hit";
+    hit.style.left = at * px + "px";
+    hit.title = `Impact · ${fmt(at)}`;
+    hit.addEventListener("click", () => scrubTo(Math.max(0, at - 1)));
+    lane.appendChild(hit);
+  }
+}
+
 /* 时间线上的配乐轨。一条从头铺到尾的横条：配乐属于整条片子，没有"哪一段"
    的概念，所以它不分块，只说明"这里一直有音乐,是哪一首,多响"。 */
 function drawMusicTrack() {
@@ -5853,7 +6182,9 @@ function syncMusicBed() {
     ui.musicBed.src = wanted;
   }
   const level = Number(music.volume);
-  ui.musicBed.volume = Number.isFinite(level) ? Math.min(1, Math.max(0, level)) : 0.2;
+  // 配乐让开的那几段要在这个音量上再往下压，所以记下来，由 applyMusicLevel 设。
+  state.musicLevel = Number.isFinite(level) ? Math.min(1, Math.max(0, level)) : 0.2;
+  applyMusicLevel();
 }
 
 /** 读回这条片子的配乐，画到时间线上，并准备好预览用的那一条。 */

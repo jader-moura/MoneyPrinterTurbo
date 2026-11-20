@@ -589,6 +589,23 @@
         <!-- 字幕。按成片的字号、描边和位置画在画面上，这样"字会不会挡住
              主体、够不够大"在审片时就能看出来，而不是渲完才知道。 -->
         <div id="subs" class="subs"><span id="subs-text"></span></div>
+        <!-- 成片里才加上去的片名和标题卡（精修那一遍烧进去的）。这里照同样的
+             位置、字号和时间画一遍，摆错了在审片时就看得见，不用等渲完。
+             尺寸全按 --u 走：成片上的一个单位在预览框里是多少像素。 -->
+        <div id="direction" class="direction" hidden>
+          <div id="dir-dim" class="dir-dim"></div>
+          <div id="dir-title" class="dir-title">
+            <div id="dir-title-text" class="dir-title-text"></div>
+            <i id="dir-rule" class="dir-rule"></i>
+            <div id="dir-tagline" class="dir-tagline"></div>
+          </div>
+          <div id="dir-card" class="dir-card">
+            <i class="dir-plate"></i>
+            <i class="dir-bar"></i>
+            <div id="dir-card-title" class="dir-card-title"></div>
+            <div id="dir-card-sub" class="dir-card-sub"></div>
+          </div>
+        </div>
         <!-- YouTube 自己会盖在画面上的东西：频道、标题、按钮。只是一张示意图，
              调字幕位置时用来看"这行字会不会被它们压住"。竖版画 Shorts 的
              样子，横版画播放器的样子。带 yt-zone 的几块就是"会被盖住的地方"。 -->
@@ -682,6 +699,8 @@
     <div class="gutter-cell">Video</div>
     <div class="gutter-cell short">Voice</div>
     <div class="gutter-cell short">Music</div>
+    <div id="direction-cell" class="gutter-cell short" hidden
+      title="What the finished video adds: the title, title cards, impacts, ambience and where the music drops out.">Direction</div>
   </div>
   <div id="scroll" class="scroll">
     <div id="ruler" class="ruler"></div>
@@ -690,6 +709,9 @@
     <!-- 背景音乐。配乐属于整条片子，所以这条轨道从头铺到尾——它是一条
          "这里一直有音乐"的说明，不是可以逐段编辑的东西。 -->
     <div id="music-lane" class="track short"></div>
+    <!-- 导演项：片名、标题卡、重音、环境声、配乐让开的那几段。只有成片里
+         才有，这条轨道说明它们各落在哪里；没有的片子这条轨道不出现。 -->
+    <div id="direction-lane" class="track short direction-lane" hidden></div>
     <!-- 上限那条线，以及它右边超出去的那一截。播放头要压在它们上面，
          所以放在播放头前面。 -->
     <div id="limit-over" class="limit-over" hidden></div>

@@ -71,6 +71,10 @@ class Style:
     uppercase: bool = False
     pop: bool = False
     bold: bool = True
+    # 标题卡和片名用的字体；空 = 和字幕同一个。``card_squeeze`` 是把它横向压
+    # 到百分之几：一个正常宽度的 DIN 压到 78% 就是纪录片里那种窄体字。
+    card_font: str = ""
+    card_squeeze: int = 100
 
 
 @dataclass
@@ -81,6 +85,16 @@ class TitleCard:
     end: float
     title: str
     subtitle: str = ""
+
+
+@dataclass
+class Title:
+    """片名：画面压暗，正中一行大字，底下一行小字。"""
+
+    start: float
+    end: float
+    text: str
+    tagline: str = ""
 
 
 @dataclass
@@ -306,6 +320,37 @@ def find_phrase(words: Sequence[Word], phrase: str) -> Optional[float]:
     return None
 
 
+def locate_lines(
+    words: Sequence[Word], lines: Sequence[str]
+) -> List[Optional[Tuple[float, float]]]:
+    """按顺序念的几句话，各自是从什么时候念到什么时候；找不到的那句是 ``None``。
+
+    每一句从上一句结束的地方往后找，所以同一句话出现两次也各归各的。
+
+    When each of several lines, spoken in this order, starts and ends. Each is
+    looked for after the one before it, so a repeated line finds its own place.
+    """
+    keys = [_key(word.text) for word in words]
+    spoken = [at for at, key in enumerate(keys) if key]
+    found: List[Optional[Tuple[float, float]]] = []
+    cursor = 0
+    for line in lines:
+        wanted = [key for key in (_key(token) for token in _clean(line).split()) if key]
+        place = None
+        if wanted:
+            for at in range(cursor, len(spoken) - len(wanted) + 1):
+                if all(keys[spoken[at + n]] == wanted[n] for n in range(len(wanted))):
+                    place = at
+                    break
+        if place is None:
+            found.append(None)
+            continue
+        first, last = spoken[place], spoken[place + len(wanted) - 1]
+        found.append((words[first].start, words[last].end))
+        cursor = place + len(wanted)
+    return found
+
+
 def _placement(sheet: _Sheet) -> Tuple[int, int, str]:
     """``(对齐方式, 垂直边距, 每条都要带的位置指令)``。"""
     style, width, height = sheet.style, sheet.width, sheet.height
@@ -332,16 +377,27 @@ def _header(sheet: _Sheet) -> str:
     # BorderStyle 3 是不透明底框：框的颜色取自 OutlineColour。
     border_style = 3 if style.box_color else 1
     bold = -1 if style.bold else 0
+    card_font = style.card_font or style.font
+    squeeze = int(min(100, max(50, style.card_squeeze or 100)))
     rows = [
         f"Style: Sub,{style.font},{style.size:g},{primary},{primary},{outline_colour},"
         f"&H96000000,{bold},0,0,0,100,100,1,0,{border_style},{style.outline:g},"
         f"{style.shadow:g},{alignment},{margin_h},{margin_h},{margin_v},1",
-        f"Style: CardTitle,{style.font},{54 * scale:g},&H00FFFFFF,&H00FFFFFF,&H00000000,"
-        f"&H80000000,-1,0,0,0,100,100,{3 * scale:g},0,1,0,{2 * scale:g},7,0,0,0,1",
-        f"Style: CardSub,{style.font},{34 * scale:g},&H00E6E6E6,&H00FFFFFF,&H00000000,"
-        f"&H80000000,0,0,0,0,100,100,{2 * scale:g},0,1,0,{2 * scale:g},7,0,0,0,1",
-        f"Style: CardBar,{style.font},10,{ass_colour(style.highlight_color)},&H00FFFFFF,"
+        f"Style: CardTitle,{card_font},{_CARD_TITLE_SIZE * scale:g},&H00FFFFFF,&H00FFFFFF,"
+        f"&H00000000,&H78000000,-1,0,0,0,{squeeze},100,{3 * scale:g},0,1,0,{2 * scale:g},"
+        "7,0,0,0,1",
+        f"Style: CardSub,{card_font},{_CARD_SUB_SIZE * scale:g},&H00E8E8E8,&H00FFFFFF,"
+        f"&H00000000,&H78000000,0,0,0,0,{min(100, squeeze + 10)},100,{2 * scale:g},0,1,0,"
+        f"{2 * scale:g},7,0,0,0,1",
+        # 竖线、底板、压暗画面的那一层：都是画出来的图形，颜色在事件里给。
+        f"Style: CardBar,{card_font},10,{_CARD_ACCENT},&H00FFFFFF,"
         "&H00000000,&H00000000,0,0,0,0,100,100,0,0,1,0,0,7,0,0,0,1",
+        f"Style: Title,{card_font},{_TITLE_SIZE * scale:g},&H00FFFFFF,&H00FFFFFF,"
+        f"&H00000000,&H78000000,-1,0,0,0,{squeeze},100,{12 * scale:g},0,1,0,{3 * scale:g},"
+        "5,0,0,0,1",
+        f"Style: TitleSub,{card_font},{_TITLE_SUB_SIZE * scale:g},&H00E8E8E8,&H00FFFFFF,"
+        f"&H00000000,&H78000000,0,0,0,0,{min(100, squeeze + 14)},100,{14 * scale:g},0,1,0,"
+        f"{2 * scale:g},5,0,0,0,1",
     ]
     return (
         "[Script Info]\n"
@@ -421,28 +477,91 @@ def _highlighted(sheet: _Sheet, words: Sequence[Word]) -> None:
             _line(sheet, start, end, f"{where}{pop}{text}")
 
 
+_CARD_TITLE_SIZE = 96
+_CARD_SUB_SIZE = 48
+_TITLE_SIZE = 170
+_TITLE_SUB_SIZE = 46
+# BGR：一种压着的红。
+_CARD_ACCENT = "&H003A3AC8"
+
+
+def _box(x0: float, y0: float, x1: float, y1: float) -> str:
+    return f"m {x0:.0f} {y0:.0f} l {x1:.0f} {y0:.0f} {x1:.0f} {y1:.0f} {x0:.0f} {y1:.0f}"
+
+
 def _cards(sheet: _Sheet, cards: Sequence[TitleCard]) -> None:
-    """左上角滑进来的标题卡：一条竖线，一行大字，一行小字。"""
+    """左上角滑进来的标题卡：一块虚掉的暗底，一条红竖线，一行大字，一行小字。
+
+    暗底是为了在雪地、天空、树枝上都读得出来——没有它，白字压在亮画面上
+    就是一片灰。
+    """
     scale = min(sheet.width, sheet.height) / 1080.0
-    left, top = int(80 * scale), int(92 * scale)
-    bar_w, bar_h = int(8 * scale), int(112 * scale)
-    text_x, slide = left + int(30 * scale), int(20 * scale)
-    sub_y = top + int(68 * scale)
+    squeeze = min(100, max(50, sheet.style.card_squeeze or 100)) / 100.0
+    fade = "\\fad(450,450)"
     for card in cards:
         title = _clean(card.title).upper()
         if not title:
             continue
-        _line(sheet, card.start, card.end,
-              f"{{\\fad(400,400)\\pos({left},{top})\\p1}}m 0 0 l {bar_w} 0 {bar_w} {bar_h} "
-              f"0 {bar_h}{{\\p0}}", 1, "CardBar")
-        _line(sheet, card.start, card.end,
-              f"{{\\fad(400,400)\\move({text_x - slide},{top - 2},{text_x},{top - 2},0,500)}}"
-              f"{title}", 1, "CardTitle")
         subtitle = _clean(card.subtitle)
+        # 字宽是估的（libass 不告诉我们）：底板宁可宽一点。
+        wide = max(
+            len(title) * _CARD_TITLE_SIZE * 0.62 * squeeze,
+            len(subtitle) * _CARD_SUB_SIZE * 0.55 * min(1.0, squeeze + 0.1),
+        ) * scale + 150 * scale
+        wide = min(wide, sheet.width - 140 * scale)
+        bottom = (290 if subtitle else 230) * scale
+        _line(sheet, card.start, card.end,
+              f"{{{fade}\\pos(0,0)\\1c&H000000&\\1a&H98&\\blur{60 * scale:.0f}\\p1}}"
+              f"{_box(40 * scale, 50 * scale, 100 * scale + wide, bottom)}{{\\p0}}",
+              0, "CardBar")
+        _line(sheet, card.start, card.end,
+              f"{{{fade}\\pos(0,0)\\p1}}"
+              f"{_box(96 * scale, 92 * scale, 105 * scale, (250 if subtitle else 190) * scale)}"
+              "{\\p0}", 1, "CardBar")
+        x0, x1, y = 112 * scale, 132 * scale, 84 * scale
+        _line(sheet, card.start, card.end,
+              f"{{{fade}\\move({x0:.0f},{y:.0f},{x1:.0f},{y:.0f},0,600)}}{title}",
+              2, "CardTitle")
         if subtitle:
+            y = 192 * scale
             _line(sheet, card.start, card.end,
-                  f"{{\\fad(400,400)\\move({text_x - slide},{sub_y},{text_x},{sub_y},0,500)}}"
-                  f"{subtitle}", 1, "CardSub")
+                  f"{{{fade}\\move({x0:.0f},{y:.0f},{x1:.0f},{y:.0f},0,750)}}{subtitle}",
+                  2, "CardSub")
+
+
+def _title(sheet: _Sheet, title: Optional[Title]) -> None:
+    """片名：整个画面压暗，正中一行大字、一道红线、一行小字。"""
+    if title is None:
+        return
+    text = _clean(title.text).upper()
+    if not text or title.end - title.start < 1.0:
+        return
+    scale = min(sheet.width, sheet.height) / 1080.0
+    squeeze = min(100, max(50, sheet.style.card_squeeze or 100)) / 100.0
+    width, height = sheet.width, sheet.height
+    fade = "\\fad(500,700)"
+    # 长片名缩小到放得下：字宽照字数估。
+    advance = (_TITLE_SIZE * 0.62 * squeeze + 12) * scale
+    shrink = min(1.0, 0.86 * width / max(1.0, len(text) * advance))
+    size = f"\\fs{_TITLE_SIZE * scale * shrink:.0f}" if shrink < 1.0 else ""
+    centre, middle = width / 2, height * 0.46
+    grow = int((title.end - title.start) * 1000)
+    _line(sheet, title.start, title.end,
+          f"{{{fade}\\pos(0,0)\\1c&H000000&\\1a&H5C&\\p1}}{_box(0, 0, width, height)}{{\\p0}}",
+          0, "CardBar")
+    _line(sheet, title.start, title.end,
+          f"{{{fade}\\pos({centre:.0f},{middle:.0f}){size}\\fscy96"
+          f"\\t(0,{grow},\\fscy100)}}{text}", 2, "Title")
+    rule_y = middle + 106 * scale * shrink
+    _line(sheet, title.start, title.end,
+          f"{{{fade}\\pos(0,0)\\p1}}"
+          f"{_box(centre - 80 * scale, rule_y, centre + 80 * scale, rule_y + 5 * scale)}"
+          "{\\p0}", 1, "CardBar")
+    tagline = _clean(title.tagline).upper()
+    if tagline:
+        _line(sheet, title.start, title.end,
+              f"{{{fade}\\pos({centre:.0f},{rule_y + 56 * scale:.0f})}}{tagline}",
+              2, "TitleSub")
 
 
 def build(
@@ -455,6 +574,7 @@ def build(
     max_lines: int = 2,
     words: Optional[Sequence[Word]] = None,
     title_cards: Sequence[TitleCard] = (),
+    title: Optional[Title] = None,
 ) -> str:
     """整份 ASS 文件的内容。``cues`` 为空时只有标题卡（如果有的话）。
 
@@ -472,4 +592,5 @@ def build(
             else:
                 _highlighted(sheet, timed)
     _cards(sheet, title_cards)
+    _title(sheet, title)
     return _header(sheet) + "\n".join(sheet.events) + "\n"

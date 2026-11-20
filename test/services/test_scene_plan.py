@@ -113,6 +113,106 @@ class TestReadingAPlan:
         assert scene_plan.photo_percent([{"photo": None}] * 4) == 0
 
 
+def _directed():
+    plan = json.loads(json.dumps(PLAN))
+    plan["title"] = {"text": "Green River", "tagline": "Twenty years", "scene": 3}
+    plan["scenes"][0].update({
+        "ambience": "wind", "card": {"title": "November 2001", "subtitle": "Seattle"}})
+    plan["scenes"][1].update({
+        "pause_after": 1, "impact": "end", "music": "off", "ambience": "room"})
+    return plan
+
+
+class TestDirectingTheEdit:
+    """分镜还能管片名、标题卡、停顿、重音、配乐和环境声。"""
+
+    def test_a_plan_without_direction_is_stored_as_it_always_was(self):
+        stored = scene_plan.stored(scene_plan.parse(_text()))
+        assert all(set(scene) == {"narration", "photo"} for scene in stored)
+        assert not scene_plan.directed(stored)
+
+    def test_each_item_is_kept_on_its_scene(self):
+        stored = scene_plan.stored(scene_plan.parse(json.dumps(_directed())))
+        assert scene_plan.directed(stored)
+        assert stored[0]["direction"] == {
+            "ambience": "wind",
+            "card": {"title": "November 2001", "subtitle": "Seattle"}}
+        assert stored[1]["direction"] == {
+            "pause_after": 1.0, "impact": "end", "music": "off", "ambience": "room"}
+        # 片名跟着它那一段走。
+        assert stored[2]["direction"] == {
+            "title": {"text": "Green River", "tagline": "Twenty years"}}
+
+    def test_a_pause_is_written_into_the_script_and_spoken_as_silence(self):
+        plan = scene_plan.parse(json.dumps(_directed()))
+        lines = scene_plan.script_of(plan).split("\n")
+        assert lines[1] == "His name is Gary Ridgway. [pause: 1s]"
+        assert "[pause" not in lines[0] and "[pause" not in lines[2]
+        # 字幕、关键词那几处照旧把标签去掉，条数还是对得上。
+        assert utils.remove_pause_tags(lines[1]) == "His name is Gary Ridgway."
+        assert utils.parse_script_with_pauses(lines[1])[-1] == ("pause", 1.0)
+
+    def test_the_scenes_still_add_up_with_pauses_in_the_script(self):
+        plan = scene_plan.parse(json.dumps(_directed()))
+        whole = utils.split_string_by_punctuations(
+            utils.remove_pause_tags(scene_plan.script_of(plan)))
+        each = sum(len(utils.split_string_by_punctuations(scene["narration"]))
+                   for scene in plan["scenes"])
+        assert each == len(whole)
+
+    @pytest.mark.parametrize("change, said", [
+        ({"pause_after": 30}, "scene 2: pause_after is 30 seconds"),
+        ({"pause_after": "a while"}, "scene 2: pause_after is 'a while'"),
+        ({"impact": "middle"}, "scene 2: impact is 'middle'"),
+        ({"music": "loud"}, "scene 2: music is 'loud'"),
+        ({"ambience": "rain"}, "scene 2: ambience is 'rain'"),
+        ({"card": {"subtitle": "No title"}}, "scene 2: the card has no title"),
+        ({"card": {"title": "x" * 41}}, "scene 2: the card's title is 41"),
+    ])
+    def test_what_is_wrong_is_said_with_the_scene_number(self, change, said):
+        plan = _directed()
+        plan["scenes"][1].update(change)
+        with pytest.raises(scene_plan.ScenePlanError, match=said):
+            scene_plan.parse(json.dumps(plan))
+
+    @pytest.mark.parametrize("title, said", [
+        ({"tagline": "No text"}, 'the title has no "text"'),
+        ({"text": "Green River", "scene": 9}, "the title is over scene 9"),
+        ({"text": "Green River", "scene": 1}, "scene 1 has both the title and a card"),
+    ])
+    def test_a_title_that_cannot_be_placed_is_refused(self, title, said):
+        plan = _directed()
+        plan["title"] = title
+        with pytest.raises(scene_plan.ScenePlanError, match=said):
+            scene_plan.parse(json.dumps(plan))
+
+    def test_the_short_forms_are_read_too(self):
+        plan = _directed()
+        plan["scenes"][0]["card"] = "November 2001 | Seattle"
+        plan["scenes"][1].update({"impact": True, "music": False, "pause_after": "0.5s"})
+        scenes = scene_plan.parse(json.dumps(plan))["scenes"]
+        assert scenes[0]["direction"]["card"] == {
+            "title": "November 2001", "subtitle": "Seattle"}
+        assert scenes[1]["direction"]["impact"] == "end"
+        assert scenes[1]["direction"]["music"] == "off"
+        assert scenes[1]["direction"]["pause_after"] == 0.5
+
+    def test_the_report_says_what_was_directed(self):
+        said = scene_plan.report(scene_plan.parse(json.dumps(_directed())))
+        assert "title over scene 3" in said and "1 card (scene 1)" in said
+        assert "1 pause (1.0s)" in said and "music off in scenes 2" in said
+        assert "wind under scenes 1" in said and "room under scenes 2" in said
+        assert "no direction" in scene_plan.report(scene_plan.parse(_text()))
+
+    def test_a_kokoro_voice_records_the_pauses(self):
+        from app.services import voice
+        with patch.object(voice, "_tts_with_pauses", return_value="made") as pieces, \
+                patch.object(voice, "_single_tts", return_value="one") as whole:
+            assert voice.tts("One. [pause: 1s]\nTwo.", "kokoro:am_echo", 1.0, "a.mp3") == "made"
+            assert voice.tts("One.\nTwo.", "kokoro:am_echo", 1.0, "a.mp3") == "one"
+        assert pieces.call_count == 1 and whole.call_count == 1
+
+
 class TestTheForm:
     def test_the_field_sits_with_the_script_settings(self, saved):  # noqa: F811
         form = new_video.form()
@@ -249,3 +349,116 @@ class TestThePipeline:
             words = scene_editor.reference_photo_words("search", 1)
         asked.assert_not_called()
         assert words == {"query": "Gary Ridgway 2001 arrest", "from": "plan"}
+
+
+def _long_plan(count=40, **direction):
+    """``count`` 段、每段四五秒的分镜；``direction`` 是 ``"段号" -> 导演项``。"""
+    return {"scenes": [
+        {"narration": f"Scene number {at} says about a dozen words so it lasts a few seconds.",
+         "photo": None,
+         **({"direction": direction[str(at)]} if str(at) in direction else {})}
+        for at in range(1, count + 1)
+    ]}
+
+
+def _card(title):
+    return {"card": {"title": title, "subtitle": ""}}
+
+
+class TestTheCheckerReadsTheDirection:
+    """写得出来不等于用得对：太密的卡、听不出来的静音、太多的重音都说一声。"""
+
+    def test_direction_within_the_rules_is_not_remarked_on(self):
+        plan = _long_plan(**{
+            "1": _card("A"), "10": {"music": "off"},
+            "11": {"music": "off", "impact": "end"}, "12": {"music": "off"},
+            "30": _card("B"),
+        })
+        assert scene_plan.direction_notes(plan["scenes"]) == []
+
+    def test_more_cards_than_the_length_carries(self):
+        cards = {str(at): _card(str(at)) for at in range(1, 40, 4)}
+        said = "\n".join(scene_plan.direction_notes(_long_plan(**cards)["scenes"]))
+        assert "10 cards is a lot" in said
+        # 长片子按长度算，不是死的"最多六张"。
+        long = _long_plan(count=200, **cards)
+        assert "cards is a lot" not in "\n".join(scene_plan.direction_notes(long["scenes"]))
+
+    def test_two_cards_on_screen_at_once(self):
+        plan = _long_plan(**{"3": _card("A"), "4": _card("B")})
+        assert "the cards on scenes 3 and 4" in scene_plan.direction_notes(plan["scenes"])[0]
+
+    def test_a_silence_too_short_to_hear(self):
+        scenes = _long_plan(**{"9": {"music": "off"}})["scenes"]
+        scenes[8]["narration"] = "He starts to dig."
+        said = scene_plan.direction_notes(scenes)
+        assert "the music is off for only about" in said[0] and "scene 9" in said[0]
+
+    def test_two_silences_the_music_cannot_come_back_between(self):
+        off = {str(at): {"music": "off"} for at in (5, 6, 7, 9, 10, 11)}
+        said = scene_plan.direction_notes(_long_plan(**off)["scenes"])
+        assert any("between scenes 7 and 9" in line for line in said)
+
+    def test_too_many_impacts_for_the_length(self):
+        hits = {str(at): {"impact": "end"} for at in range(2, 40, 6)}
+        said = "\n".join(scene_plan.direction_notes(_long_plan(**hits)["scenes"]))
+        assert "7 impacts is a lot" in said
+
+    def test_the_report_carries_the_remarks(self):
+        said = scene_plan.report(scene_plan.parse(json.dumps(_directed())))
+        assert "the music is off for only about" in said
+
+
+class TestDirectingAVideoThatExists:
+    """旁白已经录好的片子：不重写分镜，只说哪几段上加什么。"""
+
+    def _stored(self):
+        return scene_plan.stored(scene_plan.parse(json.dumps(_directed())))
+
+    def test_runs_and_single_scenes_add_up_on_each_scene(self):
+        new = scene_plan.redirected(self._stored(), json.dumps({
+            "title": {"text": "Green River", "scene": 1},
+            "scenes": {
+                "1-3": {"ambience": "room"},
+                "2-3": {"music": "off"},
+                "3": {"impact": "end", "card": "1982 | King County"},
+            },
+        }))
+        assert new[0]["direction"] == {
+            "ambience": "room", "title": {"text": "Green River", "tagline": ""}}
+        assert new[2]["direction"] == {
+            "ambience": "room", "music": "off", "impact": "end",
+            "card": {"title": "1982", "subtitle": "King County"}}
+
+    def test_the_file_is_the_whole_direction_but_recorded_pauses_stay(self):
+        old = self._stored()
+        new = scene_plan.redirected(old, json.dumps({"scenes": {"3": {"impact": "end"}}}))
+        assert "direction" not in new[0]
+        # 第二段的停顿已经录在旁白里了：留着。别的都按新的来。
+        assert new[1]["direction"] == {"pause_after": 1.0}
+        assert [scene["narration"] for scene in new] == [s["narration"] for s in old]
+        assert old[0]["direction"]["card"]["title"] == "November 2001"  # 原来的没动
+
+    @pytest.mark.parametrize("wanted, said", [
+        ({"scenes": {"2": {"pause_after": 1}}}, "already narrated"),
+        ({"scenes": {"9": {"music": "off"}}}, "scenes 1 to 3"),
+        ({"scenes": {"two": {"music": "off"}}}, "not a scene number"),
+        ({"scenes": {"2": {"musik": "off"}}}, "'musik' is not something"),
+        ({"scenes": [{"music": "off"}]}, "keyed by scene number"),
+        ({"title": {"text": "T", "scene": 2}, "scenes": {"2": {"card": "A"}}},
+         "both the title and a card"),
+    ])
+    def test_what_is_wrong_is_said(self, wanted, said):
+        with pytest.raises(scene_plan.ScenePlanError, match=said):
+            scene_plan.redirected(self._stored(), json.dumps(wanted))
+
+    def test_a_video_without_a_plan_cannot_be_directed(self):
+        with pytest.raises(scene_plan.ScenePlanError, match="not made from a scene plan"):
+            scene_plan.redirected([], "{}")
+
+    def test_the_outline_numbers_the_scenes_and_shows_what_they_carry(self):
+        lines = scene_plan.outline(self._stored()).split("\n")
+        assert lines[0].split()[:2] == ["1", "0:00"]
+        assert "[card: November 2001; wind]" in lines[0]
+        assert "impact end; music off; room; pause 1s" in lines[1]
+        assert "title: Green River" in lines[2] and lines[2].rstrip().endswith("stopped him.")

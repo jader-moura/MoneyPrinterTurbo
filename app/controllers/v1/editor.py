@@ -74,6 +74,7 @@ from app.controllers.manager.base_manager import TaskQueueFullError
 from app.services import bgm as bgm_service
 from app.services import transition_sound as transition_sound_service
 from app.services import app_settings
+from app.services import direction_preview
 from app.services import new_video
 from app.services import picture_shelf
 from app.services import reference_image
@@ -1054,6 +1055,40 @@ def stream_background_music(request: Request, name: str = Path(..., description=
             task_id="", status_code=404, message=f"{request_id}: no such music file"
         )
     return FileResponse(resolved)
+
+
+@router.get(
+    "/tasks/{task_id}/direction",
+    summary="What the finished video adds over the preview, and when",
+)
+def read_direction(request: Request, task_id: str = Path(..., description="Task ID")):
+    """片名、标题卡、重音、环境声、配乐让开——成片里才有的那些，各在第几秒。
+
+    编辑器照着它在预览上画、放。位置要靠把配音听一遍才准，那要几分钟：没听
+    过的时候这里答 ``listening`` 并在后台去听，编辑器过一会儿再问。
+    """
+    request_id = base.get_task_id(request)
+    _require_task(task_id, request_id)
+    data = _handle(
+        task_id, request_id, lambda: direction_preview.describe(task_id)
+    )
+    return utils.get_response(200, data)
+
+
+@router.get(
+    "/direction/sounds/{name}",
+    summary="One of the synthesised sounds the finishing pass mixes in",
+)
+def stream_direction_sound(request: Request, name: str = Path(..., description="hit, wind or room")):
+    """重音和两种环境声。合成出来的，和成片里混进去的是同一份波形。"""
+    request_id = base.get_task_id(request)
+    try:
+        resolved = direction_preview.sound_file(name)
+    except ValueError as exc:
+        raise HttpException(
+            task_id="", status_code=404, message=f"{request_id}: {exc}"
+        ) from exc
+    return FileResponse(resolved, media_type="audio/wav")
 
 
 @router.put(

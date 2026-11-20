@@ -1360,8 +1360,12 @@ def tts(
             voxcpm_prompt_text=voxcpm_prompt_text,
         )
 
-    # 仅 Azure TTS v1 (Edge TTS) 且脚本包含停顿标签时进入分段合成
-    if is_azure_v1_voice(voice_name):
+    # 脚本包含停顿标签时分段合成：Azure TTS v1 (Edge TTS)，以及本机的 Kokoro
+    # （免费、原生就是 24 kHz，分段拼接不掉音质，多请求几次也不花钱）。
+    # Pauses are recorded by synthesising the script in pieces. Edge TTS, and a
+    # self-hosted Kokoro: it is free per request and natively 24 kHz, which is
+    # what the pieces are joined at.
+    if is_azure_v1_voice(voice_name) or is_kokoro_voice(voice_name):
         return _tts_with_pauses(
             text=text,
             voice_name=voice_name,
@@ -1370,7 +1374,7 @@ def tts(
             voice_volume=voice_volume,
         )
 
-    # 其他声音提供商（如 Gemini、Fish Audio、SiliconFlow、Kokoro）包含停顿标签时，
+    # 其他声音提供商（如 Gemini、Fish Audio、SiliconFlow）包含停顿标签时，
     # 清理停顿标签后以单次请求合成
     clean_text = utils.remove_pause_tags(text)
     return _single_tts(

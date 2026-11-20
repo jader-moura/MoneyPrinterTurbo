@@ -656,9 +656,12 @@ def form() -> dict:
                    "textarea",
                    placeholder="Optional. Paste the JSON a scene plan was "
                                "exported as: it carries the narration, one "
-                               "picture prompt per scene, and which scenes "
-                               "are drawn from a real photo. The script box "
-                               "and the keywords are then not used."),
+                               "picture prompt per scene, which scenes are "
+                               "drawn from a real photo, and the direction "
+                               "of the edit (title, cards, pauses, impacts, "
+                               "music, ambience; these need a Finish look). "
+                               "The script box and the keywords are then "
+                               "not used."),
             _field("video_terms", "Picture keywords", "textarea",
                    placeholder="Optional, comma separated. Leave empty and "
                                "they are written from the script."),
