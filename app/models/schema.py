@@ -1043,6 +1043,16 @@ class SceneAddRequest(BaseModel):
     image_style: Optional[str] = None
 
 
+class SceneVideoMarkRequest(BaseModel):
+    """Mark a scene to become a video clip in the next batch.
+
+    ``image`` animates the scene's picture, ``text`` draws a clip from its
+    prompt, and an empty string takes the mark off again.
+    """
+
+    mode: Literal["", "image", "text"] = ""
+
+
 class SceneTimingRequest(BaseModel):
     """设置这一段的入点和在成片里的停留时长。
 

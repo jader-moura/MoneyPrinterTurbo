@@ -68,6 +68,9 @@ _VIDEO_EXTENSIONS = frozenset(
     {".mp4", ".mov", ".mkv", ".webm", ".avi", ".m4v", ".mpeg", ".mpg", ".flv", ".wmv"}
 )
 
+#: The two ways a scene becomes a generated video clip (see ``scene_video``).
+VIDEO_MODES = ("image", "text")
+
 _SCENES_KEY = "scenes"
 _STALE_KEY = "audio_stale"
 
@@ -369,6 +372,27 @@ def _normalise_scene(raw: Any, index: int) -> dict:
     cut_sound = str(record.get("cut_sound") or "").strip()
     if cut_sound:
         scene["cut_sound"] = cut_sound
+    # Marked to become a video scene the next time the batch runs: "image"
+    # animates this scene's picture, "text" draws a clip from its prompt.
+    animate = str(record.get("animate") or "").strip()
+    if animate in VIDEO_MODES:
+        scene["animate"] = animate
+    # This scene's material is a generated video clip, and how it was made.
+    # Kept only while the scene still shows that clip: every other way of
+    # changing a picture (redraw, upload, put an earlier one back) replaces
+    # ``material``, and the record must not outlive the file it describes.
+    video = record.get("video")
+    if (
+        isinstance(video, Mapping)
+        and str(video.get("mode") or "") in VIDEO_MODES
+        and path
+        and material_key(video.get("file")) == material_key(path)
+    ):
+        kept_video = {"mode": str(video["mode"]), "file": material_key(path)}
+        still = material_key(video.get("still"))
+        if still:
+            kept_video["still"] = still
+        scene["video"] = kept_video
     # 用户亲手改过这一段的台词。按"有才带"处理，理由同上。
     #
     # 为什么要记：台词平时是按时间算出来的（这段画面播放时真正会念到的那

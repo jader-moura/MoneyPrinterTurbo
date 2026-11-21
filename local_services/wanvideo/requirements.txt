@@ -1,0 +1,18 @@
+# What the video worker needs on top of the image server's interpreter
+# (torch, diffusers >= 0.35, transformers, accelerate, huggingface_hub, pillow).
+#
+# Either into that interpreter, or beside the worker, which leaves the
+# interpreter exactly as the image server expects it:
+#
+#   <genserver python> -m pip install --no-deps --target local_services/wanvideo/.deps -r local_services/wanvideo/requirements.txt
+#
+# --no-deps on purpose: peft and gguf would otherwise pull their own numpy and
+# torch into that folder, ahead of the ones the interpreter was built around.
+
+# Reads the quantised GGUF transformers.
+gguf>=0.17
+# The text-to-video distillation is a pair of LoRAs; diffusers loads them with this.
+peft>=0.17
+# The Wan pipelines clean each prompt with it.
+ftfy>=6.3
+wcwidth>=0.2

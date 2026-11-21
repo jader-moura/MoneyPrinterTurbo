@@ -67,6 +67,7 @@ from app.models.schema import (
     SceneSplitRequest,
     SceneTimingRequest,
     SceneUpdateRequest,
+    SceneVideoMarkRequest,
     TaskResponse,
     TaskVideoRequest,
 )
@@ -81,6 +82,7 @@ from app.services import reference_image
 from app.services import publish_metadata
 from app.services import reveal
 from app.services import scene_editor, scene_manifest, scene_regen_queue
+from app.services import scene_video
 from app.services import signin, upkeep
 from app.services import state as sm
 from app.services import task as tm
@@ -1158,6 +1160,50 @@ def reorder_scenes(
 
 
 #: 和 "reorder" 同一个道理，必须声明在 ``/scenes/{index}`` 那几条之前。
+@router.get("/video-scenes", summary="The batch of video scenes, running or last finished")
+def read_video_scenes(request: Request):
+    """Not under a task: one batch runs at a time on this machine, whichever
+    video it is for, and every editor window has to be able to see it."""
+    return utils.get_response(200, scene_video.snapshot())
+
+
+@router.delete("/video-scenes", summary="Stop the running batch, or forget a finished one")
+def end_video_scenes(request: Request):
+    request_id = base.get_task_id(request)
+    if scene_video.running():
+        return utils.get_response(200, _handle("", request_id, scene_video.stop))
+    return utils.get_response(200, scene_video.dismiss())
+
+
+@router.post(
+    "/tasks/{task_id}/video-scenes",
+    summary="Make a video clip for every scene marked for one",
+)
+def start_video_scenes(request: Request, task_id: str = Path(..., description="Task ID")):
+    request_id = base.get_task_id(request)
+    _require_task(task_id, request_id)
+    return utils.get_response(
+        200, _handle(task_id, request_id, lambda: scene_video.start(task_id))
+    )
+
+
+@router.put(
+    "/tasks/{task_id}/scenes/{index}/video",
+    response_model=SceneResponse,
+    summary="Mark a scene to become a video clip, or take the mark off",
+)
+def mark_scene_video(
+    request: Request,
+    body: SceneVideoMarkRequest,
+    task_id: str = Path(..., description="Task ID"),
+    index: int = Path(..., ge=0, description="Scene index"),
+):
+    request_id = base.get_task_id(request)
+    _require_task(task_id, request_id)
+    _handle(task_id, request_id, lambda: scene_video.mark(task_id, index, body.mode))
+    return utils.get_response(200, _scene_payload(task_id, index))
+
+
 @router.post(
     "/tasks/{task_id}/scenes/draw",
     summary="Approve the prompts and draw every picture still missing",

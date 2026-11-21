@@ -77,3 +77,5 @@ htmlcov/
 # 浏览器/ffmpeg 留在仓库根目录的流媒体分片。
 # Stray streaming segments left in the repo root.
 /*.m4s
+
+/local_services/**/.deps/

@@ -237,6 +237,13 @@ openai_image_base_url = "http://127.0.0.1:8730/v1"
 # without an Authorization header; provide one or more keys for cloud relays.
 # genserver needs none.
 openai_image_api_keys = []
+
+# Video scenes (the editor's "Video scene" choice) are drawn on this machine
+# with Wan 2.2 by local_services/wanvideo, which runs on the image server's
+# Python - the one with a torch built for your graphics card. It is found
+# beside the image server by default; name it here if yours lives elsewhere.
+# See local_services/wanvideo/README.md for setup, speed and memory.
+# wan_video_python = "C:\\path\\to\\genserver\\.venv\\Scripts\\python.exe"
 # Any image model id your endpoint accepts, for example a local SD checkpoint
 # alias or a provider model name. "zimage-turbo" is genserver's.
 openai_image_model = "zimage-turbo"

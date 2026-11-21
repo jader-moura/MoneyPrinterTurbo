@@ -109,6 +109,11 @@ def _require_idle(task_id: str) -> None:
         raise SceneBusyError(
             "this task is still running; wait for it to finish before editing scenes"
         )
+    # A batch of video scenes holds the whole graphics card, whichever task it
+    # is for. Imported here because that module imports this one.
+    from app.services import scene_video
+
+    scene_video.refuse_while_running()
 
 
 def load_params(task_id: str) -> VideoParams:

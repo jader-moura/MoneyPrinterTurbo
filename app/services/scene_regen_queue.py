@@ -320,6 +320,11 @@ def enqueue_prompt(
     是同一件事的两头。
     """
     # 下标和任务状态先验掉。排得进去再说"这一段不存在"毫无意义。
+    # Writing a prompt loads the language model onto the card a video batch
+    # is using, so it is refused for as long as one runs.
+    from app.services import scene_video
+
+    scene_video.refuse_while_running()
     scenes = scene_manifest.load(task_id)["scenes"]
     position_in_list = scene_editor._scene_at(scenes, index)
     scene = scenes[position_in_list]

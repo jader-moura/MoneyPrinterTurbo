@@ -141,6 +141,14 @@ const ui = {
   createNote: el("create-note"), createBar: el("create-bar"),
   createPct: el("create-pct"), createElapsed: el("create-elapsed"),
   createHide: el("create-hide"), createDone: el("create-done"),
+  videoScenes: el("video-scenes"), videoModal: el("video-modal"),
+  videoBox: el("video-modal").querySelector(".modal-box"),
+  videoTitle: el("video-title"), videoNote: el("video-note"),
+  videoList: el("video-list"), videoProgress: el("video-progress"),
+  videoBar: el("video-bar"), videoPct: el("video-pct"),
+  videoElapsed: el("video-elapsed"), videoCancel: el("video-cancel"),
+  videoStart: el("video-start"), videoStop: el("video-stop"),
+  videoDone: el("video-done"),
 };
 
 const state = {
@@ -161,6 +169,10 @@ const state = {
   // 回来，用户接着点下一张或者去改别处，不用站在那儿等。
   queue: { jobs: [], waiting: 0, running: null, busy: false },
   queueWatching: false,
+  // The batch of video scenes as the server last reported it: whether this
+  // machine can make them at all, and the one running or just finished.
+  video: {},
+  videoWatching: false,
   // 已经重读过时间线的那些活，免得同一张图反复触发重读。
   queueSeen: [],
   // 成片里才加上去的片名、标题卡和声音，各在第几秒（见 loadDirection）。
@@ -363,6 +375,9 @@ async function load(taskId) {
     draw();
     watchQueue();
     syncHistory();
+    // A batch of video scenes may be running, started from here before a
+    // reload or from another window. It locks every editor, so show it.
+    adoptVideoBatch();
   } catch (error) {
     state.data = null;
     state.scenes = [];
@@ -1125,6 +1140,7 @@ function draw() {
   drawQueue();
   drawApprove();
   drawSubtitle();
+  drawVideoButton();
   const ready = state.scenes.length > 0;
   ui.play.disabled = !ready;
   // 还有图没出完就不让开渲：渲染器要读的正是队列那边还在换的那几个文件，
@@ -1222,6 +1238,17 @@ function drawClips() {
           ? `queued ×${pending.length}`
           : "queued";
       clip.appendChild(badge);
+    }
+
+    // Marked to become a video, or already one. On the track because that is
+    // where scenes are chosen: marking twenty of them should not mean
+    // remembering which twenty.
+    if (scene.animate || scene.video) {
+      if (scene.animate) clip.classList.add("to-video");
+      const tag = document.createElement("div");
+      tag.className = "clip-badge video";
+      tag.textContent = scene.animate ? "→ video" : "video";
+      clip.appendChild(tag);
     }
 
     for (const side of ["left", "right"]) {
@@ -4820,6 +4847,8 @@ function drawInspector() {
     ui.inspBody.appendChild(photoBox);
   }
 
+  ui.inspBody.appendChild(videoSceneBox(scene));
+
   // 第三条路，而且是最该先试的那一条：这张图以前画过的某一个版本。
   //
   // 为什么它紧跟着那两个"重出"按钮：用户来这块面板最常做的事就是重出，而
@@ -6491,6 +6520,307 @@ ui.renderReveal.addEventListener("click", async () => {
   }
 });
 
+/* ---------- video scenes ----------
+
+   A scene can be turned into a generated video clip: either its picture is
+   animated, or a clip is drawn from its prompt. One clip takes minutes and
+   needs the whole graphics card, so nothing is made on the click. Scenes are
+   marked one by one, and one button then makes all of them in a single batch.
+
+   While the batch runs the editor is covered by a window that cannot be
+   hidden. Nothing else would work anyway: the image server has given up the
+   card, and the API refuses every scene edit until the batch ends. */
+
+function videoModeLabel(mode) {
+  return mode === "image" ? "animate the picture" : "video from the prompt";
+}
+
+/** "about 6 min", "about 1 h 20 min". Rounded up: a wait that ends early is
+    better news than one that overruns. */
+function aboutTime(seconds) {
+  const minutes = Math.max(1, Math.ceil((Number(seconds) || 0) / 60));
+  if (minutes < 60) return `about ${minutes} min`;
+  const rest = minutes % 60;
+  return `about ${Math.floor(minutes / 60)} h` + (rest ? ` ${rest} min` : "");
+}
+
+/** How long one scene's clip takes here. A full clip is 81 frames at 16 fps;
+    a shorter scene needs fewer and is quicker in proportion. */
+function videoClipSeconds(scene) {
+  const typical = (state.video && state.video.typical_clip_seconds) || 360;
+  const frames = Math.min(81, Math.max(17, Math.ceil(screenDuration(scene) * state.speed * 16)));
+  return typical * frames / 81;
+}
+
+function markedScenes() {
+  return (state.scenes || []).filter((scene) => scene.animate);
+}
+
+async function fetchVideo() {
+  try {
+    state.video = (await call("GET", "/video-scenes")) || {};
+  } catch {
+    // An older API without the route: video scenes are simply not offered.
+    state.video = { available: false, reason: "this server cannot make video scenes" };
+  }
+  return state.video;
+}
+
+/** The button in the top bar. Only there once something is marked. */
+function drawVideoButton() {
+  const marked = markedScenes().length;
+  ui.videoScenes.hidden = !marked || EMBEDDED;
+  ui.videoScenes.textContent = `Make ${marked} video scene${marked === 1 ? "" : "s"}…`;
+  ui.videoScenes.disabled = !!state.queue.busy || state.taskBusy;
+  ui.videoScenes.title = state.queue.busy
+    ? "Pictures are still being drawn. Video scenes need the whole graphics "
+      + "card, so wait for the queue to finish."
+    : "Make a video clip for every scene you marked, one after another.";
+}
+
+/** The box in a scene's panel where it is marked. Marking only saves the
+    choice; nothing is made until the batch is started from the top bar. */
+function videoSceneBox(scene) {
+  const box = inspectorGroup("Video scene");
+  const video = state.video || {};
+  const select = document.createElement("select");
+  const choices = [
+    ["", scene.video ? "Keep this video clip" : "Still picture"],
+    ["image", scene.video ? "Animate the picture again" : "Animate this picture"],
+    ["text", "Make a video from the prompt"],
+  ];
+  for (const [value, label] of choices) {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = label;
+    // Nothing to animate until the scene has a picture.
+    if (value === "image" && isPending(scene)) option.disabled = true;
+    select.appendChild(option);
+  }
+  select.value = scene.animate || "";
+  box.appendChild(select);
+
+  const note = document.createElement("p");
+  note.className = "hint";
+  if (video.available === false) {
+    select.disabled = true;
+    note.textContent = `Not available on this computer: ${video.reason}.`;
+  } else if (scene.animate) {
+    note.classList.add("pending");
+    note.textContent = `Marked: ${videoModeLabel(scene.animate)}. It is made when `
+      + "you press the “Make video scenes” button at the top, together with "
+      + "every other scene you mark.";
+  } else if (scene.video) {
+    note.textContent = "This scene is a video clip. Its picture is kept: "
+      + "“Earlier pictures” puts it back.";
+  } else {
+    note.textContent = "Mark every scene that should move, then make them all "
+      + `at once from the top bar. This one takes ${aboutTime(videoClipSeconds(scene))}.`;
+  }
+  box.appendChild(note);
+
+  select.addEventListener("change", async () => {
+    await run("Saving", () =>
+      call("PUT", scenePath(scene.index) + "/video", { mode: select.value }));
+    // A refused mark (no picture to animate, scene too long) leaves the list
+    // on a choice that was not saved. Put it back to what is true.
+    drawInspector();
+    drawClips();
+    drawVideoButton();
+  });
+  return box;
+}
+
+/** The lines of the batch window: one per scene. */
+function drawVideoList(rows) {
+  ui.videoList.innerHTML = "";
+  for (const row of rows) {
+    const item = document.createElement("li");
+    if (row.kind) item.className = row.kind;
+    const what = document.createElement("span");
+    what.className = "what";
+    what.textContent = row.what;
+    what.title = row.what;
+    const stateText = document.createElement("span");
+    stateText.className = "state";
+    stateText.textContent = row.state;
+    item.append(what, stateText);
+    ui.videoList.appendChild(item);
+  }
+}
+
+function videoButtons(shown) {
+  for (const name of ["Cancel", "Start", "Stop", "Done"]) {
+    ui["video" + name].hidden = !shown.includes(name);
+  }
+}
+
+/** Step one: say what is about to happen and how long it takes, and ask. */
+function askForVideoScenes() {
+  const marked = markedScenes();
+  if (!marked.length) return;
+  // The model is loaded once for every few clips of a kind (the server says
+  // how many), and that takes a couple of minutes each time.
+  const perGroup = (state.video && state.video.clips_per_group) || 4;
+  const groups = ["image", "text"].reduce((sum, mode) => sum + Math.ceil(
+    marked.filter((scene) => scene.animate === mode).length / perGroup), 0);
+  const total = marked.reduce((sum, scene) => sum + videoClipSeconds(scene), 0)
+    + groups * ((state.video && state.video.typical_group_seconds) || 150);
+  ui.videoModal.hidden = false;
+  ui.videoBox.classList.remove("failed");
+  ui.videoTitle.textContent =
+    `Make ${marked.length} video scene${marked.length === 1 ? "" : "s"}?`;
+  ui.videoNote.textContent = `This takes ${aboutTime(total)}. Until it is done `
+    + "the editor is locked and no pictures can be drawn: the video model needs "
+    + "the whole graphics card. Each scene keeps its picture, so any of them "
+    + "can be put back afterwards.";
+  drawVideoList(marked.map((scene) => ({
+    what: `${scene.index + 1}. ${scene.keyword || ""}`,
+    state: `${videoModeLabel(scene.animate)} · ${aboutTime(videoClipSeconds(scene))}`,
+  })));
+  ui.videoProgress.hidden = true;
+  ui.videoPct.textContent = "";
+  ui.videoElapsed.textContent = "";
+  videoButtons(["Cancel", "Start"]);
+  ui.videoStart.disabled = false;
+}
+
+function videoSceneName(clip) {
+  const scene = state.scenes.find((one) => one.id === clip.id) || state.scenes[clip.scene];
+  return `${clip.scene + 1}. ${(scene && scene.keyword) || ""}`;
+}
+
+/** Step two and three: the batch running, then what came of it. */
+function drawVideoBatch(video) {
+  ui.videoModal.hidden = false;
+  const clips = video.clips || [];
+  const finished = (video.done || 0) + (video.failed || 0);
+  const here = video.task_id === state.taskId;
+  drawVideoList(clips.map((clip) => ({
+    what: here ? videoSceneName(clip) : `Scene ${clip.scene + 1}`,
+    kind: clip.state,
+    // Each clip is drawn in two halves with the others' in between, so a
+    // clip can sit at "2 of 4" while the next one is worked on.
+    state: clip.state === "running"
+      ? (clip.id !== video.current ? `${clip.step} of ${video.steps} steps done`
+        : clip.step >= video.steps ? "finishing"
+          : `step ${clip.step + 1} of ${video.steps}`)
+      : clip.state === "done" ? "done"
+        : clip.state === "failed" ? clip.error || "failed"
+          : clip.state === "stopped" ? "not made" : "waiting",
+  })));
+
+  if (video.running) {
+    ui.videoBox.classList.remove("failed");
+    ui.videoTitle.textContent = here
+      ? `Making video scenes · ${finished} of ${video.total} done`
+      : "Another video is making its video scenes";
+    ui.videoNote.textContent = (video.stopping ? "Stopping" : (video.note || "Working"))
+      + ". The editor is locked until this is done.";
+    ui.videoProgress.hidden = false;
+    // Decoding counts as one more step, so the last step is not "100%".
+    const share = clips.reduce((sum, clip) => sum + (
+      clip.state === "done" || clip.state === "failed" ? 1
+        : Math.min(clip.step || 0, video.steps) / (video.steps + 1)), 0) / (clips.length || 1);
+    // Nothing to measure while the model loads: sweep instead of sitting at 0%.
+    ui.videoBar.classList.toggle("waiting", share <= 0);
+    ui.videoBar.style.width = share > 0 ? `${Math.round(share * 100)}%` : "";
+    ui.videoPct.textContent = share > 0 ? `${Math.round(share * 100)}%` : "";
+    ui.videoElapsed.textContent = `${fmt(video.elapsed)} so far`
+      + (video.remaining ? ` · ${aboutTime(video.remaining)} left` : "");
+    videoButtons(["Stop"]);
+    ui.videoStop.disabled = !!video.stopping;
+    setTitleNote(`Video scenes ${finished}/${video.total}`);
+    return;
+  }
+
+  const made = video.done || 0;
+  const missed = (video.total || 0) - made;
+  ui.videoBox.classList.toggle("failed", !made);
+  ui.videoBar.classList.remove("waiting");
+  ui.videoBar.style.width = "100%";
+  ui.videoPct.textContent = "";
+  ui.videoElapsed.textContent = `${fmt(video.elapsed)} in all`;
+  ui.videoTitle.textContent = video.state === "stopped"
+    ? `Stopped · ${made} of ${video.total} made`
+    : made === video.total
+      ? `${made} video scene${made === 1 ? " is" : "s are"} ready`
+      : `${made} of ${video.total} video scenes were made`;
+  ui.videoNote.textContent = video.error
+    || (missed
+      ? "The scenes that were not made are still marked, so they can be tried again."
+      : "They are on the timeline now. Pictures can be drawn again.");
+  videoButtons(["Done"]);
+  setTitleNote(made ? "Video scenes ready" : "Video scenes failed");
+}
+
+/** Follow the batch until it ends, reloading the timeline as clips land. */
+async function watchVideoBatch() {
+  if (state.videoWatching) return;
+  state.videoWatching = true;
+  let seen = -1;
+  try {
+    for (;;) {
+      const video = await fetchVideo();
+      if (!video.state) { ui.videoModal.hidden = true; break; }
+      if (video.task_id === state.taskId && video.done !== seen) {
+        // A clip just replaced a picture on disk; show it under the window.
+        if (seen >= 0 || !video.running) {
+          try { await refresh(); } catch { /* the next round tries again */ }
+        }
+        seen = video.done;
+      }
+      drawVideoBatch(video);
+      if (!video.running) break;
+      await new Promise((resolve) => setTimeout(resolve, 2000));
+    }
+  } finally {
+    state.videoWatching = false;
+  }
+}
+
+/** On opening a video: is a batch running, or did one end while away? */
+async function adoptVideoBatch() {
+  const video = await fetchVideo();
+  drawInspector();
+  if (video.running || (video.state && video.task_id === state.taskId)) watchVideoBatch();
+}
+
+ui.videoScenes.addEventListener("click", askForVideoScenes);
+ui.videoCancel.addEventListener("click", () => { ui.videoModal.hidden = true; });
+ui.videoStart.addEventListener("click", async () => {
+  ui.videoStart.disabled = true;
+  try {
+    // A prompt still being typed belongs to the clip made from it.
+    await savePromptEdit();
+    state.video = await call(
+      "POST", `/tasks/${encodeURIComponent(state.taskId)}/video-scenes`);
+    drawVideoBatch(state.video);
+    watchVideoBatch();
+  } catch (error) {
+    ui.videoBox.classList.add("failed");
+    ui.videoNote.textContent = String(error.message || error);
+    ui.videoStart.disabled = false;
+  }
+});
+ui.videoStop.addEventListener("click", async () => {
+  ui.videoStop.disabled = true;
+  try {
+    await call("DELETE", "/video-scenes");
+  } catch (error) {
+    ui.videoNote.textContent = String(error.message || error);
+    ui.videoStop.disabled = false;
+  }
+});
+ui.videoDone.addEventListener("click", async () => {
+  ui.videoModal.hidden = true;
+  setTitleNote("");
+  // Forget the finished batch, or the window would come back on reload.
+  try { await call("DELETE", "/video-scenes"); } catch { /* nothing to forget */ }
+  state.video = await fetchVideo();
+  try { await refresh(); } catch { /* the timeline on screen is still valid */ }
+});
+
 /* ---------- 做过的片子 ----------
 
    编辑器原来只能靠粘一个 uuid 进来。第二天回来想接着改前天那条片子时，那
@@ -7719,6 +8049,7 @@ if (initial) {
   // 不是一个能开始工作的地方。
   loadLibrary(1);
   resumeCreation();
+  adoptVideoBatch();
 }
 
 /* 关页前的最后一次机会。``keepalive`` 让这一条在页面没了之后继续发完；
