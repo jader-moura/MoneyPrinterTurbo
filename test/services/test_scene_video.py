@@ -373,3 +373,64 @@ def test_earlier_media_tells_a_video_from_a_picture_and_puts_either_back(studio)
     scene_manifest.save_scenes(studio.task_id, scenes)
     scene_editor.restore_material(studio.task_id, 0, clip)
     assert scenes_of(studio.task_id)[0]["video"] == {"mode": "image", "file": clip}
+
+
+def test_showing_a_scene_in_the_folder_points_at_the_image_itself(studio):
+    picture = os.path.basename(scenes_of(studio.task_id)[0]["material"])
+    assert scene_video.file_to_show(studio.task_id, 0) == {"file": picture, "what": "picture"}
+
+    # A video scene made from a picture still points at that picture...
+    scene_video.mark(studio.task_id, 0, "image")
+    scene_video.mark(studio.task_id, 1, "text")
+    studio.gate.write_text("open")
+    run_to_the_end(studio.task_id)
+    assert scene_video.file_to_show(studio.task_id, 0) == {"file": picture, "what": "picture"}
+    # ...and one drawn from the prompt has no picture, so it shows its clip.
+    clip = os.path.basename(scenes_of(studio.task_id)[1]["material"])
+    assert scene_video.file_to_show(studio.task_id, 1) == {"file": clip, "what": "video"}
+
+
+def test_your_own_picture_or_video_goes_on_a_scene_and_the_old_one_is_kept(
+        studio, tmp_path, monkeypatch):
+    import io
+    import subprocess
+
+    from PIL import Image
+
+    from app.services import material_upload, picture_shelf
+    from app.utils import utils
+
+    staging = tmp_path / "uploads"
+    staging.mkdir()
+    monkeypatch.setattr(
+        material_upload, "uploaded_material_dir", lambda create=True: str(staging))
+    before = os.path.basename(scenes_of(studio.task_id)[0]["material"])
+
+    # A clip made somewhere else.
+    clip = tmp_path / "from flow.mp4"
+    subprocess.run(
+        [utils.get_ffmpeg_binary(), "-v", "error", "-y", "-f", "lavfi", "-i",
+         "testsrc=size=160x90:rate=10:duration=1", "-pix_fmt", "yuv420p", str(clip)],
+        check=True)
+    with open(clip, "rb") as handle:
+        scene = scene_editor.upload_material(studio.task_id, 0, clip.name, handle)
+    assert scene["kind"] == "video" and scene["locked"]
+    folder = picture_shelf.task_folder(studio.task_id)
+    assert os.path.dirname(os.path.realpath(scene["material"])) == os.path.realpath(folder)
+    assert [entry["material"] for entry in scene["history"]] == [before]
+    tiles = {tile["material"]: tile for tile in picture_shelf.shelf(studio.task_id)}
+    assert tiles[os.path.basename(scene["material"])]["media"] == "video"
+    # Nothing is left behind in the shared folder.
+    assert os.listdir(staging) == []
+
+    # A picture of their own.
+    picture = io.BytesIO()
+    Image.new("RGB", (64, 64), "red").save(picture, "PNG")
+    picture.seek(0)
+    scene = scene_editor.upload_material(studio.task_id, 1, "mine.png", picture)
+    assert scene["kind"] == "image" and os.path.isfile(scene["material"])
+
+    # Something that is neither is refused, and the scene is left alone.
+    with pytest.raises(scene_manifest.SceneError):
+        scene_editor.upload_material(studio.task_id, 1, "notes.mp4", io.BytesIO(b"not a video"))
+    assert scenes_of(studio.task_id)[1]["material"] == scene["material"]

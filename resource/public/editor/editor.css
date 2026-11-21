@@ -966,7 +966,8 @@ body {
   color: var(--muted);
 }
 /* 不画图的那两个小按钮并排，离上面那两块远一点。 */
-.insp-pair { display: flex; gap: 8px; }
+.insp-pair { display: flex; flex-wrap: wrap; gap: 8px; }
+.insp-pair + .insp-pair { margin-top: 8px; }
 .insp-section > .insp-pair { margin: 14px 0 8px; }
 .insp-pair .btn { flex: 1; }
 /* 这一段是照着哪张照片画的。 */

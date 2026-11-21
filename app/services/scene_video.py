@@ -303,6 +303,28 @@ def _still_of(task_id: str, scene: dict) -> str:
     return timeline.source_image_for(task_id, resolved) or ""
 
 
+def file_to_show(task_id: str, index: Any) -> dict:
+    """The file a person means by "this scene's picture", to point at in the folder.
+
+    That is the image itself, not the clip the scene plays: a picture is stored
+    as a clip named by a digest, and a video scene plays a generated clip, but
+    the file to take somewhere else is the image both came from. A scene with
+    no image behind it (footage, a clip drawn from the prompt) shows what it
+    plays.
+    """
+    scenes = scene_editor._scenes_or_fail(task_id)
+    scene = scenes[scene_editor._scene_at(scenes, index)]
+    still = _still_of(task_id, scene)
+    if still:
+        return {"file": os.path.basename(still), "what": "picture"}
+    name = scene_manifest.material_key(scene.get("material"))
+    if not name:
+        raise SceneError(
+            f"scene {int(scene.get('index', 0)) + 1} has no picture yet, so there "
+            "is no file to show")
+    return {"file": name, "what": "video"}
+
+
 def _plan_clip(task_id: str, params, scene: dict, mode: str) -> dict:
     """Everything the worker needs for one scene, or a named reason it cannot."""
     number = int(scene.get("index", 0)) + 1

@@ -1707,6 +1707,30 @@ def replace_scene_material(
     return utils.get_response(200, _scene_payload(task_id, index))
 
 
+@router.post(
+    "/tasks/{task_id}/scenes/{index}/upload",
+    response_model=SceneResponse,
+    summary="Put your own picture or video file on a scene",
+)
+def upload_scene_material(
+    request: Request,
+    task_id: str = Path(..., description="Task ID"),
+    index: int = Path(..., ge=0, description="Scene index"),
+    file: UploadFile = File(...),
+):
+    """A clip made somewhere else, or a picture of your own, straight onto a
+    scene. What the scene showed before is kept and can be put back."""
+    request_id = base.get_task_id(request)
+    _require_task(task_id, request_id)
+    _handle(
+        task_id,
+        request_id,
+        lambda: scene_editor.upload_material(
+            task_id, index, file.filename or "", file.file),
+    )
+    return utils.get_response(200, _scene_payload(task_id, index))
+
+
 @router.get(
     "/tasks/{task_id}/pictures",
     summary="Every picture this video has drawn, newest first",
@@ -1839,6 +1863,36 @@ def timeline_state(request: Request, task_id: str = Path(..., description="Task 
         lambda: scene_editor.describe(task_id, _endpoint(), with_timing=True),
     )
     return utils.get_response(200, data)
+
+
+@router.post(
+    "/tasks/{task_id}/scenes/{index}/reveal",
+    summary="Show a scene's picture in the file manager, selected",
+)
+def reveal_scene_file(
+    request: Request,
+    task_id: str = Path(..., description="Task ID"),
+    index: int = Path(..., ge=0, description="Scene index"),
+):
+    """Open the task's folder with this scene's image selected.
+
+    The folder holds dozens of files named by digests, so finding one picture
+    by eye is hopeless; the server knows which file it is. For a picture or a
+    video scene made from one, that is the image itself. The same two gates as
+    the route below apply: the file is this task's, and the request is local.
+    """
+    request_id = base.get_task_id(request)
+    _require_task(task_id, request_id)
+
+    def show():
+        found = scene_video.file_to_show(task_id, index)
+        answer = reveal.reveal(
+            task_id, found["file"],
+            client=(request.client.host if request.client else None),
+        )
+        return {**answer, **found}
+
+    return utils.get_response(200, _handle(task_id, request_id, show))
 
 
 @router.post(

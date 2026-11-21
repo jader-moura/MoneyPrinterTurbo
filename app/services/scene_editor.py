@@ -1242,6 +1242,36 @@ def replace_material(task_id: str, index: Any, material_path: str) -> dict:
         return scene
 
 
+def upload_material(task_id: str, index: Any, filename: str, source: Any) -> dict:
+    """Put the user's own picture or video on a scene.
+
+    The file is checked the way every uploaded material is (type, size, that it
+    really opens), copied into the task so the video stays self-contained, and
+    then placed like any other replacement: what the scene showed before goes
+    into its history and can be put back.
+    """
+    from app.services import material_upload
+
+    _require_idle(task_id)
+    scenes = _scenes_or_fail(task_id)
+    _scene_at(scenes, index)
+    try:
+        stored = material_upload.save_material_upload(filename, source)
+    except material_upload.MaterialUploadError as exc:
+        raise SceneError(str(exc)) from exc
+    except material_upload.MaterialServiceError as exc:
+        raise SceneError(f"the file could not be saved: {exc}") from exc
+    staged = os.path.join(material_upload.uploaded_material_dir(), stored)
+    try:
+        return replace_material(task_id, index, staged)
+    finally:
+        # The task has its own copy now; the staged one would only pile up.
+        try:
+            os.remove(staged)
+        except OSError:
+            pass
+
+
 def place_map(task_id: str, index: Any, place: dict) -> dict:
     """把这一段的画面换成一张定位地图（``locator_map``）。
 

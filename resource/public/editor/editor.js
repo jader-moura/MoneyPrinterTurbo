@@ -4973,7 +4973,24 @@ function drawInspector() {
   const pair = document.createElement("div");
   pair.className = "insp-pair";
   pair.appendChild(earlier);
+  // The scene's own file gets a row to itself, under the first: bring one in,
+  // or find the one that is there. Four buttons do not fit one row.
+  const files = document.createElement("div");
+  files.className = "insp-pair";
+  const own = button("Upload…", "small", () => uploadSceneFile(scene));
+  own.title = "Put your own picture or video on this scene: a clip made in "
+    + "another program, or a photo. What the scene shows now is kept under "
+    + "“Earlier media”.";
+  files.appendChild(own);
+  if (!isPending(scene) && !EMBEDDED) {
+    const show = button("Show in folder", "small", () => showSceneFile(scene, show));
+    show.title = "Opens this video's folder with this scene's picture selected: "
+      + "the image file itself, ready to drag into another program. For a "
+      + "video scene that is the picture it was made from.";
+    files.appendChild(show);
+  }
   ui.inspBody.appendChild(pair);
+  ui.inspBody.appendChild(files);
 
   // 这一段已经排着了就说出来。不说的话，用户点完看不出任何变化，只会
   // 再点一次——然后同一段画面被重出两遍。
@@ -6596,6 +6613,49 @@ ui.renderPlay.addEventListener("click", () => {
   // 成片由 /tasks 那个静态挂载直接提供，所以这就是一个能打开的地址。
   window.open(state.renderedVideo, "_blank", "noopener");
 });
+
+/** Put the user's own picture or video on a scene. */
+function uploadSceneFile(scene) {
+  const at = scene.index;
+  pickFile("image/png,image/jpeg,image/bmp,video/*", (file) => {
+    run(`Uploading ${file.name}`, async () => {
+      await upload(scenePath(at) + "/upload", file);
+      return `Scene ${at + 1} now shows ${file.name}. What it showed before is `
+        + "under “Earlier media”.";
+    });
+  });
+}
+
+/** Point at a scene's picture in the file manager. Only the server can: a
+    page cannot open a folder, and the API runs on the same machine. */
+async function showSceneFile(scene, control) {
+  control.disabled = true;
+  try {
+    const answer = await call("POST", scenePath(scene.index) + "/reveal");
+    const name = String((answer && answer.file) || "");
+    if (answer && answer.opened) {
+      say(`The folder is open with scene ${scene.index + 1}'s `
+        + `${answer.what === "picture" ? "picture" : "video"} selected: ${name}`);
+      return;
+    }
+    // No desktop, or the page is open on another machine: say where the file
+    // is and put the path on the clipboard, which is the next best thing.
+    const where = String((answer && answer.path) || "");
+    let copied = false;
+    if (where && navigator.clipboard) {
+      try {
+        await navigator.clipboard.writeText(where);
+        copied = true;
+      } catch { /* not allowed here; the path is still shown */ }
+    }
+    say(`The file is at ${where}` + (copied ? " (path copied)" : "")
+      + (answer && answer.reason ? ` — ${answer.reason}.` : "."), "warn");
+  } catch (error) {
+    say(String(error.message || error), "error");
+  } finally {
+    control.disabled = false;
+  }
+}
 
 // 在资源管理器/访达里把成片指出来。
 //
