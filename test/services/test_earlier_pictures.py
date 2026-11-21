@@ -352,7 +352,7 @@ class TestPuttingOneBack:
                      "nothing-like-this.mp4"):
             with pytest.raises(scene_editor.SceneError) as caught:
                 scene_editor.restore_material(task_id, 0, name)
-            assert "not a picture of this video" in str(caught.value)
+            assert "not a picture or video of this video" in str(caught.value)
 
     def test_putting_back_the_one_already_there_says_so(self, task_root):
         """静静成功会让用户以为换了一张，然后盯着没变的画面找原因。"""
@@ -427,11 +427,11 @@ class TestTheEditorOffersIt:
         "回到旧的"藏在别处的话，他只会再点一次重出去赌。
         """
         source = self._editor()
-        assert "Earlier pictures…" in source
-        assert source.index("Earlier pictures…") > source.index(
+        assert "Earlier media…" in source
+        assert source.index("Earlier media…") > source.index(
             '"Redraw from a photo"'
         )
-        assert source.index("Earlier pictures…") < source.index(
+        assert source.index("Earlier media…") < source.index(
             "const mine = pendingJobs(scene.index)"
         )
 
@@ -441,7 +441,7 @@ class TestTheEditorOffersIt:
         那个按钮不能关在 ``isGenerated`` 里面——这一条就是钉这件事的。
         """
         source = self._editor()
-        start = source.index('const earlier = button("Earlier pictures…"')
+        start = source.index('const earlier = button("Earlier media…"')
         between = source[source.index('"Redraw from a photo"'):start]
         # 中间必须有那个 if 块的收尾，否则按钮就在块里面。
         assert "\n  }\n" in between
@@ -489,7 +489,7 @@ class TestTheEditorOffersIt:
         start = source.index("function drawShelf(")
         body = source[start:source.index("\n}", start)]
         assert "Could not read this video's folder" in body
-        assert "no pictures on disk yet" in body
+        assert "no pictures or videos on disk yet" in body
 
     def test_the_old_prompt_is_offered_not_forced(self):
         source = self._editor()
@@ -543,4 +543,4 @@ class TestOverHttp:
             json={"material": "../../../../Windows/System32/calc.exe"},
         )
         assert answer.status_code >= 400
-        assert "not a picture of this video" in answer.text
+        assert "not a picture or video of this video" in answer.text

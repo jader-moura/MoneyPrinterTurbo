@@ -162,7 +162,7 @@ def test_a_marked_scene_becomes_a_clip_and_keeps_its_picture(studio):
         "still": os.path.basename(picture),
     }
     assert "animate" not in first and first["locked"]
-    # The picture is one click away in "Earlier pictures".
+    # The picture is one click away in "Earlier media".
     assert [entry["material"] for entry in first["history"]] == [os.path.basename(picture)]
     # The worker was handed that picture, and a 4s scene's worth of frames.
     assert '"frames": 69' in open(first["material"], encoding="utf-8").read()
@@ -342,3 +342,34 @@ def test_animating_again_starts_from_the_picture_not_from_the_clip(studio):
     assert scene["video"]["still"] == os.path.basename(picture)
     handed = open(scene["material"], encoding="utf-8").read()
     assert os.path.basename(picture) in handed
+
+
+def test_earlier_media_tells_a_video_from_a_picture_and_puts_either_back(studio):
+    from app.services import picture_shelf
+
+    picture = os.path.basename(scenes_of(studio.task_id)[0]["material"])
+    scene_video.mark(studio.task_id, 0, "image")
+    run_to_the_end(studio.task_id)
+    clip = os.path.basename(scenes_of(studio.task_id)[0]["material"])
+
+    tiles = {tile["material"]: tile for tile in picture_shelf.shelf(studio.task_id)}
+    assert (tiles[clip]["media"], tiles[clip]["video_mode"]) == ("video", "image")
+    assert (tiles[picture]["media"], tiles[picture]["video_mode"]) == ("picture", "")
+
+    # Back to the picture: the scene is no longer a video scene...
+    scene_editor.restore_material(studio.task_id, 0, picture)
+    scene = scenes_of(studio.task_id)[0]
+    assert "video" not in scene and os.path.basename(scene["material"]) == picture
+    # ...and back to the clip: it is one again, and still knows its picture.
+    scene_editor.restore_material(studio.task_id, 0, clip)
+    scene = scenes_of(studio.task_id)[0]
+    assert scene["video"] == {"mode": "image", "file": clip, "still": picture}
+
+    # A clip made before that was recorded is known by its name.
+    scene_editor.restore_material(studio.task_id, 0, picture)
+    scenes = scenes_of(studio.task_id)
+    for entry in scenes[0]["history"]:
+        entry.pop("video", None)
+    scene_manifest.save_scenes(studio.task_id, scenes)
+    scene_editor.restore_material(studio.task_id, 0, clip)
+    assert scenes_of(studio.task_id)[0]["video"] == {"mode": "image", "file": clip}

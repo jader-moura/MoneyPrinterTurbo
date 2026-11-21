@@ -435,7 +435,7 @@ class TestTheChoiceIsInThePhotoWindow:
 
     def test_the_inspector_no_longer_has_it(self):
         start = JS.index('inspectorGroup("Draw it from a photo")')
-        block = JS[start:JS.index('button("Earlier pictures…"', start)]
+        block = JS[start:JS.index('button("Earlier media…"', start)]
         assert "photoKeepPicker" not in block and "keep.wrap" not in block
 
     def test_it_opens_on_the_last_choice(self):

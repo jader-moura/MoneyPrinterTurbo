@@ -381,17 +381,8 @@ def _normalise_scene(raw: Any, index: int) -> dict:
     # Kept only while the scene still shows that clip: every other way of
     # changing a picture (redraw, upload, put an earlier one back) replaces
     # ``material``, and the record must not outlive the file it describes.
-    video = record.get("video")
-    if (
-        isinstance(video, Mapping)
-        and str(video.get("mode") or "") in VIDEO_MODES
-        and path
-        and material_key(video.get("file")) == material_key(path)
-    ):
-        kept_video = {"mode": str(video["mode"]), "file": material_key(path)}
-        still = material_key(video.get("still"))
-        if still:
-            kept_video["still"] = still
+    kept_video = video_record(record.get("video"), path)
+    if kept_video:
         scene["video"] = kept_video
     # 用户亲手改过这一段的台词。按"有才带"处理，理由同上。
     #
@@ -478,6 +469,26 @@ def _normalise_scene(raw: Any, index: int) -> dict:
 HISTORY_LIMIT = 24
 
 
+def video_record(raw: Any, material: Any) -> dict:
+    """How a generated video clip was made, or {} when `raw` is not about `material`.
+
+    The record says which file it describes, and is only good for that file.
+    """
+    name = material_key(material)
+    if not (
+        isinstance(raw, Mapping)
+        and str(raw.get("mode") or "") in VIDEO_MODES
+        and name
+        and material_key(raw.get("file")) == name
+    ):
+        return {}
+    kept = {"mode": str(raw["mode"]), "file": name}
+    still = material_key(raw.get("still"))
+    if still:
+        kept["still"] = still
+    return kept
+
+
 def _normalise_history(raw: Any) -> list[dict]:
     """把换下来的那几张整理成一条条记录，坏的丢掉，不抛异常。
 
@@ -510,6 +521,11 @@ def _normalise_history(raw: Any) -> list[dict]:
             cleaned = _normalise_scene({"reference": reference}, 0).get("reference")
             if cleaned:
                 entry["reference"] = cleaned
+        # A video clip taken off a scene keeps how it was made, so putting it
+        # back brings back a video scene and not an anonymous file.
+        made = video_record(item.get("video"), name)
+        if made:
+            entry["video"] = made
         try:
             at = float(item.get("at") or 0)
         except (TypeError, ValueError):
@@ -543,6 +559,9 @@ def remember_material(scene: dict) -> bool:
     reference = scene.get("reference")
     if isinstance(reference, Mapping) and reference:
         entry["reference"] = dict(reference)
+    made = video_record(scene.get("video"), name)
+    if made:
+        entry["video"] = made
     # 去重和截断都归 ``_normalise_history``：这一张以前被换下来过（换回去、
     # 又换走）的时候，留下的该是刚才这一条。规则放在一处，别在这里再写一遍。
     scene["history"] = _normalise_history(

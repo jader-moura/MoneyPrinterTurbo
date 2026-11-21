@@ -54,6 +54,29 @@ VIDEO_SUFFIXES = (".mp4", ".mov", ".mkv", ".webm", ".avi")
 IMAGE_SUFFIXES = (".png", ".jpg", ".jpeg", ".webp", ".bmp")
 
 
+# A clip made by the video model, named by scene_video: how it was made is in
+# the name, so it is known even for a file no scene has a record of.
+GENERATED_CLIP = re.compile(r"^wan-(image|text)-", re.IGNORECASE)
+
+
+def generated_mode(name: Any) -> str:
+    """"image" or "text" for a generated video clip, "" for anything else."""
+    found = GENERATED_CLIP.match(scene_manifest.material_key(name))
+    return found.group(1).lower() if found else ""
+
+
+def media_of(name: Any) -> str:
+    """What the viewer sees: a "picture" that is held still, or a "video".
+
+    A picture is stored as a clip too (the still, baked with its camera move),
+    so the file type does not say. What it was made from does.
+    """
+    basename = scene_manifest.material_key(name)
+    if os.path.splitext(basename)[1].lower() in IMAGE_SUFFIXES:
+        return "picture"
+    return "picture" if timeline.baked_from_an_image(basename) else "video"
+
+
 def task_folder(task_id: str) -> str:
     """任务目录的绝对路径。不存在就报错，而不是建一个。
 
@@ -166,6 +189,10 @@ def shelf(task_id: str, endpoint: str = "") -> list:
             "material": name,
             "url": _stream_url(task_id, name, endpoint),
             "kind": scene_manifest.material_kind(name),
+            # "picture" or "video", and for a generated clip how it was made:
+            # "image" (a picture animated) or "text" (drawn from the prompt).
+            "media": media_of(name),
+            "video_mode": generated_mode(name),
             "made_at": round(stat.st_mtime, 3),
             "bytes": stat.st_size,
             "in_use": about.get("in_use"),

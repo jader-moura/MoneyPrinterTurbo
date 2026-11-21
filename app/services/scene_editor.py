@@ -1365,8 +1365,8 @@ def restore_material(task_id: str, index: Any, material: str) -> dict:
     if tile is None:
         name = scene_manifest.material_key(material) or str(material)
         raise SceneError(
-            f"{name} is not a picture of this video; only the pictures this "
-            f"video has drawn can be put back"
+            f"{name} is not a picture or video of this video; only what this "
+            f"video has made can be put back"
         )
     with _editing(task_id):
         scenes = _scenes_or_fail(task_id)
@@ -1396,6 +1396,18 @@ def restore_material(task_id: str, index: Any, material: str) -> dict:
             scene["reference"] = dict(reference)
         else:
             scene.pop("reference", None)
+        # A generated clip comes back as the video scene it was: which picture
+        # it was made from goes with it, so it can be animated again. Clips
+        # made before that was recorded are still known by their name.
+        made = scene_manifest.video_record(recorded.get("video"), resolved)
+        if not made:
+            mode = picture_shelf.generated_mode(tile["material"])
+            if mode:
+                made = {"mode": mode, "file": scene_manifest.material_key(resolved)}
+        if made:
+            scene["video"] = made
+        else:
+            scene.pop("video", None)
         # 用户亲手挑的这一张，不该被后续批量操作盖掉。同 ``regenerate_material``。
         scene["locked"] = True
         scene_manifest.save_scenes(task_id, scenes)

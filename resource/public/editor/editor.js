@@ -106,7 +106,7 @@ const ui = {
   publishSave: el("publish-save"), publishClose: el("publish-close"),
   publishSaved: el("publish-saved"),
   shelfModal: el("shelf-modal"), shelfTitle: el("shelf-title"),
-  shelfNote: el("shelf-note"), shelfGrid: el("shelf-grid"),
+  shelfNote: el("shelf-note"), shelfFilter: el("shelf-filter"), shelfGrid: el("shelf-grid"),
   shelfStatus: el("shelf-status"), shelfClose: el("shelf-close"),
   newVideo: el("new-video"), libraryNew: el("library-new"),
   newModal: el("new-modal"), newSubject: el("new-subject"),
@@ -1332,16 +1332,18 @@ function drawAddTile(offsets) {
    连带的好处是它对**老任务也有效**：历史记录是从今天起才记的，而目录里那些
    被换下来的图早就在了。 */
 
-const shelf = { at: -1, pictures: [], loading: false, error: "" };
+const shelf = { at: -1, pictures: [], loading: false, error: "", show: "all" };
 
 function openPictureShelf(scene) {
   shelf.at = scene.index;
   shelf.pictures = [];
   shelf.error = "";
-  ui.shelfTitle.textContent = `Pictures for scene ${scene.index + 1}`;
-  ui.shelfNote.textContent = "Every picture this video has drawn. Click one to "
-    + "put it on this scene — nothing is redrawn, so it is instant, and the "
-    + "picture you are replacing is kept here too.";
+  shelf.show = "all";
+  ui.shelfTitle.textContent = `Pictures and videos for scene ${scene.index + 1}`;
+  ui.shelfNote.textContent = "Every picture and video clip this video has made. "
+    + "Each one is labelled Picture or Video; point at a video to play it. Click "
+    + "one to put it on this scene — nothing is made again, so it is instant, "
+    + "and what you are replacing is kept here too.";
   ui.shelfStatus.textContent = "";
   ui.shelfGrid.innerHTML = "";
   ui.shelfModal.hidden = false;
@@ -1372,8 +1374,33 @@ async function fetchPictures() {
   }
 }
 
+/** All, pictures only, or videos only, with how many there are of each. The
+    videos of a long video are otherwise somewhere under dozens of pictures. */
+function drawShelfFilter() {
+  ui.shelfFilter.innerHTML = "";
+  const videos = shelf.pictures.filter(isVideoTile).length;
+  ui.shelfFilter.hidden = !shelf.pictures.length;
+  const choices = [
+    ["all", `All (${shelf.pictures.length})`],
+    ["picture", `Pictures (${shelf.pictures.length - videos})`],
+    ["video", `Videos (${videos})`],
+  ];
+  for (const [value, label] of choices) {
+    const one = document.createElement("button");
+    one.className = "btn small" + (shelf.show === value ? " primary" : "");
+    one.textContent = label;
+    one.dataset.show = value;
+    one.addEventListener("click", () => {
+      shelf.show = value;
+      drawShelf();
+    });
+    ui.shelfFilter.appendChild(one);
+  }
+}
+
 function drawShelf() {
   ui.shelfGrid.innerHTML = "";
+  drawShelfFilter();
   if (!shelf.pictures.length) {
     const empty = document.createElement("p");
     empty.className = "shelf-empty";
@@ -1381,7 +1408,7 @@ function drawShelf() {
       ? `Could not read this video's folder: ${shelf.error}`
       : shelf.loading
         ? "Looking through the folder…"
-        : "This video has no pictures on disk yet.";
+        : "This video has no pictures or videos on disk yet.";
     ui.shelfStatus.textContent = "";
     ui.shelfGrid.appendChild(empty);
     return;
@@ -1396,30 +1423,110 @@ function drawShelf() {
     (one) => one.in_use !== null && one.in_use !== undefined
       && one.in_use !== shelf.at);
 
-  for (const tile of [...mine, ...free, ...elsewhere]) {
+  const shown = [...mine, ...free, ...elsewhere].filter((tile) =>
+    shelf.show === "all" || (shelf.show === "video") === isVideoTile(tile));
+  for (const tile of shown) {
     ui.shelfGrid.appendChild(pictureTile(tile));
   }
+  if (!shown.length) {
+    const none = document.createElement("p");
+    none.className = "shelf-empty";
+    none.textContent = shelf.show === "video"
+      ? "This video has no video clips yet. Animate a picture and it shows up here."
+      : "This video has no pictures on disk.";
+    ui.shelfGrid.appendChild(none);
+  }
 
-  const spare = free.length;
-  ui.shelfStatus.textContent = spare
-    ? `${spare} picture${spare === 1 ? "" : "s"} not on the timeline.`
-    : "Every picture here is on the timeline.";
+  const count = (many, word) => `${many} ${word}${many === 1 ? "" : "s"}`;
+  const videos = free.filter(isVideoTile).length;
+  const stills = free.length - videos;
+  ui.shelfStatus.textContent = free.length
+    ? [stills ? count(stills, "picture") : "", videos ? count(videos, "video") : ""]
+      .filter(Boolean).join(" and ") + " not on the timeline."
+    : "Everything here is on the timeline.";
+}
+
+/** How a generated clip was made, "image" or "text", or "". The server
+    says; an older server that does not is read from the file name, which
+    carries the same thing. */
+function tileVideoMode(tile) {
+  if (tile.video_mode !== undefined) return tile.video_mode || "";
+  const named = /^wan-(image|text)-/i.exec(tile.material || "");
+  return named ? named[1].toLowerCase() : "";
+}
+
+function isVideoTile(tile) {
+  if (tile.media) return tile.media === "video";
+  // An older server: a picture is stored as a clip too, named by the digest
+  // of the image it was baked from, and that name is how to tell.
+  const name = String(tile.material || "");
+  if (/\.(png|jpe?g|webp|bmp)$/i.test(name)) return false;
+  return !/^[0-9a-f]{64}\./i.test(name);
+}
+
+/** What a tile is, in words: the label on its corner and the line under it. */
+function tileMedia(tile) {
+  if (!isVideoTile(tile)) return { label: "Picture", detail: "" };
+  const mode = tileVideoMode(tile);
+  if (mode === "image") return { label: "Video", detail: "animated picture" };
+  if (mode === "text") return { label: "Video", detail: "made from the prompt" };
+  return { label: "Video", detail: "footage" };
 }
 
 function pictureTile(tile) {
   const here = tile.in_use === shelf.at;
   const spare = tile.in_use === null || tile.in_use === undefined;
   const node = document.createElement("button");
-  node.className = "shelf-tile " + (here ? "in-use" : spare ? "free" : "");
+  const moving = isVideoTile(tile);
+  const media = tileMedia(tile);
+  node.className = "shelf-tile " + (here ? "in-use" : spare ? "free" : "")
+    + (moving ? " is-video" : " is-picture");
   node.dataset.material = tile.material;
+  node.dataset.media = moving ? "video" : "picture";
 
+  const frame = document.createElement("div");
+  frame.className = "shelf-frame";
   const shot = document.createElement("img");
   shot.className = "shelf-shot";
   shot.alt = "";
   // 大一点的那一帧：72 像素放大到一格的宽度全是糊的，而这一屏的全部意义
   // 就是让人认出画面。
   requestThumb({ url: tile.url, trim_start: 0 }, shot, 160);
-  node.appendChild(shot);
+  frame.appendChild(shot);
+
+  // Said in words on the picture itself: a still frame of a video looks
+  // exactly like the picture it was made from.
+  const badge = document.createElement("span");
+  badge.className = "shelf-media";
+  badge.textContent = moving ? "▶ Video" : "Picture";
+  frame.appendChild(badge);
+  node.appendChild(frame);
+
+  if (moving) {
+    // Pointing at a video plays it in place, silently: the motion is the
+    // thing being chosen, and one frame does not show it.
+    let playing = null;
+    node.addEventListener("mouseenter", () => {
+      if (playing) return;
+      playing = document.createElement("video");
+      playing.className = "shelf-shot shelf-playing";
+      playing.muted = true;
+      playing.loop = true;
+      playing.playsInline = true;
+      playing.preload = "auto";
+      playing.src = tile.url;
+      frame.insertBefore(playing, badge);
+      playing.play().catch(() => {});
+    });
+    node.addEventListener("mouseleave", () => {
+      if (!playing) return;
+      playing.pause();
+      playing.removeAttribute("src");
+      playing.load();
+      playing.remove();
+      playing = null;
+    });
+  }
 
   const meta = document.createElement("div");
   meta.className = "shelf-meta";
@@ -1435,7 +1542,7 @@ function pictureTile(tile) {
 
   const when = document.createElement("span");
   when.className = "shelf-when";
-  when.textContent = madeWhen(tile)
+  when.textContent = (media.detail ? `${media.detail} · ` : "") + madeWhen(tile)
     + (tile.variants > 1 ? ` · ${tile.variants} camera moves` : "");
   meta.appendChild(when);
 
@@ -1450,6 +1557,7 @@ function pictureTile(tile) {
   // 整段提示词和文件名在 tooltip 里：两张相似的图靠这个分得开，而把它排版
   // 到格子里会把这面墙撑散。
   node.title = [
+    media.detail ? `${media.label}: ${media.detail}` : media.label,
     tile.keyword || "",
     tile.image_style ? `Style: ${tile.image_style}` : "",
     tile.reference && tile.reference.page_url
@@ -1481,17 +1589,18 @@ function putPictureBack(tile) {
   const at = shelf.at;
   if (at < 0) return;
   closePictureShelf();
-  run("Putting that picture back", async () => {
+  const what = isVideoTile(tile) ? "video" : "picture";
+  run(`Putting that ${what} back`, async () => {
     const scene = await call("POST", `${scenePath(at)}/restore`,
       { material: tile.material });
     // 这一张当时是照哪句提示词画的。不自动盖掉框里的字——那是用户正在写的
     // 东西，而他要的只是那张图。说出来，让他自己决定。
     const was = scene && scene.restored_keyword;
     if (was && was !== (scene.keyword || "")) {
-      return `Scene ${at + 1} is back on that picture. It was drawn from: `
+      return `Scene ${at + 1} is back on that ${what}. It was made from: `
         + `"${was}" — the prompt box still has what you had.`;
     }
-    return `Scene ${at + 1} is back on that picture.`;
+    return `Scene ${at + 1} is back on that ${what}.`;
   });
 }
 
@@ -4855,11 +4964,11 @@ function drawInspector() {
   // 为什么它紧跟着那两个"重出"按钮：用户来这块面板最常做的事就是重出，而
   // 重出一次就盖掉一张。看过新的才知道旧的更好是常事，所以"回到旧的"必须
   // 和"再出一张"摆在一起——藏在别处的话，用户只会再点一次重出去赌。
-  const earlier = button("Earlier pictures…", "small",
+  const earlier = button("Earlier media…", "small",
     () => openPictureShelf(scene));
-  earlier.title = "Every picture this video has drawn, including the ones no "
-    + "scene is using any more. Putting one back is instant — the file is "
-    + "already on disk, so nothing is redrawn.";
+  earlier.title = "Every picture and video clip this video has made, including "
+    + "the ones no scene is using any more. Putting one back is instant — the "
+    + "file is already on disk, so nothing is made again.";
   // 不画图的两个小按钮并排成一行，和上面两块分开。
   const pair = document.createElement("div");
   pair.className = "insp-pair";
@@ -6622,7 +6731,7 @@ function videoSceneBox(scene) {
       + "every other scene you mark.";
   } else if (scene.video) {
     note.textContent = "This scene is a video clip. Its picture is kept: "
-      + "“Earlier pictures” puts it back.";
+      + "“Earlier media” puts it back.";
   } else {
     note.textContent = "Mark every scene that should move, then make them all "
       + `at once from the top bar. This one takes ${aboutTime(videoClipSeconds(scene))}.`;
