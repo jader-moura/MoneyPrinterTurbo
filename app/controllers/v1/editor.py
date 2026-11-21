@@ -1179,11 +1179,29 @@ def end_video_scenes(request: Request):
     "/tasks/{task_id}/video-scenes",
     summary="Make a video clip for every scene marked for one",
 )
-def start_video_scenes(request: Request, task_id: str = Path(..., description="Task ID")):
+def start_video_scenes(
+    request: Request,
+    task_id: str = Path(..., description="Task ID"),
+    everything: bool = Query(
+        False, description="Animate every still picture, not only the marked scenes"),
+):
     request_id = base.get_task_id(request)
     _require_task(task_id, request_id)
     return utils.get_response(
-        200, _handle(task_id, request_id, lambda: scene_video.start(task_id))
+        200,
+        _handle(task_id, request_id, lambda: scene_video.start(task_id, everything=everything)),
+    )
+
+
+@router.get(
+    "/tasks/{task_id}/video-scenes/pictures",
+    summary="Which scenes animating every picture would animate",
+)
+def read_video_pictures(request: Request, task_id: str = Path(..., description="Task ID")):
+    request_id = base.get_task_id(request)
+    _require_task(task_id, request_id)
+    return utils.get_response(
+        200, _handle(task_id, request_id, lambda: scene_video.pictures(task_id))
     )
 
 

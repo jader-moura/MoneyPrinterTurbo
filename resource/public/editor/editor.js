@@ -147,6 +147,7 @@ const ui = {
   videoList: el("video-list"), videoProgress: el("video-progress"),
   videoBar: el("video-bar"), videoPct: el("video-pct"),
   videoElapsed: el("video-elapsed"), videoCancel: el("video-cancel"),
+  animateAll: el("animate-all"),
   videoStart: el("video-start"), videoStop: el("video-stop"),
   videoDone: el("video-done"),
 };
@@ -6576,6 +6577,15 @@ function drawVideoButton() {
     ? "Pictures are still being drawn. Video scenes need the whole graphics "
       + "card, so wait for the queue to finish."
     : "Make a video clip for every scene you marked, one after another.";
+
+  const video = state.video || {};
+  ui.animateAll.hidden = EMBEDDED || !state.taskId || !(state.scenes || []).length
+    || video.available === false;
+  ui.animateAll.disabled = ui.videoScenes.disabled;
+  ui.animateAll.title = state.queue.busy
+    ? ui.videoScenes.title
+    : "Turn every still picture of this video into a moving clip, in one go. "
+      + "It asks first and says how long it takes.";
 }
 
 /** The box in a scene's panel where it is marked. Marking only saves the
@@ -6656,9 +6666,18 @@ function videoButtons(shown) {
 }
 
 /** Step one: say what is about to happen and how long it takes, and ask. */
-function askForVideoScenes() {
-  const marked = markedScenes();
+function askForVideoScenes(pictures) {
+  // `pictures` is the server's answer for "animate all": the scenes to add to
+  // the marked ones, and the ones it has to leave as pictures. Nothing is
+  // marked until Start, so "Not now" leaves the video exactly as it was.
+  const everything = !!(pictures && pictures.scenes);
+  state.videoEverything = everything;
+  const extra = new Set(everything ? pictures.scenes : []);
+  const marked = (state.scenes || [])
+    .filter((scene) => scene.animate || extra.has(scene.index))
+    .map((scene) => (scene.animate ? scene : { ...scene, animate: "image" }));
   if (!marked.length) return;
+  const skipped = (everything ? pictures.skipped || [] : []).map((one) => one.scene + 1);
   // The model is loaded once for every few clips of a kind (the server says
   // how many), and that takes a couple of minutes each time.
   const perGroup = (state.video && state.video.clips_per_group) || 4;
@@ -6673,7 +6692,13 @@ function askForVideoScenes() {
   ui.videoNote.textContent = `This takes ${aboutTime(total)}. Until it is done `
     + "the editor is locked and no pictures can be drawn: the video model needs "
     + "the whole graphics card. Each scene keeps its picture, so any of them "
-    + "can be put back afterwards.";
+    + "can be put back afterwards."
+    + (skipped.length
+      ? ` Scene${skipped.length === 1 ? "" : "s"} ${skipped.join(", ")} `
+        + `${skipped.length === 1 ? "stays a picture: it is" : "stay pictures: they are"} `
+        + "longer than a video scene can cover "
+        + `(${((state.video || {}).max_scene_seconds || 9.7).toFixed(1)}s).`
+      : "");
   drawVideoList(marked.map((scene) => ({
     what: `${scene.index + 1}. ${scene.keyword || ""}`,
     state: `${videoModeLabel(scene.animate)} · ${aboutTime(videoClipSeconds(scene))}`,
@@ -6786,7 +6811,23 @@ async function adoptVideoBatch() {
   if (video.running || (video.state && video.task_id === state.taskId)) watchVideoBatch();
 }
 
-ui.videoScenes.addEventListener("click", askForVideoScenes);
+ui.videoScenes.addEventListener("click", () => askForVideoScenes());
+ui.animateAll.addEventListener("click", async () => {
+  try {
+    await savePromptEdit();
+    const pictures = await call(
+      "GET", `/tasks/${encodeURIComponent(state.taskId)}/video-scenes/pictures`);
+    if (!pictures.scenes.length && !markedScenes().length) {
+      say((pictures.skipped || []).length
+        ? "No picture can be animated: every still scene is longer than a video scene can cover."
+        : "Every picture in this video is already a video scene.", "warn");
+      return;
+    }
+    askForVideoScenes(pictures);
+  } catch (error) {
+    say(String(error.message || error), "error");
+  }
+});
 ui.videoCancel.addEventListener("click", () => { ui.videoModal.hidden = true; });
 ui.videoStart.addEventListener("click", async () => {
   ui.videoStart.disabled = true;
@@ -6794,7 +6835,8 @@ ui.videoStart.addEventListener("click", async () => {
     // A prompt still being typed belongs to the clip made from it.
     await savePromptEdit();
     state.video = await call(
-      "POST", `/tasks/${encodeURIComponent(state.taskId)}/video-scenes`);
+      "POST", `/tasks/${encodeURIComponent(state.taskId)}/video-scenes`
+        + (state.videoEverything ? "?everything=true" : ""));
     drawVideoBatch(state.video);
     watchVideoBatch();
   } catch (error) {

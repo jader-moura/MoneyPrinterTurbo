@@ -207,6 +207,38 @@ def test_a_mark_can_be_taken_off_and_nothing_marked_starts_nothing(studio):
         scene_video.start(studio.task_id)
 
 
+def test_every_picture_is_animated_in_one_go(studio):
+    scenes = scenes_of(studio.task_id)
+    scenes[0]["duration"] = scene_video.max_scene_seconds() + 1
+    scene_manifest.save_scenes(studio.task_id, scenes)
+
+    # Asking what would happen changes nothing.
+    plan = scene_video.pictures(studio.task_id)
+    assert plan["scenes"] == [scene["index"] for scene in scenes[1:]]
+    assert [one["scene"] for one in plan["skipped"]] == [0]
+    assert "at most 9.7s" in plan["skipped"][0]["reason"]
+    assert not any("animate" in scene for scene in scenes_of(studio.task_id))
+
+    studio.gate.write_text("open")
+    scene_video.start(studio.task_id, everything=True)
+    wait_until(lambda: not scene_video.running(), what="the batch to end")
+    after = scenes_of(studio.task_id)
+    # The scene too long for a clip stays a picture; every other one moves.
+    assert "video" not in after[0]
+    assert all(scene["video"]["mode"] == "image" for scene in after[1:])
+    # Nothing is left to animate, and the finished ones are not done twice.
+    assert scene_video.pictures(studio.task_id)["scenes"] == []
+
+
+def test_animating_everything_keeps_a_choice_made_by_hand(studio):
+    scene_video.mark(studio.task_id, 0, "text")
+    assert 0 not in scene_video.pictures(studio.task_id)["scenes"]
+    studio.gate.write_text("open")
+    scene_video.start(studio.task_id, everything=True)
+    wait_until(lambda: not scene_video.running(), what="the batch to end")
+    assert scenes_of(studio.task_id)[0]["video"]["mode"] == "text"
+
+
 def test_nothing_can_be_edited_while_a_batch_runs(studio):
     scenes = scenes_of(studio.task_id)
     scenes[0]["keyword"] = "HOLD the door"

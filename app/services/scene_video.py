@@ -383,13 +383,58 @@ def mark(task_id: str, index: Any, mode: str) -> dict:
         return scene
 
 
+def pictures(task_id: str) -> dict:
+    """Which scenes "animate all pictures" would animate, and which it cannot.
+
+    Every still picture that is not already a video and not already marked. A
+    scene too long for a clip is left out and named, as it would be if it were
+    marked by hand. Maps and scenes with nothing drawn yet are not pictures to
+    animate and are passed over without a word.
+    """
+    params = scene_editor.load_params(task_id)
+    found, skipped = [], []
+    for scene in scene_editor._scenes_or_fail(task_id):
+        if scene.get("animate") in MODES or scene.get("video"):
+            continue
+        if (scene.get("direction") or {}).get("map"):
+            continue
+        if not str(scene.get("material") or "").strip():
+            continue
+        if not _still_of(task_id, scene):
+            continue
+        try:
+            _plan_clip(task_id, params, scene, "image")
+        except SceneError as exc:
+            skipped.append({"scene": int(scene.get("index", 0)), "reason": str(exc)})
+            continue
+        found.append(int(scene.get("index", 0)))
+    return {"scenes": found, "skipped": skipped}
+
+
+def _mark_pictures(task_id: str) -> int:
+    """Mark every picture `pictures` names, exactly as a mark by hand would."""
+    wanted = set(pictures(task_id)["scenes"])
+    with scene_editor._editing(task_id):
+        scenes = scene_editor._scenes_or_fail(task_id)
+        for scene in scenes:
+            if int(scene.get("index", -1)) in wanted and scene.get("animate") not in MODES:
+                scene["animate"] = "image"
+        if wanted:
+            scene_manifest.save_scenes(task_id, scenes)
+    return len(wanted)
+
+
 # ---------------------------------------------------------------------------
 # Running it
 # ---------------------------------------------------------------------------
 
 
-def start(task_id: str) -> dict:
-    """Start one batch for every marked scene of this task."""
+def start(task_id: str, everything: bool = False) -> dict:
+    """Start one batch for every marked scene of this task.
+
+    With `everything`, every still picture is marked first, so the batch
+    animates the whole video in one go.
+    """
     global _BATCH
     scene_editor._require_idle(task_id)
     state = availability()
@@ -406,6 +451,8 @@ def start(task_id: str) -> dict:
             "before making video scenes"
         )
 
+    if everything:
+        _mark_pictures(task_id)
     params = scene_editor.load_params(task_id)
     scenes = scene_editor._scenes_or_fail(task_id)
     marked = [scene for scene in scenes if scene.get("animate") in MODES]
