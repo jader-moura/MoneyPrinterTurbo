@@ -69,6 +69,11 @@ MIN_FRAMES = 17
 #: How far a clip may be slowed to cover its scene. At 2x a five-second clip
 #: covers ten; slower than that reads as slow motion rather than as footage.
 MAX_STRETCH = 2.0
+# The other way: a clip longer than its scene can be played up to this much
+# faster so that all of it is seen. Faster than that reads as a fault.
+MAX_SPEED_UP = 2.0
+# A clip this close to its scene's length already fits.
+FITS_WITHIN = 0.4
 #: The frame rate clips are delivered at, which is the renderer's own.
 OUT_FPS = 30
 #: Close to 480p in each shape, in multiples of 16 as the model requires.
@@ -717,20 +722,28 @@ def _parse(line: str) -> Optional[dict]:
 
 
 def _fit(raw: str, target: str, needed: float, frames: int) -> None:
-    """The drawn clip, slowed to cover its scene and brought to 30 fps.
+    """The drawn clip, slowed to cover its scene and brought to 30 fps."""
+    _slow(raw, target, max(1.0, (needed + SPARE_SECONDS) / _motion_seconds(frames)))
+
+
+def _slow(raw: str, target: str, factor: float, start: float = 0.0) -> None:
+    """A copy of `raw` from `start` on, `factor` times slower, silent, at 30 fps.
 
     Motion interpolation rather than repeating frames: 16 fps slowed to cover
     an eight-second scene is 10 fps, which stutters. A build of ffmpeg without
     the filter falls back to repeating frames instead of losing the clip.
     """
-    factor = max(1.0, (needed + SPARE_SECONDS) / _motion_seconds(frames))
     slow = f"setpts={factor:.5f}*PTS,"
     smooth = f"minterpolate=fps={OUT_FPS}:mi_mode=mci:mc_mode=aobmc:me_mode=bidir:vsbmc=1"
     part = target + ".part.mp4"
     last = ""
-    for motion in (smooth, f"fps={OUT_FPS}"):
+    seek = ["-ss", f"{start:.3f}"] if start > 0 else []
+    # Played faster there are frames to spare, so none need to be invented.
+    motions = (smooth, f"fps={OUT_FPS}") if factor > 1.0 else (f"fps={OUT_FPS}",)
+    for motion in motions:
         done = subprocess.run(
-            [utils.get_ffmpeg_binary(), "-v", "error", "-y", "-i", raw, "-vf", slow + motion,
+            [utils.get_ffmpeg_binary(), "-v", "error", "-y", *seek, "-i", raw,
+             "-vf", slow + motion,
              "-an", "-c:v", "libx264", "-preset", "medium", "-crf", "16",
              "-pix_fmt", "yuv420p", part],
             stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
@@ -741,6 +754,157 @@ def _fit(raw: str, target: str, needed: float, frames: int) -> None:
             return
         last = done.stderr.decode("utf-8", "replace")[-300:]
     raise SceneError(f"ffmpeg could not prepare the clip: {last}")
+
+
+# ---------------------------------------------------------------------------
+# A clip of the user's own
+# ---------------------------------------------------------------------------
+
+
+def silence(path: str) -> bool:
+    """Take the sound off a video file, in place. True when it had any.
+
+    The finished video never carries a clip's own sound, so a clip brought in
+    from elsewhere should not carry one into the editor either. The picture is
+    copied as it is, not encoded again.
+    """
+    ffmpeg = utils.get_ffmpeg_binary()
+    quiet = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+    seen = subprocess.run(
+        [ffmpeg, "-hide_banner", "-i", path], stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE, creationflags=quiet,
+    ).stderr.decode("utf-8", "replace")
+    if "Audio:" not in seen:
+        return False
+    stem, suffix = os.path.splitext(path)
+    part = f"{stem}.silent{suffix}"
+    done = subprocess.run(
+        [ffmpeg, "-v", "error", "-y", "-i", path, "-map", "0:v:0", "-c", "copy", "-an", part],
+        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, creationflags=quiet,
+    )
+    if done.returncode != 0 or not os.path.isfile(part):
+        try:
+            os.remove(part)
+        except OSError:
+            pass
+        logger.warning(
+            f"could not take the sound off {os.path.basename(path)}: "
+            f"{done.stderr.decode('utf-8', 'replace')[-200:]}")
+        return False
+    os.replace(part, path)
+    return True
+
+
+def _own_clip(task_id: str, scene: dict) -> str:
+    """The scene's video file when it is footage of the user's own, else ""."""
+    name = scene_manifest.material_key(scene.get("material"))
+    if not name or scene.get("video"):
+        return ""
+    from app.services import picture_shelf
+
+    if picture_shelf.media_of(name) != "video" or picture_shelf.generated_mode(name):
+        return ""
+    try:
+        return scene_manifest.resolve_material(task_id, name)
+    except SceneError:
+        return ""
+
+
+def fit_own_clip(task_id: str, index: Any, *, faster: bool = True) -> dict:
+    """Make a clip the user brought in last exactly as long as its scene.
+
+    A clip that is too short is slowed, the treatment a generated clip gets:
+    by up to MAX_STRETCH with the frames in between synthesised, so a
+    four-second clip can hold a scene of up to eight. A clip that is too long
+    is played faster, by up to MAX_SPEED_UP, so all of it is seen instead of
+    being cut off where the scene ends; `faster=False` leaves a long clip
+    alone, which is what an upload does, since cutting it is a fair default
+    and speeding it up is a choice.
+
+    The fitted copy is a new file; the original stays in the scene's history,
+    and a second fitting (after the scene's length changes) starts from the
+    original again.
+
+    Returns the scene with `fit`: {"changed", "factor", "seconds", "short",
+    "cut", "spare"}. `short` is how much of the scene is still uncovered at
+    the slowest, `cut` how much of the clip is still lost at the fastest, and
+    `spare` how much longer than its scene an untouched clip is.
+    """
+    scene_editor._require_idle(task_id)
+    with scene_editor._editing(task_id):
+        scenes = scene_editor._scenes_or_fail(task_id)
+        position = scene_editor._scene_at(scenes, index)
+        candidate = dict(scenes[position])
+    number = position + 1
+    current = _own_clip(task_id, candidate)
+    if not current:
+        raise SceneError(
+            f"scene {number} is not a video clip of your own; only an uploaded "
+            "or stock clip can be slowed to fit")
+
+    # Start from the original when this is already a slowed copy of it.
+    source, start = current, float(scene_manifest.scene_timing(candidate)["trim_start"] or 0)
+    fitted = candidate.get("fitted") or {}
+    if fitted.get("from"):
+        try:
+            source, start = scene_manifest.resolve_material(task_id, fitted["from"]), 0.0
+        except SceneError:
+            pass
+
+    timing = scene_manifest.scene_timing(candidate)
+    nothing = {"changed": False, "factor": 1.0, "seconds": 0.0, "short": 0.0,
+               "cut": 0.0, "spare": 0.0}
+    if timing["duration"] is None:
+        # No length of its own: the scene simply lasts as long as the clip.
+        return {**candidate, "fit": nothing}
+    speed = float(getattr(scene_editor.load_params(task_id), "video_clip_speed", 1.0) or 1.0)
+    needed = float(timing["duration"]) * max(speed, 1e-6)
+    have = max(0.0, timeline.probe_duration(source) - start)
+    if have <= 0.05:
+        raise SceneError(f"scene {number}'s clip is too short to slow down")
+    # Judged on what the scene plays now, which may already be a fitted copy.
+    playing = max(0.0, timeline.probe_duration(current) - float(timing["trim_start"] or 0))
+    longer = playing - needed
+    if -0.02 <= longer <= FITS_WITHIN or (longer > 0 and not faster):
+        return {**candidate, "fit": {
+            **nothing, "seconds": round(playing, 3), "spare": round(max(0.0, longer), 3)}}
+
+    factor = min(MAX_STRETCH, max(1.0 / MAX_SPEED_UP, (needed + SPARE_SECONDS) / have))
+    if factor < 1.0 and not faster:
+        factor = 1.0
+    target = os.path.join(
+        utils.task_dir(task_id),
+        f"fit-{os.path.splitext(os.path.basename(source))[0][:24]}-{int(time.time() * 1000)}.mp4")
+    _slow(source, target, factor, start)
+    made = timeline.probe_duration(target)
+
+    with scene_editor._editing(task_id):
+        scenes = scene_editor._scenes_or_fail(task_id)
+        position = scene_editor._locate_scene(
+            scenes, position, scene_manifest.scene_id(candidate))
+        scene = scenes[position]
+        if scene_manifest.material_key(scene.get("material")) != (
+                scene_manifest.material_key(current)):
+            try:
+                os.remove(target)
+            except OSError:
+                pass
+            raise SceneError(f"scene {number} changed while its clip was being slowed")
+        scene_manifest.remember_material(scene)
+        scene["material"] = target
+        scene["kind"] = "video"
+        scene["fitted"] = {
+            "file": os.path.basename(target), "from": os.path.basename(source)}
+        scene.pop("trim_start", None)
+        scene["locked"] = True
+        scene_manifest.save_scenes(task_id, scenes)
+        logger.info(
+            f"scene {number} of {task_id}: clip slowed {factor:.2f}x to {made:.2f}s "
+            f"for a {needed:.2f}s scene")
+        return {**scene, "fit": {
+            "changed": True, "factor": round(factor, 3), "seconds": round(made, 3),
+            "short": round(max(0.0, needed - made), 3),
+            "cut": round(max(0.0, made - needed - FITS_WITHIN), 3), "spare": 0.0}}
 
 
 def _finish_clip(batch: _Batch, clip: dict) -> None:

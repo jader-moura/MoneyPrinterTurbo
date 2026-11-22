@@ -1722,13 +1722,34 @@ def upload_scene_material(
     scene. What the scene showed before is kept and can be put back."""
     request_id = base.get_task_id(request)
     _require_task(task_id, request_id)
-    _handle(
+    placed = _handle(
         task_id,
         request_id,
         lambda: scene_editor.upload_material(
             task_id, index, file.filename or "", file.file),
     )
-    return utils.get_response(200, _scene_payload(task_id, index))
+    answer = dict(_scene_payload(task_id, index))
+    answer["fit"] = placed.get("fit")
+    return utils.get_response(200, answer)
+
+
+@router.post(
+    "/tasks/{task_id}/scenes/{index}/fit",
+    response_model=SceneResponse,
+    summary="Slow a scene's own video clip so that it covers the scene",
+)
+def fit_scene_clip(
+    request: Request,
+    task_id: str = Path(..., description="Task ID"),
+    index: int = Path(..., ge=0, description="Scene index"),
+):
+    request_id = base.get_task_id(request)
+    _require_task(task_id, request_id)
+    fitted = _handle(
+        task_id, request_id, lambda: scene_video.fit_own_clip(task_id, index))
+    answer = dict(_scene_payload(task_id, index))
+    answer["fit"] = fitted.get("fit")
+    return utils.get_response(200, answer)
 
 
 @router.get(

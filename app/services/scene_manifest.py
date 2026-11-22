@@ -384,6 +384,18 @@ def _normalise_scene(raw: Any, index: int) -> dict:
     kept_video = video_record(record.get("video"), path)
     if kept_video:
         scene["video"] = kept_video
+    # This scene's clip is a slowed copy of another file of the task, made to
+    # cover the scene. Kept only while the scene shows that copy, so a second
+    # fitting starts from the original and not from the slowed one.
+    fitted = record.get("fitted")
+    if (
+        isinstance(fitted, Mapping)
+        and path
+        and material_key(fitted.get("file")) == material_key(path)
+        and material_key(fitted.get("from"))
+    ):
+        scene["fitted"] = {
+            "file": material_key(path), "from": material_key(fitted.get("from"))}
     # 用户亲手改过这一段的台词。按"有才带"处理，理由同上。
     #
     # 为什么要记：台词平时是按时间算出来的（这段画面播放时真正会念到的那

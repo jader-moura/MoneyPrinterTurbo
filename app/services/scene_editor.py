@@ -1263,7 +1263,17 @@ def upload_material(task_id: str, index: Any, filename: str, source: Any) -> dic
         raise SceneError(f"the file could not be saved: {exc}") from exc
     staged = os.path.join(material_upload.uploaded_material_dir(), stored)
     try:
-        return replace_material(task_id, index, staged)
+        scene = replace_material(task_id, index, staged)
+        if scene.get("kind") != "video":
+            return scene
+        from app.services import scene_video
+
+        # A clip from elsewhere usually has sound and is rarely the scene's
+        # length. Neither should be the user's problem: the sound comes off
+        # (the finished video never uses it), and a clip that is too short is
+        # slowed to cover the scene, as a generated one is.
+        scene_video.silence(scene["material"])
+        return scene_video.fit_own_clip(task_id, index, faster=False)
     finally:
         # The task has its own copy now; the staged one would only pile up.
         try:

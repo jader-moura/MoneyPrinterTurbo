@@ -4991,6 +4991,24 @@ function drawInspector() {
   }
   ui.inspBody.appendChild(pair);
   ui.inspBody.appendChild(files);
+  const misfit = clipMisfit(scene);
+  if (misfit) {
+    const row = document.createElement("div");
+    row.className = "insp-pair";
+    const fit = button(
+      misfit === "short" ? "Slow the clip to fit this scene"
+        : "Speed the clip up to fit this scene",
+      "small", () => fitSceneClip(scene));
+    fit.title = misfit === "short"
+      ? "This clip ends before the scene does. Slows it, by up to half speed, "
+        + "with the frames in between filled in, so it covers the scene. The "
+        + "original stays under “Earlier media”."
+      : "This clip is longer than the scene, so its end is cut off. Plays it "
+        + "faster, by up to double speed, so all of it fits. The original "
+        + "stays under “Earlier media”.";
+    row.appendChild(fit);
+    ui.inspBody.appendChild(row);
+  }
 
   // 这一段已经排着了就说出来。不说的话，用户点完看不出任何变化，只会
   // 再点一次——然后同一段画面被重出两遍。
@@ -5579,6 +5597,7 @@ function syncPreview(force) {
     // 就黑一下。所以先把眼下这一帧留在上面，新的一帧出来了再撤。
     holdCurrentFrame();
     const swap = ++clipSwap;
+    ui.preview.muted = true;
     ui.preview.src = scene.url;
     // 元数据到位之前 currentTime 写不进去，所以等一次 loadedmetadata。
     ui.preview.addEventListener("loadedmetadata", () => {
@@ -6614,14 +6633,62 @@ ui.renderPlay.addEventListener("click", () => {
   window.open(state.renderedVideo, "_blank", "noopener");
 });
 
+/** What fitting a clip to its scene came to, as a sentence (or ""). */
+function fitNote(fit) {
+  if (!fit) return "";
+  if (!fit.changed) {
+    return fit.spare > 0.4
+      ? ` The clip is ${fit.spare.toFixed(1)}s longer than the scene, so its end is `
+        + "cut off; “Speed the clip up to fit” plays all of it."
+      : "";
+  }
+  const pace = Math.round(100 / fit.factor);
+  if (fit.factor < 1) {
+    return ` It was sped up to ${pace}% speed so the whole clip plays in the scene`
+      + (fit.cut > 0.05
+        ? `, which is as fast as it goes; the last ${fit.cut.toFixed(1)}s are still cut off.`
+        : ".");
+  }
+  return ` It was slowed to ${pace}% speed to cover the scene`
+    + (fit.short > 0.05
+      ? `, which is as slow as it goes; the scene is still ${fit.short.toFixed(1)}s `
+        + "longer than the clip, so shorten the scene."
+      : ".");
+}
+
+/** How an uploaded clip misses its scene's length: "short" (it ends before
+    the scene does), "long" (its end is cut off), or "" when it fits. Only for
+    clips the user brought in: stock footage is always longer than its scene,
+    and which part of it shows is chosen by trimming. */
+function clipMisfit(scene) {
+  if (scene.kind !== "video" || scene.video || scene.duration == null) return "";
+  if (scene.source !== "local") return "";
+  if (/^(wan-(image|text)-|[0-9a-f]{64}\.)/i.test(String(scene.material || "")
+    .split(/[\\/]/).pop())) return "";
+  const have = Number(scene.source_duration || 0) - Number(scene.trim_start || 0);
+  if (have <= 0) return "";
+  const need = scene.duration * state.speed;
+  if (need > have + 0.05) return "short";
+  return have > need + 0.4 ? "long" : "";
+}
+
+function fitSceneClip(scene) {
+  const at = scene.index;
+  run("Fitting the clip to the scene", async () => {
+    const fitted = await call("POST", scenePath(at) + "/fit");
+    return fitNote(fitted && fitted.fit).trim()
+      || `Scene ${at + 1}'s clip already fits the scene.`;
+  });
+}
+
 /** Put the user's own picture or video on a scene. */
 function uploadSceneFile(scene) {
   const at = scene.index;
   pickFile("image/png,image/jpeg,image/bmp,video/*", (file) => {
     run(`Uploading ${file.name}`, async () => {
-      await upload(scenePath(at) + "/upload", file);
-      return `Scene ${at + 1} now shows ${file.name}. What it showed before is `
-        + "under “Earlier media”.";
+      const placed = await upload(scenePath(at) + "/upload", file);
+      return `Scene ${at + 1} now shows ${file.name}.${fitNote(placed && placed.fit)} `
+        + "What it showed before is under “Earlier media”.";
     });
   });
 }

@@ -404,9 +404,12 @@ def test_your_own_picture_or_video_goes_on_a_scene_and_the_old_one_is_kept(
     staging.mkdir()
     monkeypatch.setattr(
         material_upload, "uploaded_material_dir", lambda create=True: str(staging))
-    before = os.path.basename(scenes_of(studio.task_id)[0]["material"])
+    scenes = scenes_of(studio.task_id)
+    scenes[0]["duration"] = 0.9
+    scene_manifest.save_scenes(studio.task_id, scenes)
+    before = os.path.basename(scenes[0]["material"])
 
-    # A clip made somewhere else.
+    # A clip made somewhere else, long enough for its scene.
     clip = tmp_path / "from flow.mp4"
     subprocess.run(
         [utils.get_ffmpeg_binary(), "-v", "error", "-y", "-f", "lavfi", "-i",
@@ -434,3 +437,104 @@ def test_your_own_picture_or_video_goes_on_a_scene_and_the_old_one_is_kept(
     with pytest.raises(scene_manifest.SceneError):
         scene_editor.upload_material(studio.task_id, 1, "notes.mp4", io.BytesIO(b"not a video"))
     assert scenes_of(studio.task_id)[1]["material"] == scene["material"]
+
+
+def test_an_uploaded_clip_loses_its_sound_and_is_slowed_to_cover_its_scene(
+        studio, tmp_path, monkeypatch):
+    import subprocess
+
+    from app.services import material_upload, timeline
+    from app.utils import utils
+
+    staging = tmp_path / "uploads"
+    staging.mkdir()
+    monkeypatch.setattr(
+        material_upload, "uploaded_material_dir", lambda create=True: str(staging))
+    ffmpeg = utils.get_ffmpeg_binary()
+
+    def has_sound(path):
+        seen = subprocess.run([ffmpeg, "-hide_banner", "-i", path],
+                              capture_output=True, text=True).stderr
+        return "Audio:" in seen
+
+    def set_length(index, seconds):
+        scenes = scenes_of(studio.task_id)
+        scenes[index]["duration"] = seconds
+        scene_manifest.save_scenes(studio.task_id, scenes)
+
+    clip = tmp_path / "loud.mp4"
+    subprocess.run(
+        [ffmpeg, "-v", "error", "-y", "-f", "lavfi", "-i",
+         "testsrc=size=160x90:rate=24:duration=2", "-f", "lavfi", "-i",
+         "sine=frequency=440:duration=2", "-pix_fmt", "yuv420p", "-shortest", str(clip)],
+        check=True)
+    assert has_sound(str(clip))
+
+    # A three-second scene and a two-second clip: slowed to cover it.
+    set_length(0, 3.0)
+    with open(clip, "rb") as handle:
+        scene = scene_editor.upload_material(studio.task_id, 0, clip.name, handle)
+    assert scene["fit"]["changed"] and scene["fit"]["short"] == 0
+    assert 1.5 < scene["fit"]["factor"] <= 1.6
+    assert timeline.probe_duration(scene["material"]) >= 3.0
+    assert not has_sound(scene["material"])
+    # The clip as it was brought in is kept, silent, to go back to.
+    original = scene["fitted"]["from"]
+    assert original in [entry["material"] for entry in scene["history"]]
+    folder = os.path.dirname(scene["material"])
+    assert not has_sound(os.path.join(folder, original))
+
+    # The scene is made longer: fitting again starts from the original, and
+    # stops at half speed, saying how much is still uncovered.
+    set_length(0, 6.0)
+    again = scene_video.fit_own_clip(studio.task_id, 0)
+    assert again["fitted"]["from"] == original
+    assert again["fit"]["factor"] == 2.0 and again["fit"]["short"] > 1.5
+    assert 3.7 < timeline.probe_duration(again["material"]) < 4.3
+
+    # A picture is not a clip to slow down.
+    with pytest.raises(scene_manifest.SceneError, match="not a video clip of your own"):
+        scene_video.fit_own_clip(studio.task_id, 1)
+
+
+def test_a_clip_longer_than_its_scene_can_be_sped_up_to_fit_but_only_when_asked(
+        studio, tmp_path, monkeypatch):
+    import subprocess
+
+    from app.services import material_upload, timeline
+    from app.utils import utils
+
+    staging = tmp_path / "uploads"
+    staging.mkdir()
+    monkeypatch.setattr(
+        material_upload, "uploaded_material_dir", lambda create=True: str(staging))
+    clip = tmp_path / "long.mp4"
+    subprocess.run(
+        [utils.get_ffmpeg_binary(), "-v", "error", "-y", "-f", "lavfi", "-i",
+         "testsrc=size=160x90:rate=24:duration=3", "-pix_fmt", "yuv420p", str(clip)],
+        check=True)
+    scenes = scenes_of(studio.task_id)
+    scenes[0]["duration"] = 2.0
+    scene_manifest.save_scenes(studio.task_id, scenes)
+
+    # Uploading leaves a long clip as it is, and says how much is cut off.
+    with open(clip, "rb") as handle:
+        scene = scene_editor.upload_material(studio.task_id, 0, clip.name, handle)
+    assert not scene["fit"]["changed"] and 0.9 < scene["fit"]["spare"] < 1.1
+    assert "fitted" not in scene
+    original = os.path.basename(scene["material"])
+
+    # Asked to, it is played faster so all of it is seen.
+    fitted = scene_video.fit_own_clip(studio.task_id, 0)
+    assert fitted["fit"]["changed"] and 0.7 < fitted["fit"]["factor"] < 0.75
+    assert fitted["fit"]["cut"] == 0 and fitted["fitted"]["from"] == original
+    assert 2.0 <= timeline.probe_duration(fitted["material"]) < 2.4
+    # It fits now: asking again changes nothing.
+    assert not scene_video.fit_own_clip(studio.task_id, 0)["fit"]["changed"]
+
+    # Double speed is the limit; past it the end is still cut, and says so.
+    scenes = scenes_of(studio.task_id)
+    scenes[0]["duration"] = 1.0
+    scene_manifest.save_scenes(studio.task_id, scenes)
+    most = scene_video.fit_own_clip(studio.task_id, 0)
+    assert most["fit"]["factor"] == 0.5 and most["fit"]["cut"] > 0
