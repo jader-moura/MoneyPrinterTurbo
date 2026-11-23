@@ -61,7 +61,6 @@ def test_legacy_azure_labels_are_still_normalized(label, expected):
 def test_provider_label_handlers_still_remove_display_suffixes(tmp_path):
     cases = [
         ("siliconflow:FunAudioLLM/CosyVoice2-0.5B:alex-Male", "siliconflow_tts", 2, "FunAudioLLM/CosyVoice2-0.5B:alex"),
-        ("kokoro:af_heart-Female", "kokoro_tts", 1, "af_heart"),
         ("chatterbox:default-Female", "chatterbox_tts", 1, "default"),
         ("gemini:Kore-Female", "gemini_tts", 1, "Kore"),
     ]

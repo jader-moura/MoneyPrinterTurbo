@@ -290,63 +290,6 @@ def get_chatterbox_voices() -> list[str]:
     return result
 
 
-KOKORO_DEFAULT_VOICE = "af_heart"
-
-
-def _normalize_kokoro_voices(entries) -> list[str]:
-    """统一手工配置与服务端新旧格式，只接收真实 ID，避免把对象转成音色名。"""
-    if isinstance(entries, str):
-        entries = entries.split(",")
-    if not isinstance(entries, list):
-        return []
-    result = []
-    for entry in entries:
-        name = entry.get("id") if isinstance(entry, dict) else entry
-        if not isinstance(name, str):
-            continue
-        name = name.strip().removeprefix("kokoro:").strip()
-        if name:
-            value = f"kokoro:{name}"
-            if value not in result:
-                result.append(value)
-    return result
-
-
-def get_kokoro_voices(*, fallback: bool = True) -> list[str]:
-    """手工音色优先，否则查询服务器；UI 可禁用默认值以识别断线并保留选择。
-
-    旧版服务器返回字符串列表，新版返回包含 id 的对象列表。失败时不在服务层
-    缓存会话状态；由 WebUI 保留上次成功目录，避免不同用户/端点互相污染。
-    """
-    voices = _normalize_kokoro_voices(config.kokoro.get("voices"))
-    if not voices:
-        base_url = (config.kokoro.get("base_url", "") or "").strip().rstrip("/")
-        if base_url:
-            try:
-                headers = {}
-                api_key = config.kokoro.get("api_key", "")
-                if api_key:
-                    headers["Authorization"] = f"Bearer {api_key}"
-                response = trace_http_call(
-                    "GET", requests.get,
-                    f"{base_url}/audio/voices", headers=headers, timeout=5
-                )
-                if response.status_code == 200:
-                    data = response.json()
-                    listed = data.get("voices", []) if isinstance(data, dict) else data
-                    voices = _normalize_kokoro_voices(listed)
-                    if not voices:
-                        logger.warning("kokoro voice list contains no valid voice IDs")
-                else:
-                    logger.warning(
-                        f"kokoro voices request failed with status {response.status_code}"
-                    )
-            except Exception as e:
-                # 不输出 URL/异常正文，避免自托管地址的查询参数或认证信息进入日志。
-                logger.warning(f"kokoro voice list unavailable ({type(e).__name__})")
-    return voices or ([f"kokoro:{KOKORO_DEFAULT_VOICE}"] if fallback else [])
-
-
 def get_fish_audio_voices() -> list[str]:
     """Return configured Fish Audio voices.
 
@@ -456,36 +399,11 @@ LANGUAGE_NAMES = {
 }
 
 
-# Kokoro 的音色名是两个字母加下划线：第一个是语言，第二个是性别。
-# ``af_heart`` 是 American Female，``zm_yunxi`` 是 Mandarin Male。所以这里
-# 只能看第一个字母——把 ``af`` 当成 Afrikaans 是刚好会"看起来对"的那种错。
-KOKORO_LANGUAGE_LETTERS = {
-    "a": "en",  # American English
-    "b": "en",  # British English
-    "e": "es",
-    "f": "fr",
-    "h": "hi",
-    "i": "it",
-    "j": "ja",
-    "p": "pt",  # Brazilian Portuguese
-    "z": "zh",  # Mandarin
-}
-
-
-def _kokoro_language(name: str) -> str:
-    """``kokoro:af_heart`` -> ``en``。不是那个形状就返回空字符串。"""
-    body = name.split(":", 1)[1].strip().lower()
-    if len(body) < 3 or body[2] != "_" or not body[:2].isalpha():
-        return ""
-    return KOKORO_LANGUAGE_LETTERS.get(body[0], "")
-
-
 def gender_of(voice_name: str) -> str:
     """``"female"``、``"male"``，或者认不出来时的空字符串。
 
-    两种写法：Azure 和 Chatterbox 把它放在名字末尾（``-Female``），Kokoro
-    放在第二个字母里（``af_heart`` 的 ``f``，``am_puck`` 的 ``m``）。后者
-    在界面上是看不出来的，而"这是男声还是女声"是挑音色时第一个要问的问题。
+    Azure 和 Chatterbox 把它放在名字末尾（``-Female``）。"这是男声还是女声"
+    是挑音色时第一个要问的问题。
     """
     name = str(voice_name or "").strip()
     if not name:
@@ -495,26 +413,19 @@ def gender_of(voice_name: str) -> str:
         return "female"
     if lowered.endswith("-male"):
         return "male"
-    if lowered.startswith("kokoro:"):
-        body = lowered.split(":", 1)[1]
-        if len(body) >= 3 and body[2] == "_" and body[:2].isalpha():
-            return {"f": "female", "m": "male"}.get(body[1], "")
     return ""
 
 
 def language_of(voice_name: str) -> str:
     """``en-US-AvaNeural-Female`` -> ``en``。认不出来就返回空字符串。
 
-    两套命名：Azure 那种 ``语言-地区-...``，以及 Kokoro 那种
-    ``kokoro:af_heart``（两个字母分别是语言和性别）。别家 provider 的名字
+    只认 Azure 那种 ``语言-地区-...``。别家 provider 的名字
     里确实没有语言（``minimax:male-qn-qingse``、``elevenlabs:id:Name``），
     那就返回空的，由调用方决定怎么排——瞎猜一个比不猜更糟。
     """
     name = str(voice_name or "").strip()
     if not name:
         return ""
-    if name.lower().startswith("kokoro:"):
-        return _kokoro_language(name)
     if ":" in name:
         return ""
     head = name.split("-", 1)[0].lower()
@@ -623,10 +534,6 @@ def is_chatterbox_voice(voice_name: str) -> bool:
     return (voice_name or "").startswith("chatterbox:")
 
 
-def is_kokoro_voice(voice_name: str) -> bool:
-    return (voice_name or "").startswith("kokoro:")
-
-
 def is_fish_audio_voice(voice_name: str) -> bool:
     return (voice_name or "").startswith("fish_audio:")
 
@@ -656,7 +563,7 @@ def is_azure_v1_voice(voice_name: str | None) -> bool:
     检查是否属于 Azure TTS v1 (Edge TTS) 预置声音。
 
     第一版停顿标签（[pause: ...]）的分段合成链路仅针对 Edge TTS (Azure TTS v1)，
-    避免改变 Gemini、Fish Audio、SiliconFlow、Kokoro 等其他提供商的请求计费、频次与默认行为。
+    避免改变 Gemini、Fish Audio、SiliconFlow 等其他提供商的请求计费、频次与默认行为。
     """
     if not voice_name:
         return False
@@ -676,8 +583,6 @@ def is_azure_v1_voice(voice_name: str | None) -> bool:
     if is_elevenlabs_voice(name):
         return False
     if is_chatterbox_voice(name):
-        return False
-    if is_kokoro_voice(name):
         return False
     if is_fish_audio_voice(name):
         return False
@@ -906,19 +811,6 @@ def _single_tts(
         else:
             logger.error(f"Invalid chatterbox voice name format: {voice_name}")
             return None
-    elif is_kokoro_voice(voice_name):
-        # 格式: kokoro:<voice>，voice 可带显示用的 -Female/-Male 后缀
-        parts = voice_name.split(":", 1)
-        if len(parts) >= 2 and parts[1].strip():
-            kokoro_voice = parts[1].strip()
-            if kokoro_voice.endswith(("-Female", "-Male")):
-                kokoro_voice = kokoro_voice.rsplit("-", 1)[0]
-            return kokoro_tts(
-                text, kokoro_voice, voice_file, voice_rate, voice_volume
-            )
-        else:
-            logger.error(f"Invalid kokoro voice name format: {voice_name}")
-            return None
     elif is_fish_audio_voice(voice_name):
         parts = voice_name.split(":")
         reference_id = parts[1] if len(parts) >= 2 else "default"
@@ -946,12 +838,12 @@ def _single_tts(
 
     # 兜底分支是 Edge TTS（Azure v1）——这是项目最早唯一的 Provider。现在
     # 自托管 Provider 都靠前缀识别，一个丢了前缀的名字（例如把
-    # "kokoro:af_heart" 写成 "af_heart"）会从这里静默发往微软的在线服务。
+    # "chatterbox:default" 写成 "default"）会从这里静默发往微软的在线服务。
     # 本地链路不应该出现这种隐式联网，因此先确认名字确实是 Edge 音色。
     #
     # The catch-all here is Edge TTS, which was once the only provider. Now
     # that the self-hosted ones are recognised by prefix, a name that lost its
-    # prefix — "af_heart" instead of "kokoro:af_heart" — would reach Microsoft
+    # prefix — "default" instead of "chatterbox:default" — would reach Microsoft
     # as a silent network call on what the user set up as an offline pipeline.
     # Edge voice names are always "<locale>-<Name>Neural", so a name that is
     # not one is a mistake worth naming rather than a request to go online.
@@ -959,8 +851,8 @@ def _single_tts(
         logger.error(
             f'unknown voice name "{voice_name}": it matches no TTS provider. '
             "Edge TTS voices look like en-US-AvaNeural; a self-hosted voice "
-            "needs its provider prefix, for example kokoro:af_heart, "
-            "chatterbox:default or voxcpm:<id>."
+            "needs its provider prefix, for example chatterbox:default "
+            "or voxcpm:<id>."
         )
         return None
     return azure_tts_v1(text, voice_name, voice_rate, voice_file)
@@ -1464,12 +1356,11 @@ def _record_narration(
             voxcpm_prompt_text=voxcpm_prompt_text,
         )
 
-    # 脚本包含停顿标签时分段合成：Azure TTS v1 (Edge TTS)，以及本机的 Kokoro
-    # （免费、原生就是 24 kHz，分段拼接不掉音质，多请求几次也不花钱）。
-    # Pauses are recorded by synthesising the script in pieces. Edge TTS, and a
-    # self-hosted Kokoro: it is free per request and natively 24 kHz, which is
-    # what the pieces are joined at. (Chatterbox, the same, is handled above.)
-    if is_azure_v1_voice(voice_name) or is_kokoro_voice(voice_name):
+    # 脚本包含停顿标签时分段合成：仅 Azure TTS v1 (Edge TTS)。
+    # （本机的 Chatterbox 同样分段，已在上面处理。）
+    # Pauses are recorded by synthesising the script in pieces: Edge TTS here,
+    # and the self-hosted Chatterbox above. Both are free per request.
+    if is_azure_v1_voice(voice_name):
         return _tts_with_pauses(
             text=text,
             voice_name=voice_name,
@@ -2994,7 +2885,7 @@ def _openai_compatible_tts(
     timeout: float = 120,
 ) -> Union[SubMaker, None]:
     """Shared transport for self-hosted, OpenAI-compatible ``/audio/speech``
-    servers (Chatterbox, Kokoro, ...).
+    servers (Chatterbox, ...).
 
     Writes the returned audio to ``voice_file`` and builds the full-text
     SubMaker: these servers return no word-level timestamps, so set
@@ -3139,55 +3030,6 @@ def chatterbox_tts(
     return _openai_compatible_tts(
         "chatterbox", base_url, api_key, model_id, voice, text, voice_rate, voice_file,
         timeout=timeout,
-    )
-
-
-def kokoro_tts(
-    text: str,
-    voice: str,
-    voice_file: str,
-    voice_rate: float = 1.0,
-    voice_volume: float = 1.0,
-    model_id: str = "",
-) -> Union[SubMaker, None]:
-    """Generate speech with a self-hosted Kokoro TTS server.
-
-    Kokoro (hexgrad/Kokoro-82M, Apache-2.0 code and weights) is a small open
-    TTS model that runs well on CPU — a free, offline alternative to the
-    cloud voices. This talks to an OpenAI-compatible ``/audio/speech``
-    endpoint, so it works with the common servers (e.g. remsky/Kokoro-FastAPI
-    on port 8880). Configure ``[kokoro] base_url`` (ending in ``/v1``) and an
-    optional ``api_key``.
-
-    Voice names are Kokoro's presets (``af_heart``, ``bf_emma``, ``hf_alpha``,
-    ...); their first letter is the language (a/b English, e Spanish, f French,
-    h Hindi, i Italian, p Portuguese, j Japanese, z Chinese), so pick a voice
-    that matches the script's language.
-
-    Like Chatterbox, the OpenAI speech contract returns no word-level
-    timestamps, so the subtitle path falls back to the full-text SubMaker.
-    For tighter subtitle sync set ``subtitle_provider = "whisper"``.
-    """
-    text = (text or "").strip()
-    if not text:
-        logger.error("Kokoro TTS text is empty")
-        return None
-    # 纯标点/表情没有可发音文字；真实服务可能以 HTTP 200 返回空 MP3，
-    # 提前终止可避免无效请求及 MoviePy 在解码空文件时的底层异常。
-    if not any(character.isalnum() for character in text):
-        logger.error("Kokoro TTS text contains no speakable characters")
-        return None
-    base_url = (config.kokoro.get("base_url", "") or "").strip().rstrip("/")
-    if not base_url:
-        logger.error(
-            "Kokoro base_url is not set, please configure [kokoro] base_url in config.toml"
-        )
-        return None
-    api_key = config.kokoro.get("api_key", "")
-    if not model_id:
-        model_id = config.kokoro.get("model_id", "kokoro") or "kokoro"
-    return _openai_compatible_tts(
-        "kokoro", base_url, api_key, model_id, voice, text, voice_rate, voice_file
     )
 
 

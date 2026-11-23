@@ -111,10 +111,6 @@ locales = utils.load_locales(i18n_dir)
 DEFAULT_CHATTERBOX_BASE_URL = "http://127.0.0.1:4123/v1"
 DEFAULT_CHATTERBOX_MODEL = "chatterbox"
 DEFAULT_CHATTERBOX_VOICES = ["default-Female"]
-DEFAULT_KOKORO_BASE_URL = "http://127.0.0.1:8880/v1"
-DEFAULT_KOKORO_MODEL = "kokoro"
-# empty = ask the server for its voice list (GET {base_url}/audio/voices)
-DEFAULT_KOKORO_VOICES: list[str] = []
 DEFAULT_VOXCPM_BASE_URL = voice.VOXCPM_DEFAULT_BASE_URL
 DEFAULT_VOXCPM_VOICE = voice.VOXCPM_DEFAULT_VOICE
 VOXCPM_REFERENCE_AUDIO_SESSION_KEY = "voxcpm_reference_audio"
@@ -256,7 +252,6 @@ _RUNTIME_CONFIG_SECTIONS = {
     "app": config.app,
     "azure": config.azure,
     "chatterbox": config.chatterbox,
-    "kokoro": config.kokoro,
     "elevenlabs": config.elevenlabs,
     "minimax_tts": config.minimax_tts,
     "siliconflow": config.siliconflow,
@@ -512,50 +507,6 @@ def _sync_chatterbox_config_from_session_state():
     )
 
 
-def _sync_kokoro_config_from_session_state():
-    # 音色目录先于设置输入框渲染，先同步浏览器状态，确保本次 rerun 就使用
-    # 新端点和手工音色配置，不必再操作一次控件。
-    _set_runtime_config(
-        "kokoro",
-        "base_url",
-        (
-            st.session_state.get(
-                "kokoro_base_url_input",
-                config.kokoro.get("base_url") or DEFAULT_KOKORO_BASE_URL,
-            )
-            or ""
-        ).strip(),
-    )
-    _set_runtime_config(
-        "kokoro",
-        "api_key",
-        st.session_state.get(
-            "kokoro_api_key_input", config.kokoro.get("api_key", "")
-        ),
-    )
-    _set_runtime_config(
-        "kokoro",
-        "model_id",
-        (
-            st.session_state.get(
-                "kokoro_model_input",
-                config.kokoro.get("model_id") or DEFAULT_KOKORO_MODEL,
-            )
-            or DEFAULT_KOKORO_MODEL
-        ).strip(),
-    )
-    _set_runtime_config(
-        "kokoro",
-        "voices",
-        _parse_chatterbox_voices(
-            st.session_state.get(
-                "kokoro_voices_input",
-                config.kokoro.get("voices") or DEFAULT_KOKORO_VOICES,
-            )
-        ),
-    )
-
-
 # 下拉框里的语言标题。Streamlit 的 selectbox 没有分组，所以标题只能是一个
 # 混在选项里的特殊值：这个前缀就是用来认出它的。前缀取一个用户不可能输入、
 # 也不可能和音色名撞上的样子。
@@ -595,38 +546,6 @@ def _first_real_voice(options, index: int) -> int:
         if not _is_voice_heading(options[at]):
             return at
     return 0
-
-
-def _get_kokoro_voice_options(saved_voice_name: str) -> list[str]:
-    """会话内短缓存远端目录，断线时保留上次选择，不把故障当成用户改音色。"""
-    if config.kokoro.get("voices"):
-        return voice.get_kokoro_voices()
-
-    # 仅保留当前服务的一条缓存。更换端点/凭据立即重查，缓存不保存明文 Key；
-    # 30 秒内的其他 UI 操作不重复阻塞 5 秒等待一个已知离线的服务。
-    signature = (
-        (config.kokoro.get("base_url") or "").strip().rstrip("/"),
-        _credential_signature(config.kokoro.get("api_key", "")),
-    )
-    catalog = st.session_state.get("kokoro_voice_catalog", {})
-    if catalog.get("signature") != signature:
-        catalog = {"signature": signature, "voices": [], "checked_at": None}
-    now = time.monotonic()
-    if catalog["checked_at"] is None or now - catalog["checked_at"] >= 30:
-        fetched = voice.get_kokoro_voices(fallback=False)
-        catalog.update(checked_at=now, available=bool(fetched))
-        if fetched:
-            catalog["voices"] = fetched
-        st.session_state["kokoro_voice_catalog"] = catalog
-
-    options = list(catalog["voices"])
-    if not catalog["available"]:
-        st.warning(tr("Kokoro Voices Unavailable"))
-        # 首次打开时可能没有缓存，仍保留配置文件中的真实选择；恢复连接后
-        # 只有成功返回的新目录才能判定某个旧音色确实已被服务器删除。
-        if voice.is_kokoro_voice(saved_voice_name) and saved_voice_name not in options:
-            options.insert(0, saved_voice_name)
-    return options or [f"kokoro:{voice.KOKORO_DEFAULT_VOICE}"]
 
 
 def _detect_audio_mime(audio_file: str, audio_bytes: bytes) -> str:
@@ -1597,8 +1516,6 @@ def _infer_tts_server_from_voice(voice_name):
         return "elevenlabs"
     if voice.is_chatterbox_voice(voice_name):
         return "chatterbox"
-    if voice.is_kokoro_voice(voice_name):
-        return "kokoro"
     if voice.is_fish_audio_voice(voice_name):
         return "fish_audio"
     if voice.is_voxcpm_voice(voice_name):
@@ -7444,12 +7361,6 @@ def _get_voice_preview_provider_signature(tts_server: str) -> dict:
             "model_id": config.chatterbox.get("model_id", ""),
             "credential": _credential_signature(config.chatterbox.get("api_key", "")),
         }
-    if tts_server == "kokoro":
-        return {
-            "base_url": config.kokoro.get("base_url", ""),
-            "model_id": config.kokoro.get("model_id", ""),
-            "credential": _credential_signature(config.kokoro.get("api_key", "")),
-        }
     if tts_server == "voxcpm":
         return {
             "base_url": config.voxcpm.get("base_url", ""),
@@ -7482,8 +7393,6 @@ def _synthesize_voice_preview(
     """生成一次试听并转为内存缓存，临时文件不会跨会话长期保留。"""
     if selected_tts_server == "chatterbox":
         _sync_chatterbox_config_from_session_state()
-    if selected_tts_server == "kokoro":
-        _sync_kokoro_config_from_session_state()
 
     temp_dir = utils.storage_dir("temp", create=True)
     audio_file = os.path.join(temp_dir, f"tmp-voice-{str(uuid4())}.mp3")
@@ -8447,8 +8356,8 @@ def _render_audio_settings(panel, params):
             # Provider 下拉只负责选择自动配音服务；无配音已经由上方模式控制，
             # 不再作为 TTS Provider 混入列表，避免两个入口表达同一状态。
             tts_servers = [
-                # Kokoro first because it is the default: local, free, no key.
-                ("kokoro", "Kokoro TTS (local)"),
+                # Chatterbox first because it is the default: local, free, no key.
+                ("chatterbox", "Chatterbox TTS (local)"),
                 ("azure-tts-v1", "Azure TTS V1 (Edge TTS)"),
                 ("azure-tts-v2", "Azure TTS V2"),
                 ("siliconflow", "SiliconFlow TTS"),
@@ -8456,7 +8365,6 @@ def _render_audio_settings(panel, params):
                 ("mimo-tts", "Xiaomi MiMo TTS"),
                 ("minimax-tts", "MiniMax TTS"),
                 ("elevenlabs", "ElevenLabs TTS"),
-                ("chatterbox", "Chatterbox TTS"),
                 ("fish_audio", "Fish Audio TTS"),
                 ("voxcpm", "VoxCPM TTS"),
             ]
@@ -8531,10 +8439,6 @@ def _render_audio_settings(panel, params):
                 # 自托管 Chatterbox 服务的预置音色（来自 [chatterbox] voices 配置）
                 _sync_chatterbox_config_from_session_state()
                 filtered_voices = voice.get_chatterbox_voices()
-            elif selected_tts_server == "kokoro":
-                # 自托管 Kokoro 服务的音色：[kokoro] voices 为空时从服务端 /audio/voices 读取
-                _sync_kokoro_config_from_session_state()
-                filtered_voices = _get_kokoro_voice_options(saved_voice_name)
             elif selected_tts_server == "fish_audio":
                 filtered_voices = voice.get_fish_audio_voices()
             elif selected_tts_server == "voxcpm":
@@ -8558,8 +8462,7 @@ def _render_audio_settings(panel, params):
             # "和脚本同一种语言的"。所以按语言分组，脚本那门语言排最前面；
             # 脚本语言是"自动"的时候退回界面语言，比字母序是个更好的猜测。
             #
-            # 对所有 provider 都做，而不是只对 Azure：Kokoro 的名字里也有
-            # 语言（af_heart 的 a 是 American English）。名字里确实没有语言
+            # 对所有 provider 都做，而不是只对 Azure。名字里确实没有语言
             # 的那几家，这一步会原样返回，顺序一个字都不变。
             filtered_voices, voice_headings = _with_language_headings(
                 filtered_voices,
@@ -8577,11 +8480,10 @@ def _render_audio_settings(panel, params):
                 if voice.is_elevenlabs_voice(v):
                     parts = v.split(":", 2)
                     return parts[2] if len(parts) >= 3 else v
-                if voice.is_chatterbox_voice(v) or voice.is_kokoro_voice(v):
+                if voice.is_chatterbox_voice(v):
                     name = v.split(":", 1)[1] if ":" in v else v
                     name = name.replace("-Female", "").replace("-Male", "")
-                    # 男声还是女声，是挑音色时第一个要问的问题。Kokoro 把它
-                    # 藏在第二个字母里（af_heart 的 f），界面上看不出来。
+                    # 男声还是女声，是挑音色时第一个要问的问题。
                     said = {
                         "female": tr("Female"),
                         "male": tr("Male"),
@@ -8631,31 +8533,13 @@ def _render_audio_settings(panel, params):
                     saved_voice_name
                 )
             else:
-                # 本地 Kokoro 的音色名（af_heart）不带语言前缀，无法用下面的
-                # UI 语言前缀匹配，否则只会落到字母序第一个 af_alloy（评级 C）。
-                # Kokoro 自身的默认音色是 af_heart，这里优先选它。
-                #
-                # The language-prefix match below works for Azure's
-                # "en-US-..." names and finds nothing in Kokoro's; without this
-                # a fresh install would preselect one of Kokoro's weakest
-                # voices purely because it sorts first.
-                preferred_default = (
-                    f"kokoro:{voice.KOKORO_DEFAULT_VOICE}"
-                    if selected_tts_server == "kokoro"
-                    else None
-                )
-                if preferred_default in friendly_names:
-                    saved_voice_name_index = list(friendly_names.keys()).index(
-                        preferred_default
-                    )
-                else:
-                    # 如果不在，则根据当前UI语言选择一个默认声音
-                    for i, v in enumerate(filtered_voices):
-                        if v.lower().startswith(
-                            st.session_state["ui_language"].lower()
-                        ):
-                            saved_voice_name_index = i
-                            break
+                # 如果不在，则根据当前UI语言选择一个默认声音
+                for i, v in enumerate(filtered_voices):
+                    if v.lower().startswith(
+                        st.session_state["ui_language"].lower()
+                    ):
+                        saved_voice_name_index = i
+                        break
 
             # 如果没有找到匹配的声音，使用第一个声音
             if saved_voice_name_index >= len(friendly_names) and friendly_names:
@@ -9032,59 +8916,6 @@ def _render_audio_settings(panel, params):
                     "chatterbox",
                     "voices",
                     _parse_chatterbox_voices(chatterbox_voices),
-                )
-
-            # Kokoro API settings section (self-hosted, OpenAI-compatible; voices listed from the server when left empty)
-            if tts_mode_enabled and (
-                selected_tts_server == "kokoro"
-                or (voice_name and voice.is_kokoro_voice(voice_name))
-            ):
-                kokoro_base_url = st.text_input(
-                    tr("Kokoro Base URL"),
-                    value=config.kokoro.get("base_url")
-                    or DEFAULT_KOKORO_BASE_URL,
-                    key="kokoro_base_url_input",
-                    placeholder=tr("Kokoro Base URL Placeholder"),
-                )
-                _set_runtime_config(
-                    "kokoro", "base_url", (kokoro_base_url or "").strip()
-                )
-
-                kokoro_api_key = st.text_input(
-                    tr("Kokoro API Key"),
-                    value=config.kokoro.get("api_key", ""),
-                    type="password",
-                    key="kokoro_api_key_input",
-                )
-                _set_runtime_config("kokoro", "api_key", kokoro_api_key)
-
-                kokoro_model = st.text_input(
-                    tr("Kokoro Model"),
-                    value=config.kokoro.get("model_id") or DEFAULT_KOKORO_MODEL,
-                    key="kokoro_model_input",
-                )
-                _set_runtime_config(
-                    "kokoro",
-                    "model_id",
-                    (kokoro_model or DEFAULT_KOKORO_MODEL).strip(),
-                )
-
-                _saved_kokoro_voices = (
-                    _parse_chatterbox_voices(config.kokoro.get("voices"))
-                    or DEFAULT_KOKORO_VOICES
-                )
-                if isinstance(_saved_kokoro_voices, list):
-                    _saved_kokoro_voices = ", ".join(_saved_kokoro_voices)
-                kokoro_voices = st.text_input(
-                    tr("Kokoro Voices"),
-                    value=str(_saved_kokoro_voices or ""),
-                    key="kokoro_voices_input",
-                    placeholder=tr("Kokoro Voices Placeholder"),
-                )
-                _set_runtime_config(
-                    "kokoro",
-                    "voices",
-                    _parse_chatterbox_voices(kokoro_voices),
                 )
 
             # 三种模式只渲染当前任务真正需要的控件。自动配音可调音量和语速；

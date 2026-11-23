@@ -50,7 +50,7 @@ FILE_TYPE_IMAGES = ["jpg", "jpeg", "png", "bmp"]
 # What a fresh install does before anybody has typed in a key: generate the
 # whole video on this machine. Scripts come from Ollama, pictures from a local
 # OpenAI-compatible image server (see local_services/genserver), narration from
-# a local Kokoro server, subtitles from local Whisper. None of it reaches a
+# a local Chatterbox server, subtitles from local Whisper. None of it reaches a
 # paid API, so the first run works with no account anywhere.
 #
 # These are *defaults*, not a policy: every hosted provider is still there and
@@ -60,12 +60,14 @@ FILE_TYPE_IMAGES = ["jpg", "jpeg", "png", "bmp"]
 # config.local.example.toml is the same setup as a ready-made file, and
 # scripts/start-local.sh checks that the three services are up.
 DEFAULT_VIDEO_SOURCE = "openai_image"
-DEFAULT_VOICE_NAME = "kokoro:af_heart"
+DEFAULT_VOICE_NAME = "chatterbox:default-Female"
 # The image endpoint local_services/genserver listens on, and its one model.
 DEFAULT_OPENAI_IMAGE_BASE_URL = "http://127.0.0.1:8730/v1"
 DEFAULT_OPENAI_IMAGE_MODEL = "zimage-turbo"
-# WebUI 的默认配音服务。Kokoro 跑在本机 CPU 容器里，不占显存也不需要密钥。
-# The WebUI's default voiceover service. Kokoro runs in a local CPU container,
-# so it needs no key and never competes for the GPU. Every hosted service in
-# the selector still works when picked.
-DEFAULT_TTS_SERVER = "kokoro"
+# WebUI 的默认配音服务。Chatterbox 跑在本机容器里，不需要密钥；它用显卡，
+# 所以容器只在配音期间运行（见 app/services/chatterbox_server.py）。
+# The WebUI's default voiceover service. Chatterbox runs in a local container
+# and needs no key. It does use the graphics card, so its container only runs
+# while a narration records (app/services/chatterbox_server.py). Every hosted
+# service in the selector still works when picked.
+DEFAULT_TTS_SERVER = "chatterbox"

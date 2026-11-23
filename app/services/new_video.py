@@ -94,7 +94,7 @@ ASPECTS = (
 
 VOICE_TTS, VOICE_UPLOAD, VOICE_NONE = "tts", "upload", "none"
 TTS_SERVERS = (
-    ("kokoro", "Kokoro (local)"),
+    ("chatterbox", "Chatterbox (local)"),
     ("azure-tts-v1", "Edge TTS (free)"),
     ("azure-tts-v2", "Azure TTS V2"),
     ("siliconflow", "SiliconFlow"),
@@ -102,7 +102,6 @@ TTS_SERVERS = (
     ("mimo-tts", "Xiaomi MiMo TTS"),
     ("minimax-tts", "MiniMax TTS"),
     ("elevenlabs", "ElevenLabs"),
-    ("chatterbox", "Chatterbox (local)"),
     ("fish_audio", "Fish Audio"),
     ("voxcpm", "VoxCPM"),
 )
@@ -321,7 +320,7 @@ def server_of(voice_name: str, ui: Optional[Mapping] = None) -> str:
     """这个音色是哪一家的。名字认不出来时用存下来的那一家。"""
     name = str(voice_name or "").strip()
     checks = (
-        ("kokoro", voice.is_kokoro_voice), ("siliconflow", voice.is_siliconflow_voice),
+        ("siliconflow", voice.is_siliconflow_voice),
         ("gemini-tts", voice.is_gemini_voice), ("mimo-tts", voice.is_mimo_voice),
         ("minimax-tts", voice.is_minimax_voice),
         ("elevenlabs", voice.is_elevenlabs_voice),
@@ -339,7 +338,7 @@ def server_of(voice_name: str, ui: Optional[Mapping] = None) -> str:
     saved = str((config.ui if ui is None else ui).get("tts_server") or "").strip()
     if not name and saved in TTS_SERVER_IDS:
         return saved
-    return "azure-tts-v1" if name else "kokoro"
+    return "azure-tts-v1" if name else "chatterbox"
 
 
 # ---------------------------------------------------------------------------
@@ -358,8 +357,6 @@ def _voice_row(name: str) -> dict:
 
 
 def _list_voices(server: str) -> list:
-    if server == "kokoro":
-        return voice.get_kokoro_voices(fallback=False)
     if server == "azure-tts-v1":
         return [name for name in voice.get_all_azure_voices()
                 if not voice.is_azure_v2_voice(name)]

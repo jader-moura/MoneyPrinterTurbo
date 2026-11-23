@@ -132,7 +132,7 @@ def test_other_voices_never_touch_the_container():
     with patch.object(server, "ensure_running") as start, \
             patch.object(server, "release") as release, \
             patch.object(voice, "_single_tts", return_value="made"):
-        assert _tts("kokoro:af_heart") == "made"
+        assert _tts("en-US-AvaNeural") == "made"
     start.assert_not_called()
     release.assert_not_called()
 

@@ -7,10 +7,10 @@
 #
 #     script + keywords   Ollama       127.0.0.1:11434   GPU
 #     pictures            genserver    127.0.0.1:8730    GPU   Z-Image-Turbo
-#     narration           Kokoro       127.0.0.1:8880    CPU
+#     narration           Chatterbox   127.0.0.1:4123    GPU   only while it records
 #     subtitles           Whisper      in-process        CPU
 #
-# Start all three and the WebUI with:
+# Start them and the app with:
 #
 #     scripts/start-local.sh
 #
@@ -39,8 +39,9 @@
 #     [app]  llm_provider              = "ollama"
 #     [app]  ollama_model_name         = "qwen3:14b"
 #     [app]  match_materials_to_script = true
-#     [ui]   tts_server                = "kokoro"
-#     [ui]   voice_name                = "kokoro:af_heart"
+#     [chatterbox] container           = "docreel-chatterbox"
+#     [ui]   tts_server                = "chatterbox"
+#     [ui]   voice_name                = "chatterbox:default-Female"
 #     [ui]   video_clip_duration       = 6
 #     [whisper] model_size/device/compute_type = small / cpu / int8
 #
@@ -762,7 +763,7 @@ mimo_tts_style_prompt = "请用自然、清晰、适合短视频旁白的语气�
 #
 # "whisper" is the default because it transcribes the finished audio and so
 # works with every voice. "edge" reuses the word boundaries Edge TTS returns
-# during synthesis, which the self-hosted voices (kokoro, chatterbox, voxcpm)
+# during synthesis, which the self-hosted voices (chatterbox, voxcpm)
 # and most hosted ones do not send — with those, "edge" has nothing to time
 # against and the subtitle degrades to one block for the whole narration.
 # Choose "edge" when you are using an Edge TTS voice and want its timings.
@@ -955,20 +956,10 @@ voices = ["default-Female"]
 # Build the image once and create the container without starting it — the
 # first narration does that. The commands are at the top of
 # local_services/chatterbox/Dockerfile.
-container = ""
+container = "docreel-chatterbox"
 # Seconds to wait for the container to load its model. The first start also
 # downloads the weights, which is what the long default allows for.
 # start_timeout = 600
-
-[kokoro]
-# OpenAI-compatible Kokoro TTS server (hexgrad/Kokoro-82M, Apache-2.0, runs on CPU).
-# The defaults target remsky/Kokoro-FastAPI running locally on port 8880.
-base_url = "http://127.0.0.1:8880/v1"
-api_key = ""
-model_id = "kokoro"
-# Voice names (af_heart, bf_emma, hf_alpha, ...). Leave empty to read the list
-# from the server (GET {base_url}/audio/voices).
-voices = []
 
 [fish_audio]
 # Fish Audio TTS service: https://fish.audio
@@ -1038,12 +1029,12 @@ open_task_folder_on_completion = true
 video_clip_duration = 6
 # video_clip_speed = 1.0
 # video_count = 1
-# The local Kokoro container. Every hosted voice service is still selectable.
-tts_server = "kokoro"
-# af_heart is Kokoro's own default and its highest-graded voice (A): warm,
-# even, and steady enough to read documentary narration. bf_emma (B-) is
-# the British alternative; am_michael (C+) the best male one.
-voice_name = "kokoro:af_heart"
+# The local Chatterbox container. Every hosted voice service is still selectable.
+tts_server = "chatterbox"
+# "default" is the voice the Chatterbox server ships with. Any clip of clean
+# speech added to its voice library becomes another one: list it under
+# [chatterbox] voices as Name-Male or Name-Female.
+voice_name = "chatterbox:default-Female"
 # voice_mode = "tts"                 # "tts", "upload", or "none"
 # voice_volume = 1.0
 # voice_rate = 1.0

@@ -209,7 +209,7 @@ class TestVoiceService(unittest.TestCase):
 
         它同样不会被兜底发往 Edge TTS。Edge 曾是唯一的 Provider，所以识别不出
         的名字都落到它那里；现在自托管 Provider 按前缀路由，一个丢了前缀的名字
-        （把 kokoro:af_heart 写成 af_heart）会让离线链路静默联网。因此无效名字
+        （把 chatterbox:default 写成 default）会让离线链路静默联网。因此无效名字
         直接失败并说明正确写法，Edge 只在名字确实是它的音色时使用。
         """
         sentinel = object()
@@ -2728,14 +2728,14 @@ class TestElevenLabsVoice(unittest.TestCase):
         self.assertEqual(utils.MIN_PAUSE_DURATION_SECONDS, 0.1)
 
     def test_tts_provider_limitation_to_azure_v1(self):
-        """验证仅 Azure TTS v1 (Edge TTS) 和本机的 Kokoro 进入分段链路，Gemini/Fish Audio/SiliconFlow 保持单次请求。"""
+        """验证仅 Azure TTS v1 (Edge TTS) 和本机的 Chatterbox 进入分段链路，Gemini/Fish Audio/SiliconFlow 保持单次请求。"""
         # 1. 声音提供商判断
         self.assertTrue(vs.is_azure_v1_voice("zh-CN-XiaoxiaoNeural"))
         self.assertTrue(vs.is_azure_v1_voice("es-ES-AlvaroNeural"))
         self.assertFalse(vs.is_azure_v1_voice("gemini:Puck-Male"))
         self.assertFalse(vs.is_azure_v1_voice("fish_audio:default"))
         self.assertFalse(vs.is_azure_v1_voice("siliconflow:fishaudio/fish-speech-1.5:alex-Male"))
-        self.assertFalse(vs.is_azure_v1_voice("kokoro:af_bella"))
+        self.assertFalse(vs.is_azure_v1_voice("chatterbox:narrator-Male"))
         self.assertFalse(vs.is_azure_v1_voice("elevenlabs:voice-id:voice-name"))
 
         # 2. 其他提供商脚本含停顿标签时，必须先清除标签并调用单次合成，不调用 _tts_with_pauses
@@ -2746,9 +2746,8 @@ class TestElevenLabsVoice(unittest.TestCase):
         ]
         script_with_pause = "Part 1. [pause: 2s] Part 2."
 
-        # Kokoro 是本机的、按请求不花钱、原生 24 kHz：分段合成，停顿是真的。
-        # Chatterbox 同理：也是本机的、原生 24 kHz。
-        for local_voice in ("kokoro:af_bella", "chatterbox:narrator-Male"):
+        # Chatterbox 是本机的、按请求不花钱、原生 24 kHz：分段合成，停顿是真的。
+        for local_voice in ("chatterbox:narrator-Male",):
             with (
                 patch.object(vs, "_single_tts") as mock_single,
                 patch.object(vs, "_tts_with_pauses", return_value="pieces") as mock_split,

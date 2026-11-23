@@ -103,15 +103,15 @@ def test_old_or_invalid_preview_never_changes_recommendation(field, value):
     preview = {
         "preview_type": "full",
         "content_digest": hashlib.sha256(b"script").hexdigest(),
-        "tts_server": "kokoro",
-        "voice_name": "kokoro:af_heart",
+        "tts_server": "chatterbox",
+        "voice_name": "chatterbox:Heart-Female",
         "voice_rate": 1.0,
         "duration": 12.0,
     }
     state = {
         "voice_preview_audio": preview,
-        "tts_server_select": "kokoro",
-        "speech_synthesis_select_kokoro": "kokoro:af_heart",
+        "tts_server_select": "chatterbox",
+        "speech_synthesis_select_chatterbox": "chatterbox:Heart-Female",
     }
     match = helpers(state)["_matching_full_voice_preview_duration"]
     assert match("script", 1.0) == 12.0

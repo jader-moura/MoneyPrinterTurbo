@@ -2,7 +2,7 @@
 
 为什么要有这个模块
 ------------------
-这个仓库的默认搭配是三样本机服务：Ollama 写脚本，genserver 出图，Kokoro
+这个仓库的默认搭配是三样本机服务：Ollama 写脚本，genserver 出图，Chatterbox
 配音。可"默认"以前只写在 ``config.local.example.toml`` 里——也就是说，只有
 照着那个文件抄过一遍的 config.toml 才真的指向它们。一份缺了这几行的
 config.toml（重装过、从别的示例抄的、被别的工具改过）开不了片子：出图

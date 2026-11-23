@@ -31,7 +31,7 @@ ROOT = Path(__file__).resolve().parents[2]
 
 SAVED_UI = {
     "video_language": "en-US",
-    "voice_name": "kokoro:am_adam",
+    "voice_name": "chatterbox:Adam-Male",
     "voice_rate": 0.8,
     "video_clip_duration": 4,
     "font_name": "MicrosoftYaHeiBold.ttc",
@@ -68,8 +68,8 @@ def saved(tmp_path):
             patch.object(config, "update_config_values_nonblocking",
                          side_effect=write), \
             patch.object(config, "try_save_config", return_value=True) as save, \
-            patch.object(new_video.voice, "get_kokoro_voices",
-                         return_value=["kokoro:af_heart", "kokoro:am_adam"]), \
+            patch.object(new_video.voice, "get_chatterbox_voices",
+                         return_value=["chatterbox:Heart-Female", "chatterbox:Adam-Male"]), \
             patch.object(new_video.voice, "get_all_azure_voices",
                          return_value=["en-US-AvaNeural-Female",
                                        "zh-CN-YunxiNeural-Male"]), \
@@ -97,13 +97,13 @@ def _fields(form):
 class TestTheFormStartsFromWhatTheUserLastUsed:
     def test_the_saved_settings_are_the_defaults(self, saved):
         values = new_video.form()["values"]
-        assert values["voice_name"] == "kokoro:am_adam"
+        assert values["voice_name"] == "chatterbox:Adam-Male"
         assert values["voice_rate"] == 0.8
         assert values["video_clip_duration"] == 4
         assert values["video_language"] == "en-US"
         assert values["video_source"] == "openai_image"
         assert values["music_type"] == "random"
-        assert values["tts_server"] == "kokoro"
+        assert values["tts_server"] == "chatterbox"
         assert values["voice_mode"] == "tts"
 
     def test_the_format_is_the_one_saved_for_that_source(self, saved):
@@ -214,18 +214,24 @@ class TestItCoversWhatTheOldPageOffered:
 
 class TestVoices:
     def test_they_come_grouped_by_language_with_the_gender_said(self, saved):
-        got = new_video.voices("kokoro", prefer="en-US")
+        got = new_video.voices("azure-tts-v1", prefer="en-US")
         assert got["groups"][0]["label"] == "English"
-        assert {"id": "kokoro:am_adam", "label": "am_adam (male)"} in (
+        assert {"id": "en-US-AvaNeural-Female", "label": "en-US-AvaNeural (female)"} in (
+            got["groups"][0]["voices"]
+        )
+
+    def test_a_local_voice_has_no_language_but_still_says_its_gender(self, saved):
+        got = new_video.voices("chatterbox", prefer="en-US")
+        assert {"id": "chatterbox:Adam-Male", "label": "Adam (male)"} in (
             got["groups"][0]["voices"]
         )
 
     def test_a_service_that_does_not_answer_is_named_not_replaced(self, saved):
-        with patch.object(new_video.voice, "get_kokoro_voices", return_value=[]):
-            got = new_video.voices("kokoro", keep="kokoro:am_adam")
-        assert any("Kokoro" in note for note in got["notes"])
+        with patch.object(new_video.voice, "get_chatterbox_voices", return_value=[]):
+            got = new_video.voices("chatterbox", keep="chatterbox:Adam-Male")
+        assert any("Chatterbox" in note for note in got["notes"])
         # 已经选着的那个还在：断线不等于用户改了主意。
-        assert got["groups"][0]["voices"][0]["id"] == "kokoro:am_adam"
+        assert got["groups"][0]["voices"][0]["id"] == "chatterbox:Adam-Male"
         # 而且没有拿别家的音色来顶。
         assert len(got["groups"]) == 1
 
@@ -259,7 +265,7 @@ class TestWhatIsChosenBecomesTheVideo:
     def test_untouched_fields_keep_the_saved_settings(self, saved):
         params = new_video.build_params({"video_subject": "cats"})
         assert params.video_subject == "cats"
-        assert params.voice_name == "kokoro:am_adam"
+        assert params.voice_name == "chatterbox:Adam-Male"
         assert params.font_name == "MicrosoftYaHeiBold.ttc"
         assert params.text_fore_color == "#FFD700"
         assert params.video_aspect.value == "16:9"
@@ -469,8 +475,8 @@ class TestNoQuietSubstitutionAndNoQuietCharge:
 
     def test_a_voice_that_cannot_be_read_names_the_service(self, saved):
         with patch.object(new_video.voice, "tts", side_effect=RuntimeError("down")):
-            with pytest.raises(new_video.NewVideoError, match="Kokoro"):
-                new_video.preview_voice("kokoro:am_adam")
+            with pytest.raises(new_video.NewVideoError, match="Chatterbox"):
+                new_video.preview_voice("chatterbox:Adam-Male")
 
 
 class TestItAlwaysStopsForReview:
@@ -547,7 +553,7 @@ class TestTheChoicesAreRememberedLikeTheOldPageDid:
         choices = {"video_subject": "cats", "voice_mode": "none"}
         new_video.remember(choices, new_video.build_params(choices))
         assert "voice_name" not in saved["written"]["ui"]
-        assert config.ui["voice_name"] == "kokoro:am_adam"
+        assert config.ui["voice_name"] == "chatterbox:Adam-Male"
         assert saved["written"]["ui"]["voice_mode"] == "none"
 
 
@@ -593,14 +599,14 @@ class TestOverHttp:
         got = client.get("/api/v1/new-video/options")
         assert got.status_code == 200, got.text
         data = got.json()["data"]
-        assert data["values"]["voice_name"] == "kokoro:am_adam"
+        assert data["values"]["voice_name"] == "chatterbox:Adam-Male"
         assert [tab["id"] for tab in data["tabs"]] == [
             "pictures", "voice", "subtitles", "music", "script",
         ]
 
     def test_the_voices_of_a_service_are_served(self, client, saved):
         got = client.get("/api/v1/new-video/voices",
-                         params={"server": "kokoro", "language": "en-US"})
+                         params={"server": "azure-tts-v1", "language": "en-US"})
         assert got.status_code == 200, got.text
         assert got.json()["data"]["groups"][0]["label"] == "English"
         assert client.get("/api/v1/new-video/voices",
@@ -625,7 +631,7 @@ class TestOverHttp:
         assert got.json()["data"]["task_id"] == started["task_id"]
         assert started["stop_at"] == "materials"
         assert isinstance(started["body"], TaskVideoRequest)
-        assert started["body"].voice_name == "kokoro:am_adam"
+        assert started["body"].voice_name == "chatterbox:Adam-Male"
         assert started["body"].image_prompt_template
         # 开成了才记。
         assert saved["written"]["ui"]["review_prompts_before_images"] is False
@@ -696,7 +702,7 @@ class TestOverHttp:
 
         with patch.object(new_video.voice, "tts", side_effect=fake_tts):
             got = client.post("/api/v1/new-video/voice-preview", json={
-                "voice_name": "kokoro:am_adam", "text": "  Cats   nap. ",
+                "voice_name": "chatterbox:Adam-Male", "text": "  Cats   nap. ",
             })
         assert got.status_code == 200, got.text
         assert got.content == b"mp3"

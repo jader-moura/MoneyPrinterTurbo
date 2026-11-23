@@ -204,7 +204,7 @@ def test_provider_signature_changes_when_api_key_changes():
 def test_voxcpm_preview_signature_tracks_endpoint_model_and_credentials():
     session_state = {}
     test_config = SimpleNamespace(
-        app={}, azure={}, siliconflow={}, elevenlabs={}, chatterbox={}, kokoro={},
+        app={}, azure={}, siliconflow={}, elevenlabs={}, chatterbox={},
         voxcpm={
             "api_key": "old-key",
             "base_url": "https://api.modelbest.cn/v1",

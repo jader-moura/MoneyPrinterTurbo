@@ -59,8 +59,8 @@ class DefaultsAreLocal(unittest.TestCase):
         self.assertEqual(DEFAULT_VIDEO_SOURCE, "openai_image")
         self.assertEqual(VideoParams(video_subject="x").video_source, "openai_image")
 
-    def test_default_voice_is_a_local_kokoro_voice(self):
-        self.assertTrue(VideoParams(video_subject="x").voice_name.startswith("kokoro:"))
+    def test_default_voice_is_a_local_chatterbox_voice(self):
+        self.assertTrue(VideoParams(video_subject="x").voice_name.startswith("chatterbox:"))
 
 
 class ResolveLlmAppConfig(unittest.TestCase):

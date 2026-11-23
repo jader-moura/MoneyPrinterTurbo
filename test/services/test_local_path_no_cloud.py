@@ -22,7 +22,7 @@ class AzureIsNotTheCatchAll(unittest.TestCase):
 
     Edge TTS was once the only provider, so the dispatcher ended in an
     unconditional call to it. With twelve providers and prefix-based routing, a
-    name that lost its prefix — "af_heart" rather than "kokoro:af_heart" — hit
+    name that lost its prefix — "default" rather than "chatterbox:default" — hit
     that branch, and an offline pipeline made a silent network request.
     """
 
@@ -37,8 +37,8 @@ class AzureIsNotTheCatchAll(unittest.TestCase):
             )
         return result, azure.called
 
-    def test_a_bare_kokoro_voice_name_does_not_reach_azure(self):
-        result, azure_called = self._dispatch("af_heart")
+    def test_a_bare_chatterbox_voice_name_does_not_reach_azure(self):
+        result, azure_called = self._dispatch("default")
         self.assertFalse(azure_called)
         self.assertIsNone(result)
 
@@ -62,20 +62,20 @@ class AzureIsNotTheCatchAll(unittest.TestCase):
                 self.assertTrue(azure_called)
                 self.assertEqual(result, "azure-was-called")
 
-    def test_a_kokoro_voice_goes_to_kokoro(self):
-        with patch.object(voice, "kokoro_tts") as kokoro, patch.object(
+    def test_a_chatterbox_voice_goes_to_chatterbox(self):
+        with patch.object(voice, "chatterbox_tts") as chatterbox, patch.object(
             voice, "azure_tts_v1"
         ) as azure:
-            kokoro.return_value = "kokoro-was-called"
+            chatterbox.return_value = "chatterbox-was-called"
             result = voice._single_tts(
                 text="iron was hammered cold",
-                voice_name="kokoro:af_heart",
+                voice_name="chatterbox:default-Female",
                 voice_rate=1.0,
                 voice_file="unused.mp3",
             )
-        self.assertEqual(result, "kokoro-was-called")
+        self.assertEqual(result, "chatterbox-was-called")
         self.assertFalse(azure.called)
-        self.assertEqual(kokoro.call_args.args[1], "af_heart")
+        self.assertEqual(chatterbox.call_args.args[1], "default")
 
     def test_the_voice_shape_check_is_a_positive_one(self):
         self.assertTrue(voice.looks_like_azure_v1_voice("en-US-AvaNeural"))
@@ -84,24 +84,24 @@ class AzureIsNotTheCatchAll(unittest.TestCase):
         self.assertFalse(voice.looks_like_azure_v1_voice(None))
 
 
-class KokoroFailsRatherThanFallsBack(unittest.TestCase):
+class ChatterboxFailsRatherThanFallsBack(unittest.TestCase):
     def test_no_base_url_is_an_error_not_a_different_provider(self):
-        with patch.dict(voice.config.kokoro, {"base_url": ""}, clear=False):
+        with patch.dict(voice.config.chatterbox, {"base_url": ""}, clear=False):
             with patch.object(voice, "_openai_compatible_tts") as transport:
-                result = voice.kokoro_tts("iron", "af_heart", "unused.mp3")
+                result = voice.chatterbox_tts("iron", "default", "unused.mp3")
         self.assertIsNone(result)
         self.assertFalse(transport.called)
 
     def test_the_request_goes_to_the_configured_server_only(self):
         with patch.dict(
-            voice.config.kokoro, {"base_url": "http://127.0.0.1:8880/v1"}, clear=False
+            voice.config.chatterbox, {"base_url": "http://127.0.0.1:4123/v1"}, clear=False
         ):
             with patch.object(voice, "_openai_compatible_tts") as transport:
                 transport.return_value = "ok"
-                voice.kokoro_tts("iron", "af_heart", "unused.mp3")
+                voice.chatterbox_tts("iron", "default", "unused.mp3")
         provider, base_url = transport.call_args.args[0], transport.call_args.args[1]
-        self.assertEqual(provider, "kokoro")
-        self.assertEqual(base_url, "http://127.0.0.1:8880/v1")
+        self.assertEqual(provider, "chatterbox")
+        self.assertEqual(base_url, "http://127.0.0.1:4123/v1")
 
 
 if __name__ == "__main__":

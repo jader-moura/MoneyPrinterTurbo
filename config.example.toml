@@ -716,7 +716,7 @@ mimo_tts_style_prompt = "请用自然、清晰、适合短视频旁白的语气�
 #
 # "whisper" is the default because it transcribes the finished audio and so
 # works with every voice. "edge" reuses the word boundaries Edge TTS returns
-# during synthesis, which the self-hosted voices (kokoro, chatterbox, voxcpm)
+# during synthesis, which the self-hosted voices (chatterbox, voxcpm)
 # and most hosted ones do not send — with those, "edge" has nothing to time
 # against and the subtitle degrades to one block for the whole narration.
 # Choose "edge" when you are using an Edge TTS voice and want its timings.
@@ -896,16 +896,6 @@ voices = ["default-Female"]
 # the model does not hold the graphics card while pictures are drawn. See
 # config.local.example.toml for how to build and create it.
 container = ""
-
-[kokoro]
-# OpenAI-compatible Kokoro TTS server (hexgrad/Kokoro-82M, Apache-2.0, runs on CPU).
-# The defaults target remsky/Kokoro-FastAPI running locally on port 8880.
-base_url = "http://127.0.0.1:8880/v1"
-api_key = ""
-model_id = "kokoro"
-# Voice names (af_heart, bf_emma, hf_alpha, ...). Leave empty to read the list
-# from the server (GET {base_url}/audio/voices).
-voices = []
 
 [fish_audio]
 # Fish Audio TTS service: https://fish.audio

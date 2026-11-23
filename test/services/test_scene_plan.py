@@ -204,13 +204,12 @@ class TestDirectingTheEdit:
         assert "wind under scenes 1" in said and "room under scenes 2" in said
         assert "no direction" in scene_plan.report(scene_plan.parse(_text()))
 
-    def test_a_kokoro_voice_records_the_pauses(self):
+    def test_a_chatterbox_voice_records_the_pauses(self):
         from app.services import voice
-        with patch.object(voice, "_tts_with_pauses", return_value="made") as pieces, \
-                patch.object(voice, "_single_tts", return_value="one") as whole:
-            assert voice.tts("One. [pause: 1s]\nTwo.", "kokoro:am_echo", 1.0, "a.mp3") == "made"
-            assert voice.tts("One.\nTwo.", "kokoro:am_echo", 1.0, "a.mp3") == "one"
-        assert pieces.call_count == 1 and whole.call_count == 1
+        with patch.object(voice, "_tts_with_pauses", return_value="made") as pieces:
+            assert voice.tts("One. [pause: 1s]\nTwo.", "chatterbox:default-Female",
+                             1.0, "a.mp3") == "made"
+        assert pieces.call_count == 1
 
 
 class TestTheForm:

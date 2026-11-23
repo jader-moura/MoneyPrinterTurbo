@@ -41,7 +41,6 @@ def _sections() -> dict:
         "ui": config.ui,
         "azure": config.azure,
         "chatterbox": config.chatterbox,
-        "kokoro": config.kokoro,
         "elevenlabs": config.elevenlabs,
         "minimax_tts": config.minimax_tts,
         "siliconflow": config.siliconflow,
@@ -245,16 +244,6 @@ def groups() -> list:
             "note": "The services that read the narration.",
             "fields": [],
             "panels": [
-                {"id": "kokoro", "label": "Kokoro (local)",
-                 "fields": _text_fields("kokoro", [
-                     ("base_url", "Base URL", "text",
-                      {"placeholder": "http://127.0.0.1:8880/v1"}),
-                     ("api_key", "API key", "secret", {}),
-                     ("model_id", "Model", "text", {"placeholder": "kokoro"}),
-                     ("voices", "Voices", "text",
-                      {"help": "Optional, comma separated. Leave empty to ask "
-                               "the server for its list."}),
-                 ])},
                 {"id": "azure", "label": "Azure TTS V2",
                  "fields": _text_fields("azure", [
                      ("speech_region", "Speech region", "text", {}),
@@ -281,7 +270,7 @@ def groups() -> list:
                       {"options": _choices(("eleven_multilingual_v2",
                                             "eleven_flash_v2_5", "eleven_v3"))}),
                  ])},
-                {"id": "chatterbox", "label": "Chatterbox",
+                {"id": "chatterbox", "label": "Chatterbox (local)",
                  "fields": _text_fields("chatterbox", [
                      ("base_url", "Base URL", "text", {}),
                      ("api_key", "API key", "secret", {}),

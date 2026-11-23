@@ -27,7 +27,7 @@ from app.services import signin, upkeep
 
 ROOT = Path(__file__).resolve().parents[2]
 SECRET = "sk-BACKUP-ONLY"
-SECTIONS = ("app", "ui", "azure", "chatterbox", "kokoro", "elevenlabs",
+SECTIONS = ("app", "ui", "azure", "chatterbox", "elevenlabs",
             "minimax_tts", "siliconflow", "fish_audio", "voxcpm")
 
 
@@ -40,7 +40,7 @@ def saved():
         "upload_post_username": "me", "video_source": "pexels",
     })
     sections["azure"].update({"speech_key": SECRET, "speech_region": "eastus"})
-    sections["ui"].update({"voice_name": "kokoro:am_adam", "font_size": 75})
+    sections["ui"].update({"voice_name": "chatterbox:Adam-Male", "font_size": 75})
 
     def write(section, changes):
         section.update(changes)
@@ -102,7 +102,7 @@ class TestKeyBackup:
         assert app["openai_api_key"] == "sk-new"
         assert app["endpoint"] == "http://here"
         assert "openai_base_url" not in app and "listen_port" not in app
-        assert saved["sections"]["ui"] == {"voice_name": "kokoro:am_adam",
+        assert saved["sections"]["ui"] == {"voice_name": "chatterbox:Adam-Male",
                                            "font_size": 75}
 
     @pytest.mark.parametrize("raw, said", [
@@ -143,7 +143,7 @@ class TestKeyBackup:
 class TestSettingsPreset:
     def test_it_carries_the_last_used_choices_and_no_keys(self, saved):
         preset = upkeep.settings_preset()
-        assert preset["params"]["voice_name"] == "kokoro:am_adam"
+        assert preset["params"]["voice_name"] == "chatterbox:Adam-Male"
         assert preset["params"]["font_size"] == 75
         assert preset["params"]["video_source"] == "pexels"
         assert SECRET not in json.dumps(preset)

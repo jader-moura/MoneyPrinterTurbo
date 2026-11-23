@@ -429,8 +429,7 @@ Two things in the local pipeline want the card, and on 16 GB they do not fit tog
 | --- | --- | --- |
 | Ollama (script, keywords) | yes | 10 GB for a 14B model at 4k context |
 | **genserver (this)** | yes | **12.2 GiB peak, ~1.5 GiB idle** |
-| Kokoro (narration) | no | CPU container; never competes |
-| Chatterbox (narration, optional) | yes | 3.2 GiB loaded, 4.4 GiB peak; its container runs only while a narration records |
+| Chatterbox (narration) | yes | 3.2 GiB loaded, 4.4 GiB peak; its container runs only while a narration records |
 | Whisper (subtitles) | no | CPU; see below |
 
 Whisper is on that list as a *non*-consumer, which is worth saying because the

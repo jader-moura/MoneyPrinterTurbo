@@ -25,7 +25,7 @@ from app.services import app_settings
 ROOT = Path(__file__).resolve().parents[2]
 SECRET = "sk-THIS-MUST-NEVER-LEAVE-THE-SERVER"
 
-SECTION_NAMES = ("app", "ui", "azure", "chatterbox", "kokoro", "elevenlabs",
+SECTION_NAMES = ("app", "ui", "azure", "chatterbox", "elevenlabs",
                  "minimax_tts", "siliconflow", "fish_audio", "voxcpm")
 
 
@@ -40,7 +40,7 @@ def settings():
         "pexels_api_keys": [SECRET, SECRET + "-2"],
         "material_concurrency": 4,
     })
-    sections["kokoro"].update({"base_url": "http://127.0.0.1:8880/v1"})
+    sections["chatterbox"].update({"base_url": "http://127.0.0.1:4123/v1"})
     sections["azure"].update({"speech_key": SECRET, "speech_region": "eastus"})
     state = {"busy": False}
 
@@ -96,7 +96,7 @@ class TestKeysNeverLeaveTheServer:
         values = app_settings.describe()["values"]
         assert values["app.llm_provider"] == "openai"
         assert values["app.openai_model_name"] == "gpt-4o"
-        assert values["kokoro.base_url"] == "http://127.0.0.1:8880/v1"
+        assert values["chatterbox.base_url"] == "http://127.0.0.1:4123/v1"
         assert values["azure.speech_region"] == "eastus"
 
 

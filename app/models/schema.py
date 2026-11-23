@@ -246,7 +246,7 @@ class VideoParams(BaseModel):
     )
     video_language: Optional[str] = ""  # auto detect
 
-    # A local Kokoro voice, so a request that names none still narrates without
+    # A local Chatterbox voice, so a request that names none still narrates without
     # a cloud account. Any provider's voice name is still accepted here.
     voice_name: Optional[str] = DEFAULT_VOICE_NAME
     voice_volume: Optional[float] = Field(default=1.0, allow_inf_nan=False)
@@ -339,7 +339,7 @@ class VideoParams(BaseModel):
 class SubtitleRequest(BaseModel):
     video_script: str
     video_language: Optional[str] = ""
-    # Local Kokoro, like VideoParams: these endpoints should not reach a cloud
+    # Local Chatterbox, like VideoParams: these endpoints should not reach a cloud
     # voice service for a caller who named no voice. Pass any provider's voice
     # name to use that provider instead.
     voice_name: Optional[str] = DEFAULT_VOICE_NAME
@@ -373,7 +373,7 @@ class SubtitleRequest(BaseModel):
 class AudioRequest(BaseModel):
     video_script: str
     video_language: Optional[str] = ""
-    # Local Kokoro, like VideoParams: these endpoints should not reach a cloud
+    # Local Chatterbox, like VideoParams: these endpoints should not reach a cloud
     # voice service for a caller who named no voice. Pass any provider's voice
     # name to use that provider instead.
     voice_name: Optional[str] = DEFAULT_VOICE_NAME

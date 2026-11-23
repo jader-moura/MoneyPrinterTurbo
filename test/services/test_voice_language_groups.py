@@ -64,31 +64,11 @@ class TestReadingTheLanguageOffAVoice:
         assert voice.language_of(name) == code
 
     @pytest.mark.parametrize(
-        "name,code",
-        [
-            ("kokoro:af_heart", "en"),   # American Female
-            ("kokoro:am_puck", "en"),    # American Male
-            ("kokoro:bm_george", "en"),  # British Male
-            ("kokoro:zf_xiaobei", "zh"),
-            ("kokoro:jf_alpha", "ja"),
-            ("kokoro:pm_santa", "pt"),
-        ],
-    )
-    def test_kokoro_says_it_in_one_letter(self, name, code):
-        """两个字母是语言和性别，只能看第一个。
-
-        把 ``af`` 当成 Afrikaans 是刚好会"看起来对"的那种错：
-        它是 American Female。
-        """
-        assert voice.language_of(name) == code
-
-    @pytest.mark.parametrize(
         "name",
         [
             "minimax:male-qn-qingse",
             "elevenlabs:abc123:Rachel",
-            "kokoro:my_own_clone",   # 不是两字母下划线那个形状
-            "kokoro:xf_whatever",    # x 不是 kokoro 的语言字母
+            "chatterbox:default-Female",  # 自托管音色的名字里没有语言
             "",
             "   ",
             "NoVoice",
@@ -110,31 +90,26 @@ class TestReadingTheLanguageOffAVoice:
 class TestMaleOrFemale:
     """挑音色时第一个要问的就是这个。
 
-    三种写法：Azure 和 Chatterbox 放在名字末尾（``-Female``），Kokoro
-    放在第二个字母里（``af_heart`` 的 ``f``）——后者在界面上原本
-    是完全看不出来的。
+    Azure 和 Chatterbox 都放在名字末尾（``-Female``）。
     """
 
     @pytest.mark.parametrize(
         "name,gender",
         [
-            ("kokoro:af_heart", "female"),
-            ("kokoro:am_puck", "male"),
-            ("kokoro:bm_george", "male"),
-            ("kokoro:zf_xiaobei", "female"),
             ("en-US-AvaNeural-Female", "female"),
             ("zh-CN-YunxiNeural-Male", "male"),
             ("chatterbox:default-Female", "female"),
+            ("chatterbox:Thomas-Male", "male"),
         ],
     )
-    def test_it_reads_all_three_ways_of_writing_it(self, name, gender):
+    def test_it_reads_the_suffix(self, name, gender):
         assert voice.gender_of(name) == gender
 
     @pytest.mark.parametrize(
         "name",
         [
             "minimax:male-qn-qingse",  # id 里的 male 不是后缀
-            "kokoro:my_clone",         # 不是两字母下划线那个形状
+            "chatterbox:my_clone",     # 没写后缀就是不知道
             "elevenlabs:abc:Rachel",
             "",
         ],
@@ -143,17 +118,9 @@ class TestMaleOrFemale:
         """``minimax:male-qn-qingse`` 里有 male 两个字母，那不是性别后缀。"""
         assert voice.gender_of(name) == ""
 
-    def test_every_kokoro_voice_says_which_it_is(self):
-        """用户用的就是这一家：72 个音色一个不能漏。"""
-        unknown = [
-            v for v in voice.get_kokoro_voices() if not voice.gender_of(v)
-        ]
-        assert unknown == []
-
     def test_the_dropdown_actually_shows_it(self):
         """转成界面文案那一步在 Main.py 的闭包里，这里只能看源码。
 
-        渲染出来的那一行由 test_webui_kokoro 的真页面测试盯。
         """
         source = MAIN.read_text(encoding="utf-8")
         assert "voice.gender_of(v)" in source
@@ -194,15 +161,6 @@ class TestTheOrderOfTheGroups:
             "en-GB-SoniaNeural-Female",
             "en-US-AvaNeural-Female",
         ]
-
-    def test_kokoro_keeps_every_voice_as_well(self):
-        """用户用的就是这一家：72 个音色，也是一长串。"""
-        everything = voice.get_kokoro_voices()
-        regrouped = [
-            name for _, names in voice.by_language(everything, prefer="en-US")
-            for name in names
-        ]
-        assert sorted(regrouped) == sorted(everything)
 
     def test_voices_without_a_language_go_last_in_their_own_order(self):
         mixed = [

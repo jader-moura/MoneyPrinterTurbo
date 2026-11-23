@@ -72,7 +72,6 @@ def _sections() -> dict:
         "app": config.app,
         "azure": config.azure,
         "chatterbox": config.chatterbox,
-        "kokoro": config.kokoro,
         "elevenlabs": config.elevenlabs,
         "minimax_tts": config.minimax_tts,
         "siliconflow": config.siliconflow,

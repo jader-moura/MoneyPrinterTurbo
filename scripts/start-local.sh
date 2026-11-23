@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Bring up the three local services, then the app (the editor, on one port).
+# Bring up the local services, then the app (the editor, on one port).
 #
 #   scripts/start-local.sh            check, start what is missing, open the editor
 #   scripts/start-local.sh --check    check only, report, exit non-zero if anything is down
@@ -15,10 +15,10 @@
 #
 #   Ollama     127.0.0.1:11434   the script and the keywords          GPU
 #   genserver  127.0.0.1:8730    the pictures (Z-Image-Turbo)         GPU
-#   Kokoro     127.0.0.1:8880    the narration                        CPU
+#   Chatterbox 127.0.0.1:4123    the narration                        GPU
 #
-# Chatterbox (127.0.0.1:4123, GPU) is the other narration voice. It is only
-# checked, never started here: the app runs its container per narration.
+# Chatterbox is only checked, never started here: it cannot drop its model, so
+# the app runs its container per narration and stops it straight after.
 #
 # Whisper is a library, not a service: it loads inside the app when the
 # subtitle stage runs.
@@ -42,8 +42,6 @@ cd "$CURRENT_DIR" || exit 1
 
 OLLAMA_URL="${OLLAMA_URL:-http://127.0.0.1:11434}"
 GEN_URL="${GEN_URL:-http://127.0.0.1:8730}"
-KOKORO_URL="${KOKORO_URL:-http://127.0.0.1:8880}"
-KOKORO_CONTAINER="${KOKORO_CONTAINER:-docreel-kokoro}"
 GEN_STARTUP_TIMEOUT="${GEN_STARTUP_TIMEOUT:-120}"
 # Appended to, not truncated: a crash is usually understood by comparing the
 # run that died with the one before it.
@@ -206,7 +204,7 @@ wait_for() {
 # (3) is the one that matters. Something else on :8080 is somebody else's
 # program, and a start script that kills unknown processes to free a port it
 # wants is a worse problem than the one it solves. Those are reported, never
-# killed. Ollama and Kokoro are not touched either way: this script does not
+# killed. Ollama and Chatterbox are not touched either way: this script does not
 # own them, it only checks whether they answer.
 #
 # KEEP_STALE=1 turns all of this off.
@@ -525,50 +523,7 @@ PY
   fi
 fi
 
-# --- 3. Kokoro ---------------------------------------------------------------
-
-if http_ok "$KOKORO_URL/v1/audio/voices" 10; then
-  ok "kokoro        $KOKORO_URL"
-elif ! command -v docker >/dev/null 2>&1; then
-  fail "kokoro is not answering and docker is not installed"
-  detail "install Docker, or run any OpenAI-compatible Kokoro server on port 8880"
-  detail "then point [kokoro] base_url at it (it must end in /v1)"
-  FAILED=1
-elif [ "$CHECK_ONLY" = "1" ]; then
-  fail "kokoro is not answering on $KOKORO_URL"
-  detail "docker start $KOKORO_CONTAINER"
-  FAILED=1
-elif docker inspect "$KOKORO_CONTAINER" >/dev/null 2>&1; then
-  warn "starting the $KOKORO_CONTAINER container"
-  docker start "$KOKORO_CONTAINER" >/dev/null 2>&1
-  if wait_for "$KOKORO_URL/v1/audio/voices" 60; then
-    ok "kokoro        $KOKORO_URL"
-  else
-    fail "the $KOKORO_CONTAINER container did not start serving within 60s"
-    detail "docker logs --tail 50 $KOKORO_CONTAINER"
-    FAILED=1
-  fi
-else
-  fail "no container named $KOKORO_CONTAINER"
-  detail "create one (CPU build; it never competes for the GPU):"
-  detail "  docker run -d --name $KOKORO_CONTAINER -p 8880:8880 \\"
-  detail "    ghcr.io/remsky/kokoro-fastapi-cpu:latest"
-  FAILED=1
-fi
-
-if http_ok "$KOKORO_URL/v1/audio/voices" 10 && [ -n "$PYTHON_BIN" ]; then
-  "$PYTHON_BIN" - "$KOKORO_URL" <<'PY'
-import json, sys, urllib.request
-with urllib.request.urlopen(f"{sys.argv[1]}/v1/audio/voices", timeout=10) as r:
-    data = json.load(r)
-voices = data.get("voices", data) if isinstance(data, dict) else data
-names = [v.get("id") if isinstance(v, dict) else v for v in voices]
-names = [n for n in names if n]
-print(f"       {len(names)} voices, including {', '.join(names[:4])}")
-PY
-fi
-
-# --- 3b. Chatterbox (only when config.toml names its container) --------------
+# --- 3. Chatterbox (only when config.toml names its container) ---------------
 # Not started here, on purpose. It runs on the graphics card and cannot drop
 # its model, so the app starts the container for each narration and stops it
 # straight after (app/services/chatterbox_server.py). All this checks is that

@@ -275,7 +275,7 @@ What the app needs for it to work, which you should tell the user:
 - a **Finish look** must be chosen in the new-video form. Without one the
   classic renderer runs: pauses are still recorded, everything else in the
   direction is ignored.
-- **Pauses** are recorded with Edge voices, Kokoro and Chatterbox. Other voices read
+- **Pauses** are recorded with Edge voices and Chatterbox. Other voices read
   straight through.
 - If a scene's narration is rewritten in the editor and re-recorded, the
   direction on that scene is skipped, because it is found by its words.
