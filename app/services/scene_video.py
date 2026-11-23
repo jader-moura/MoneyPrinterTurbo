@@ -1,14 +1,15 @@
 """Video scenes: chosen scenes become generated clips, all in one batch.
 
-Why a batch, and why nothing else may run beside it
----------------------------------------------------
+Why a batch, and why no picture may be drawn beside it
+------------------------------------------------------
 A clip takes about six minutes on a 16 GB card (Wan 2.2 A14B, 4-step, 832x480)
 and needs the whole card plus about 20 GB of host memory. The image server
 cannot draw while that is going on, and neither can the language model. So
 video is not queued a scene at a time like pictures are: the user marks every
-scene that should move, then starts one batch. While it runs, every scene edit
-is refused (``refuse_while_running``) and the editor shows one blocking
-progress window.
+scene that should move, then starts one batch. While it runs, everything that
+draws a picture is refused (``refuse_while_running``); the rest of the editor
+(scene edits, rendering, other videos) carries on, and the progress window can
+be hidden.
 
 Two ways to make a clip, chosen per scene:
 
@@ -205,10 +206,12 @@ def running() -> bool:
 
 
 def refuse_while_running() -> None:
-    """Raises while a batch runs. Every scene edit goes through this.
+    """Raises while a batch runs. Everything that draws a picture goes through this.
 
     For every task, not only the one being animated: the reason is the
-    graphics card, and there is one.
+    graphics card, and there is one. Drawing needs the image server to load its
+    model back, which the batch has just asked it to drop. Everything that
+    does not draw (editing scenes, rendering, opening other videos) carries on.
     """
     with _LOCK:
         batch = _BATCH
@@ -218,7 +221,24 @@ def refuse_while_running() -> None:
         total = len(batch.clips)
     raise scene_editor.SceneBusyError(
         f"video scenes are being made ({done} of {total} finished) and they need "
-        "the whole graphics card; wait for them to finish, or stop them"
+        "the whole graphics card, so no picture can be drawn until they finish "
+        "or are stopped"
+    )
+
+
+def refuse_for_task(task_id: str) -> None:
+    """Raises while a batch is making clips for this very video.
+
+    For the one thing that must not happen under it: the video being deleted
+    while clips are still being written into its folder.
+    """
+    with _LOCK:
+        batch = _BATCH
+        if batch is None or batch.state != RUNNING or batch.task_id != str(task_id):
+            return
+    raise scene_editor.SceneBusyError(
+        "video scenes are being made for this video; wait for them to finish, "
+        "or stop them first"
     )
 
 

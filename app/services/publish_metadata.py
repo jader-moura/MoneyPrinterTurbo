@@ -509,6 +509,9 @@ def generate_thumbnail(
     原样去出图得到的是一张"插画化的句子"，不是一张封面，而用户会以为这个
     功能就是这么差。先按"生成文案"，那一步会把封面说明一起写出来。
     """
+    # Drawing a thumbnail is drawing a picture: not while video scenes hold
+    # the graphics card.
+    scene_editor._require_free_card()
     aspect = aspect_of(task_id)
     record = _record(task_id)
     text = str(

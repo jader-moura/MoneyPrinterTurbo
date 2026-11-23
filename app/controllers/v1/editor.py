@@ -269,6 +269,8 @@ def start_new_video(request: Request, body: NewVideoRequest):
     停在素材——成片永远由编辑器里的"渲染"决定。
     """
     request_id = base.get_task_id(request)
+    # A new video draws its pictures; that has to wait for video scenes.
+    _handle("", request_id, scene_video.refuse_while_running)
     choices = body.model_dump()
     task_id = utils.get_uuid()
     try:

@@ -147,7 +147,7 @@ const ui = {
   videoList: el("video-list"), videoProgress: el("video-progress"),
   videoBar: el("video-bar"), videoPct: el("video-pct"),
   videoElapsed: el("video-elapsed"), videoCancel: el("video-cancel"),
-  animateAll: el("animate-all"),
+  animateAll: el("animate-all"), videoHide: el("video-hide"),
   videoStart: el("video-start"), videoStop: el("video-stop"),
   videoDone: el("video-done"),
 };
@@ -6806,6 +6806,20 @@ async function fetchVideo() {
 /** The button in the top bar. Only there once something is marked. */
 function drawVideoButton() {
   const marked = markedScenes().length;
+  const video = state.video || {};
+  if (video.running) {
+    // A batch is running, for this video or another. The button is its
+    // progress, and opens the window again after it was hidden.
+    const finished = (video.done || 0) + (video.failed || 0);
+    ui.videoScenes.hidden = EMBEDDED;
+    ui.videoScenes.disabled = false;
+    ui.videoScenes.textContent = `Video scenes ${finished}/${video.total}`
+      + (video.remaining ? ` · ${aboutTime(video.remaining)} left` : "") + "…";
+    ui.videoScenes.title = "Video scenes are being made. Click to see how far "
+      + "they are, or to stop them. Pictures cannot be drawn until they finish.";
+    ui.animateAll.hidden = true;
+    return;
+  }
   ui.videoScenes.hidden = !marked || EMBEDDED;
   ui.videoScenes.textContent = `Make ${marked} video scene${marked === 1 ? "" : "s"}…`;
   ui.videoScenes.disabled = !!state.queue.busy || state.taskBusy;
@@ -6814,7 +6828,6 @@ function drawVideoButton() {
       + "card, so wait for the queue to finish."
     : "Make a video clip for every scene you marked, one after another.";
 
-  const video = state.video || {};
   ui.animateAll.hidden = EMBEDDED || !state.taskId || !(state.scenes || []).length
     || video.available === false;
   ui.animateAll.disabled = ui.videoScenes.disabled;
@@ -6830,17 +6843,29 @@ function videoSceneBox(scene) {
   const box = inspectorGroup("Video scene");
   const video = state.video || {};
   const select = document.createElement("select");
-  const choices = [
-    ["", scene.video ? "Keep this video clip" : "Still picture"],
-    ["image", scene.video ? "Animate the picture again" : "Animate this picture"],
-    ["text", "Make a video from the prompt"],
-  ];
-  for (const [value, label] of choices) {
+  const isVideo = !!scene.video;
+  // The other form of this scene, already on disk: the picture a clip was
+  // made from, or the clip made from this picture. Switching is instant.
+  const other = isVideo ? pictureBehind(scene) : clipMadeFrom(scene);
+  const choices = isVideo
+    ? [
+      ["", "Video clip (showing now)"],
+      ["swap", "Still picture (the original)", !other],
+      ["image", "Animate the picture again", !scene.video.still],
+      ["text", "Make a new video from the prompt"],
+    ]
+    : [
+      ["", "Still picture (showing now)"],
+      ...(other ? [["swap", "Video clip (already made)"]] : []),
+      ["image", other ? "Animate this picture again" : "Animate this picture",
+        isPending(scene)],
+      ["text", "Make a video from the prompt"],
+    ];
+  for (const [value, label, off] of choices) {
     const option = document.createElement("option");
     option.value = value;
     option.textContent = label;
-    // Nothing to animate until the scene has a picture.
-    if (value === "image" && isPending(scene)) option.disabled = true;
+    option.disabled = !!off;
     select.appendChild(option);
   }
   select.value = scene.animate || "";
@@ -6848,33 +6873,85 @@ function videoSceneBox(scene) {
 
   const note = document.createElement("p");
   note.className = "hint";
-  if (video.available === false) {
-    select.disabled = true;
-    note.textContent = `Not available on this computer: ${video.reason}.`;
-  } else if (scene.animate) {
+  if (scene.animate) {
     note.classList.add("pending");
     note.textContent = `Marked: ${videoModeLabel(scene.animate)}. It is made when `
       + "you press the “Make video scenes” button at the top, together with "
-      + "every other scene you mark.";
-  } else if (scene.video) {
-    note.textContent = "This scene is a video clip. Its picture is kept: "
-      + "“Earlier media” puts it back.";
+      + "every other scene you mark. Until then the scene stays as it is.";
+  } else if (isVideo) {
+    note.textContent = other
+      ? "This scene is a video clip. Choose “Still picture” to go back to the "
+        + "picture it was made from; the clip is kept and can be chosen again."
+      : "This scene is a video clip made from the prompt, so there is no "
+        + "picture behind it. “Earlier media” has what the scene showed before.";
+  } else if (other) {
+    note.textContent = "This scene is a still picture. The video clip made from "
+      + "it is kept: choose “Video clip” to put it back, no waiting.";
+  } else if (video.available === false) {
+    note.textContent = `Not available on this computer: ${video.reason}.`;
   } else {
     note.textContent = "Mark every scene that should move, then make them all "
       + `at once from the top bar. This one takes ${aboutTime(videoClipSeconds(scene))}.`;
   }
+  if (video.available === false) {
+    // Making clips is off here, but going back and forth between a picture
+    // and a clip that already exists needs no video model.
+    for (const option of select.options) {
+      if (option.value === "image" || option.value === "text") option.disabled = true;
+    }
+  }
   box.appendChild(note);
 
   select.addEventListener("change", async () => {
-    await run("Saving", () =>
-      call("PUT", scenePath(scene.index) + "/video", { mode: select.value }));
-    // A refused mark (no picture to animate, scene too long) leaves the list
-    // on a choice that was not saved. Put it back to what is true.
+    const chosen = select.value;
+    await run(chosen === "swap" ? "Switching" : "Saving", async () => {
+      if (chosen !== "swap") {
+        await call("PUT", scenePath(scene.index) + "/video", { mode: chosen });
+        return "";
+      }
+      // A mark for the next batch would act on what the scene no longer is.
+      if (scene.animate) {
+        await call("PUT", scenePath(scene.index) + "/video", { mode: "" });
+      }
+      await call("POST", `${scenePath(scene.index)}/restore`, { material: other });
+      return isVideo
+        ? `Scene ${scene.index + 1} is a still picture again. Its video clip is kept.`
+        : `Scene ${scene.index + 1} is the video clip again.`;
+    });
+    // A refused choice (no picture to animate, scene too long) leaves the list
+    // on something that was not saved. Put it back to what is true.
     drawInspector();
     drawClips();
     drawVideoButton();
   });
   return box;
+}
+
+/** A generated clip, by its name: clips made before their record was kept in
+    the scene's history are still known this way. */
+function isGeneratedClip(name) {
+  return /^wan-(image|text)-/i.test(materialKey(name));
+}
+
+/** The picture a video scene goes back to: the one its clip was made from,
+    or, for a clip made from the prompt, the last picture the scene showed. */
+function pictureBehind(scene) {
+  if (scene.video && scene.video.still) return scene.video.still;
+  const earlier = (scene.history || []).filter(
+    (entry) => entry && entry.material && !entry.video && !isGeneratedClip(entry.material));
+  return earlier.length ? earlier[earlier.length - 1].material : "";
+}
+
+/** The clip already made from this scene's picture, newest first choice; or
+    any clip the scene has had, when none is recorded against this picture. */
+function clipMadeFrom(scene) {
+  const mine = materialKey(scene.material);
+  const clips = (scene.history || []).filter(
+    (entry) => entry && entry.material
+      && (entry.video || isGeneratedClip(entry.material)));
+  if (!clips.length || !mine) return "";
+  const exact = clips.filter((entry) => entry.video && entry.video.still === mine);
+  return (exact.length ? exact : clips).slice(-1)[0].material;
 }
 
 /** The lines of the batch window: one per scene. */
@@ -6896,7 +6973,7 @@ function drawVideoList(rows) {
 }
 
 function videoButtons(shown) {
-  for (const name of ["Cancel", "Start", "Stop", "Done"]) {
+  for (const name of ["Cancel", "Start", "Hide", "Stop", "Done"]) {
     ui["video" + name].hidden = !shown.includes(name);
   }
 }
@@ -6953,7 +7030,11 @@ function videoSceneName(clip) {
 
 /** Step two and three: the batch running, then what came of it. */
 function drawVideoBatch(video) {
-  ui.videoModal.hidden = false;
+  // Hidden by the user while it runs: keep it hidden, and bring it back when
+  // the batch ends, because how it ended is news.
+  if (!video.running) state.videoHidden = false;
+  ui.videoModal.hidden = !!state.videoHidden;
+  drawVideoButton();
   const clips = video.clips || [];
   const finished = (video.done || 0) + (video.failed || 0);
   const here = video.task_id === state.taskId;
@@ -6977,7 +7058,8 @@ function drawVideoBatch(video) {
       ? `Making video scenes · ${finished} of ${video.total} done`
       : "Another video is making its video scenes";
     ui.videoNote.textContent = (video.stopping ? "Stopping" : (video.note || "Working"))
-      + ". The editor is locked until this is done.";
+      + ". You can hide this and keep working: edit, render, open other "
+      + "videos. Only drawing pictures has to wait until this is done.";
     ui.videoProgress.hidden = false;
     // Decoding counts as one more step, so the last step is not "100%".
     const share = clips.reduce((sum, clip) => sum + (
@@ -6989,7 +7071,7 @@ function drawVideoBatch(video) {
     ui.videoPct.textContent = share > 0 ? `${Math.round(share * 100)}%` : "";
     ui.videoElapsed.textContent = `${fmt(video.elapsed)} so far`
       + (video.remaining ? ` · ${aboutTime(video.remaining)} left` : "");
-    videoButtons(["Stop"]);
+    videoButtons(["Hide", "Stop"]);
     ui.videoStop.disabled = !!video.stopping;
     setTitleNote(`Video scenes ${finished}/${video.total}`);
     return;
@@ -7047,7 +7129,18 @@ async function adoptVideoBatch() {
   if (video.running || (video.state && video.task_id === state.taskId)) watchVideoBatch();
 }
 
-ui.videoScenes.addEventListener("click", () => askForVideoScenes());
+ui.videoScenes.addEventListener("click", () => {
+  if (state.video && state.video.running) {
+    state.videoHidden = false;
+    drawVideoBatch(state.video);
+    return;
+  }
+  askForVideoScenes();
+});
+ui.videoHide.addEventListener("click", () => {
+  state.videoHidden = true;
+  ui.videoModal.hidden = true;
+});
 ui.animateAll.addEventListener("click", async () => {
   try {
     await savePromptEdit();
@@ -7070,6 +7163,7 @@ ui.videoStart.addEventListener("click", async () => {
   try {
     // A prompt still being typed belongs to the clip made from it.
     await savePromptEdit();
+    state.videoHidden = false;
     state.video = await call(
       "POST", `/tasks/${encodeURIComponent(state.taskId)}/video-scenes`
         + (state.videoEverything ? "?everything=true" : ""));

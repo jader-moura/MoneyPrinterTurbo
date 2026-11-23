@@ -109,8 +109,15 @@ def _require_idle(task_id: str) -> None:
         raise SceneBusyError(
             "this task is still running; wait for it to finish before editing scenes"
         )
-    # A batch of video scenes holds the whole graphics card, whichever task it
-    # is for. Imported here because that module imports this one.
+
+
+def _require_free_card() -> None:
+    """Refuse to draw a picture while a batch of video scenes holds the card.
+
+    Only drawing: the batch has the image server's model unloaded, and loading
+    it back would take the memory the video model is using. Imported here
+    because that module imports this one.
+    """
     from app.services import scene_video
 
     scene_video.refuse_while_running()
@@ -213,6 +220,7 @@ def check_regenerate(
     later, where they would look like a generator failure.
     """
     _require_idle(task_id)
+    _require_free_card()
     params = load_params(task_id)
     source = str(getattr(params, "video_source", "") or "")
     if source in _UNSUPPORTED_REGEN_SOURCES:
@@ -842,6 +850,7 @@ def regenerate_material(
     了），给了它就按身份把那一段找回来。见 ``_locate_scene``。
     """
     _require_idle(task_id)
+    _require_free_card()
     with _editing(task_id):
         scenes = _scenes_or_fail(task_id)
         position = _scene_at(scenes, index)
@@ -2300,6 +2309,7 @@ def prepare_materials_rerun(task_id: str) -> VideoParams:
     再决定渲不渲。这和一条正常任务在 ``review_before_render`` 下的落点一样。
     """
     _require_idle(task_id)
+    _require_free_card()
     state = unfinished_materials(task_id)
     if not state["resumable"]:
         raise SceneError(
@@ -2484,6 +2494,9 @@ def delete_video(task_id: str) -> dict:
     先把整个目录改名挪走、再删。改名是一步到位的：有文件正被占用（Windows
     上浏览器还在播它）时改名整个失败，什么都没动，而不是删掉一半剩一半。
     """
+    from app.services import scene_video
+
+    scene_video.refuse_for_task(str(task_id or "").strip())
     name = str(task_id or "").strip()
     root = os.path.abspath(utils.task_dir())
     folder = os.path.abspath(os.path.join(root, name))

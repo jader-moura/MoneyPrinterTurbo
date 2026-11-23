@@ -239,7 +239,9 @@ def test_animating_everything_keeps_a_choice_made_by_hand(studio):
     assert scenes_of(studio.task_id)[0]["video"]["mode"] == "text"
 
 
-def test_nothing_can_be_edited_while_a_batch_runs(studio):
+def test_no_picture_is_drawn_while_a_batch_runs_but_the_rest_carries_on(studio):
+    from app.services import publish_metadata
+
     scenes = scenes_of(studio.task_id)
     scenes[0]["keyword"] = "HOLD the door"
     scene_manifest.save_scenes(studio.task_id, scenes)
@@ -247,21 +249,35 @@ def test_nothing_can_be_edited_while_a_batch_runs(studio):
     scene_video.start(studio.task_id)
     wait_until(lambda: scene_video.snapshot().get("current"), what="the clip to start")
 
-    for edit in (
-        lambda: scene_editor.update_scene(studio.task_id, 1, keyword="other"),
+    # Everything that draws a picture waits, in this video and in any other:
+    # the reason is the graphics card, and there is one.
+    for drawing in (
         lambda: scene_editor.check_regenerate(studio.task_id, 1),
         lambda: scene_regen_queue.enqueue_prompt(studio.task_id, 1),
-        lambda: scene_video.mark(studio.task_id, 1, "text"),
+        lambda: publish_metadata.generate_thumbnail(studio.task_id, prompt="a cover"),
+        scene_editor._require_free_card,
+        # A second batch, and deleting the video the clips are being written to.
         lambda: scene_video.start(studio.task_id),
-        # Another video altogether: the reason is the card, and there is one.
-        lambda: scene_editor._require_idle("some-other-task"),
+        lambda: scene_editor.delete_video(studio.task_id),
     ):
         with pytest.raises(scene_editor.SceneBusyError):
-            edit()
+            drawing()
+
+    # The rest of the editor carries on: scenes are edited, more are marked for
+    # the next batch, and another video is not held up at all.
+    scene_editor.update_scene(studio.task_id, 1, keyword="other")
+    scene_video.mark(studio.task_id, 1, "text")
+    scene_editor._require_idle(studio.task_id)
+    scene_editor._require_idle("some-other-task")
+    scene_video.refuse_for_task("some-other-task")
 
     studio.gate.write_text("open")
     wait_until(lambda: not scene_video.running(), what="the batch to end")
-    scene_editor.update_scene(studio.task_id, 1, keyword="other")
+    # The clip landed on its scene although the video was edited meanwhile.
+    after = scenes_of(studio.task_id)
+    assert after[0]["video"]["mode"] == "text" and after[1]["keyword"] == "other"
+    assert after[1]["animate"] == "text"
+    scene_editor.check_regenerate(studio.task_id, 1)
 
 
 def test_one_failed_clip_does_not_take_the_others_with_it(studio):
