@@ -31,7 +31,7 @@ from moviepy.audio.io.AudioFileClip import AudioFileClip
 from openai import OpenAI
 
 from app.config import config
-from app.services import bgm
+from app.services import bgm, chatterbox_server
 from app.utils import utils
 from app.utils.subtitle_reader import moviepy_subtitles
 from app.utils.subtitle_writer import staged_subtitle_file
@@ -1164,25 +1164,79 @@ def _concat_audio_files(audio_files: list[str], output_file: str) -> bool:
         )
 
 
+# Chatterbox on a 16 GB consumer card records slower than it speaks (measured
+# on an RTX 5060 Ti: 33 s of audio in 45 s), and its server refuses more than
+# 3000 characters in one request. A narration therefore goes out in pieces of
+# about a minute of speech each, which also keeps a failure cheap to notice.
+CHATTERBOX_MAX_REQUEST_CHARS = 1000
+CHATTERBOX_DEFAULT_TIMEOUT = 600
+
+_SENTENCE_END = re.compile(r"(?<=[.!?…。！？])[\"'”’)\]]*\s+")
+
+
+def _split_at_sentences(text: str, max_chars: int) -> list[str]:
+    """Break text into pieces of at most ``max_chars``, only at sentence ends.
+
+    A single sentence longer than the limit is kept whole: cutting it mid
+    phrase would be heard, and the limit is a budget, not a hard edge.
+    """
+    text = (text or "").strip()
+    if not text or len(text) <= max_chars:
+        return [text] if text else []
+    pieces: list[str] = []
+    current = ""
+    for sentence in _SENTENCE_END.split(text):
+        sentence = sentence.strip()
+        if not sentence:
+            continue
+        if current and len(current) + 1 + len(sentence) > max_chars:
+            pieces.append(current)
+            current = sentence
+        else:
+            current = f"{current} {sentence}" if current else sentence
+    if current:
+        pieces.append(current)
+    return pieces
+
+
 def _tts_with_pauses(
     text: str,
     voice_name: str,
     voice_rate: float,
     voice_file: str,
     voice_volume: float = 1.0,
+    max_speech_chars: int = 0,
 ) -> Union[SubMaker, None]:
     """
     处理包含停顿标签（如 [pause: 2s] / [pausa: 1.5s] / [停顿: 3秒]）的脚本合成。
     分段生成语音和精确的 PCM 静音，基于真实解码样本计算字幕偏移，并在末尾执行单次统一编码。
+
+    ``max_speech_chars`` also breaks any stretch of speech longer than that
+    into pieces at sentence ends, each recorded with its own request. It is
+    for a voice too slow to record a whole narration inside one request.
     """
     segments = utils.parse_script_with_pauses(text)
     if not segments:
         return None
 
+    was_split = False
+    if max_speech_chars > 0:
+        pieces = []
+        for seg_type, seg_val in segments:
+            if seg_type == "speech":
+                pieces.extend(
+                    ("speech", part)
+                    for part in _split_at_sentences(str(seg_val), max_speech_chars)
+                )
+            else:
+                pieces.append((seg_type, seg_val))
+        was_split = len(pieces) != len(segments)
+        segments = pieces
+
     speech_segments = [s for s in segments if s[0] == "speech"]
     pause_segments = [s for s in segments if s[0] == "pause"]
 
-    if not pause_segments:
+    if not pause_segments and not was_split:
         clean_text = utils.remove_pause_tags(text)
         return _single_tts(clean_text, voice_name, voice_rate, voice_file, voice_volume)
 
@@ -1340,6 +1394,44 @@ def tts(
     voxcpm_prompt_audio: bytes | None = None,
     voxcpm_prompt_text: str = "",
 ) -> Union[SubMaker, None]:
+    recording = dict(
+        text=text,
+        voice_name=voice_name,
+        voice_rate=voice_rate,
+        voice_file=voice_file,
+        voice_volume=voice_volume,
+        voxcpm_reference_audio=voxcpm_reference_audio,
+        voxcpm_prompt_audio=voxcpm_prompt_audio,
+        voxcpm_prompt_text=voxcpm_prompt_text,
+    )
+    if not is_chatterbox_voice(voice_name):
+        return _record_narration(**recording)
+
+    # Chatterbox 占着显卡且不会自己卸载模型：只在配音期间让它的容器运行，
+    # 录完立刻停掉，把显存还给出图和视频模型。
+    # Chatterbox holds the graphics card and cannot drop its model, so its
+    # container runs only for the recording and is stopped straight after —
+    # whether the recording worked or not — to hand the card to the stages
+    # that draw. See app/services/chatterbox_server.py.
+    if not chatterbox_server.ensure_running():
+        logger.error("the chatterbox server could not be started; nothing was recorded")
+        return None
+    try:
+        return _record_narration(**recording)
+    finally:
+        chatterbox_server.release()
+
+
+def _record_narration(
+    text: str,
+    voice_name: str,
+    voice_rate: float,
+    voice_file: str,
+    voice_volume: float = 1.0,
+    voxcpm_reference_audio: bytes | None = None,
+    voxcpm_prompt_audio: bytes | None = None,
+    voxcpm_prompt_text: str = "",
+) -> Union[SubMaker, None]:
     # Emoji are not narrated: Edge TTS reads their names aloud ("chart
     # increasing"), and each one gets its own word boundary.
     narration = utils.remove_emoji(text)
@@ -1347,6 +1439,18 @@ def tts(
         logger.warning("the script has no text to narrate once emoji are removed")
         return None
     text = narration
+    # Chatterbox 录得比说得慢：整段旁白一次请求会超时，所以总是分段录制。
+    # Chatterbox always records in pieces, pause tags or not: a whole
+    # narration in one request outlasts the request.
+    if is_chatterbox_voice(voice_name):
+        return _tts_with_pauses(
+            text=text,
+            voice_name=voice_name,
+            voice_rate=voice_rate,
+            voice_file=voice_file,
+            voice_volume=voice_volume,
+            max_speech_chars=CHATTERBOX_MAX_REQUEST_CHARS,
+        )
     # 无停顿标签时，原样直通原始文本，避免无意义的正则处理或空白截断
     if not utils.has_pause_tags(text):
         return _single_tts(
@@ -1364,7 +1468,7 @@ def tts(
     # （免费、原生就是 24 kHz，分段拼接不掉音质，多请求几次也不花钱）。
     # Pauses are recorded by synthesising the script in pieces. Edge TTS, and a
     # self-hosted Kokoro: it is free per request and natively 24 kHz, which is
-    # what the pieces are joined at.
+    # what the pieces are joined at. (Chatterbox, the same, is handled above.)
     if is_azure_v1_voice(voice_name) or is_kokoro_voice(voice_name):
         return _tts_with_pauses(
             text=text,
@@ -2887,6 +2991,7 @@ def _openai_compatible_tts(
     text: str,
     voice_rate: float,
     voice_file: str,
+    timeout: float = 120,
 ) -> Union[SubMaker, None]:
     """Shared transport for self-hosted, OpenAI-compatible ``/audio/speech``
     servers (Chatterbox, Kokoro, ...).
@@ -2919,7 +3024,7 @@ def _openai_compatible_tts(
             ensure_file_path_exists(voice_file)
 
             response = trace_http_call(
-                "POST", requests.post, url, json=payload, headers=headers, allow_redirects=False, timeout=120)
+                "POST", requests.post, url, json=payload, headers=headers, allow_redirects=False, timeout=timeout)
             if 300 <= response.status_code < 400:
                 # Redirecting a speech POST may replay a billed synthesis or
                 # forward its input/credentials. Do not follow or resubmit it.
@@ -3027,8 +3132,13 @@ def chatterbox_tts(
     if not model_id:
         model_id = config.chatterbox.get("model_id", "chatterbox") or "chatterbox"
 
+    try:
+        timeout = float(config.chatterbox.get("timeout", 0) or CHATTERBOX_DEFAULT_TIMEOUT)
+    except (TypeError, ValueError):
+        timeout = CHATTERBOX_DEFAULT_TIMEOUT
     return _openai_compatible_tts(
-        "chatterbox", base_url, api_key, model_id, voice, text, voice_rate, voice_file
+        "chatterbox", base_url, api_key, model_id, voice, text, voice_rate, voice_file,
+        timeout=timeout,
     )
 
 

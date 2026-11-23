@@ -17,6 +17,9 @@
 #   genserver  127.0.0.1:8730    the pictures (Z-Image-Turbo)         GPU
 #   Kokoro     127.0.0.1:8880    the narration                        CPU
 #
+# Chatterbox (127.0.0.1:4123, GPU) is the other narration voice. It is only
+# checked, never started here: the app runs its container per narration.
+#
 # Whisper is a library, not a service: it loads inside the app when the
 # subtitle stage runs.
 #
@@ -563,6 +566,35 @@ names = [v.get("id") if isinstance(v, dict) else v for v in voices]
 names = [n for n in names if n]
 print(f"       {len(names)} voices, including {', '.join(names[:4])}")
 PY
+fi
+
+# --- 3b. Chatterbox (only when config.toml names its container) --------------
+# Not started here, on purpose. It runs on the graphics card and cannot drop
+# its model, so the app starts the container for each narration and stops it
+# straight after (app/services/chatterbox_server.py). All this checks is that
+# the container exists to be started.
+
+CHATTERBOX_CONTAINER=""
+if [ -n "$PYTHON_BIN" ]; then
+  CHATTERBOX_CONTAINER=$("$PYTHON_BIN" - <<'PY' 2>/dev/null
+from app.config import config
+print(str(config.chatterbox.get("container", "") or "").strip())
+PY
+)
+fi
+
+if [ -n "$CHATTERBOX_CONTAINER" ]; then
+  if ! command -v docker >/dev/null 2>&1; then
+    fail "[chatterbox] container is set but docker is not installed"
+    FAILED=1
+  elif docker inspect "$CHATTERBOX_CONTAINER" >/dev/null 2>&1; then
+    ok "chatterbox    container $CHATTERBOX_CONTAINER (started per narration)"
+  else
+    fail "no container named $CHATTERBOX_CONTAINER"
+    detail "build and create it — the commands are at the top of"
+    detail "local_services/chatterbox/Dockerfile — or clear [chatterbox] container"
+    FAILED=1
+  fi
 fi
 
 echo

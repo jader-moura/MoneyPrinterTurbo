@@ -891,6 +891,11 @@ api_key = ""
 model_id = "chatterbox"
 # Voice names exposed by the configured Chatterbox server.
 voices = ["default-Female"]
+# Optional: the name of the server's Docker container on this machine. When
+# set, the app starts it for each narration and stops it straight after, so
+# the model does not hold the graphics card while pictures are drawn. See
+# config.local.example.toml for how to build and create it.
+container = ""
 
 [kokoro]
 # OpenAI-compatible Kokoro TTS server (hexgrad/Kokoro-82M, Apache-2.0, runs on CPU).

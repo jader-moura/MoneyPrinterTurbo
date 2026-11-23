@@ -288,6 +288,10 @@ def groups() -> list:
                      ("model_id", "Model", "text", {}),
                      ("voices", "Voices", "text",
                       {"help": "Comma separated."}),
+                     ("container", "Docker container", "text",
+                      {"help": "Started for each narration and stopped after "
+                               "it, so the graphics card is free for the "
+                               "pictures. Leave empty to run the server yourself."}),
                  ])},
                 {"id": "fish_audio", "label": "Fish Audio",
                  "fields": _text_fields("fish_audio", [

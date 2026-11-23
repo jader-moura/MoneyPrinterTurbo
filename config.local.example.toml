@@ -947,6 +947,18 @@ api_key = ""
 model_id = "chatterbox"
 # Voice names exposed by the configured Chatterbox server.
 voices = ["default-Female"]
+# Chatterbox runs on the graphics card and its server cannot drop the model,
+# so on a 16 GB card it must not stay up beside the picture or video model.
+# Name its Docker container here and the app starts it for each narration and
+# stops it straight after. Leave empty to run the server yourself.
+#
+# Build the image once and create the container without starting it — the
+# first narration does that. The commands are at the top of
+# local_services/chatterbox/Dockerfile.
+container = ""
+# Seconds to wait for the container to load its model. The first start also
+# downloads the weights, which is what the long default allows for.
+# start_timeout = 600
 
 [kokoro]
 # OpenAI-compatible Kokoro TTS server (hexgrad/Kokoro-82M, Apache-2.0, runs on CPU).

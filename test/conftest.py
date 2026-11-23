@@ -29,6 +29,22 @@ def _config_path() -> str:
     return str(getattr(config, "config_file", "") or "")
 
 
+@pytest.fixture(autouse=True)
+def leave_the_chatterbox_container_alone(monkeypatch):
+    """No test starts or stops the Chatterbox container on this machine.
+
+    The tests read the real config.toml, and one that names a container under
+    ``[chatterbox]`` would have any narration test with a Chatterbox voice run
+    ``docker start`` and ``docker stop`` against it. So tests see no managed
+    container unless they put one there themselves.
+    """
+    try:
+        from app.services import chatterbox_server
+    except Exception:  # pragma: no cover - 模块本身坏了时不挡着测试
+        return
+    monkeypatch.setattr(chatterbox_server, "_container", lambda: "")
+
+
 @pytest.fixture(scope="session", autouse=True)
 def keep_the_real_config_intact(tmp_path_factory):
     """整轮测试期间，保存配置写的是一份临时副本，不是仓库里的 config.toml。

@@ -2747,17 +2747,19 @@ class TestElevenLabsVoice(unittest.TestCase):
         script_with_pause = "Part 1. [pause: 2s] Part 2."
 
         # Kokoro 是本机的、按请求不花钱、原生 24 kHz：分段合成，停顿是真的。
-        with (
-            patch.object(vs, "_single_tts") as mock_single,
-            patch.object(vs, "_tts_with_pauses", return_value="pieces") as mock_split,
-        ):
-            self.assertEqual(
-                vs.tts(text=script_with_pause, voice_name="kokoro:af_bella",
-                       voice_rate=1.0, voice_file="dummy.mp3"),
-                "pieces",
-            )
-            mock_split.assert_called_once()
-            mock_single.assert_not_called()
+        # Chatterbox 同理：也是本机的、原生 24 kHz。
+        for local_voice in ("kokoro:af_bella", "chatterbox:narrator-Male"):
+            with (
+                patch.object(vs, "_single_tts") as mock_single,
+                patch.object(vs, "_tts_with_pauses", return_value="pieces") as mock_split,
+            ):
+                self.assertEqual(
+                    vs.tts(text=script_with_pause, voice_name=local_voice,
+                           voice_rate=1.0, voice_file="dummy.mp3"),
+                    "pieces",
+                )
+                mock_split.assert_called_once()
+                mock_single.assert_not_called()
 
         for voice in non_azure_voices:
             with (

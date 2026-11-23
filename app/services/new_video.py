@@ -102,7 +102,7 @@ TTS_SERVERS = (
     ("mimo-tts", "Xiaomi MiMo TTS"),
     ("minimax-tts", "MiniMax TTS"),
     ("elevenlabs", "ElevenLabs"),
-    ("chatterbox", "Chatterbox"),
+    ("chatterbox", "Chatterbox (local)"),
     ("fish_audio", "Fish Audio"),
     ("voxcpm", "VoxCPM"),
 )
