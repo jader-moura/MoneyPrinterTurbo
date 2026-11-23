@@ -2052,12 +2052,18 @@ def describe(task_id: str, endpoint: str = "", *, with_timing: bool = False) -> 
         record["trim_start"] = timing["trim_start"]
         record["duration"] = timing["duration"]
         record["source_duration"] = None
-        # 这一段能不能拉得比素材本身还长。图片烘出来的片段可以（按新时长重
-        # 渲一段），网上下回来的视频不行（没法凭空造帧）。界面拿它决定拖拽
-        # 把手要不要夹——不告诉它的话，它只能按后缀猜，而推拉镜头烘出来的
-        # 片段后缀就是 .mp4。
-        record["can_hold_longer"] = timeline.baked_from_an_image(
-            scene.get("material") or ""
+        # 这一段能不能拉得比素材本身还长：都能。图片按新时长重渲一段，视频
+        # 把最后一帧定住。留着这个键是因为界面读它；``holds_last_frame`` 说
+        # 的是多出来的那一截会是哪一种。
+        #
+        # Every scene can be set longer than its material now: a picture is
+        # drawn again at the new length, a clip holds its last frame. The key
+        # stays because the editor reads it; ``holds_last_frame`` says which
+        # of the two the extra time will be.
+        record["can_hold_longer"] = True
+        record["holds_last_frame"] = bool(scene.get("material")) and (
+            not timeline.baked_from_an_image(scene.get("material") or "")
+            and scene_manifest.material_kind(scene.get("material") or "") == "video"
         )
         if with_timing and record["exists"]:
             try:
@@ -3228,10 +3234,19 @@ def update_timing(
     # 长度重渲一遍（它那边的判断一直是对的——"不是视频，或者原图还在"）。
     # 所以这里放行、记下来就够了，剩下的交给出片那一步。
     #
-    # 放行的只有"重渲得出来"的那些。网上下回来的视频没有原图，拉不过自己
-    # 的长度是物理，照旧夹回去并报 ``clamped``。
+    # 视频也一样放行：一段场景可以比它的片段长，多出来的那一截在出片时定在
+    # 最后一帧上（``timeline.ensure_video_length``），预览里播放器本来也是
+    # 这么停的。用户把一段拖多长就是多长——夹回去是替他做了决定。
+    #
+    # A scene may outlast its footage as well as its picture: the user sets
+    # the length, and the render holds the clip's last frame for the rest
+    # (``timeline.ensure_video_length``), which is also what the preview's
+    # player does at the end of a file. Pulling the number back to the clip's
+    # length was deciding for them.
+    #
     # ``render=True`` 是另一回事：那不是拖拽，是"按旁白铺满"这种一次性的
-    # 批量动作，本来就慢，而且它要的是**现在就**拿到正确长度的素材。
+    # 批量动作，本来就慢，而且它要的是**现在就**拿到正确长度的素材。它不
+    # 自作主张地把视频定格：定格是用户拖出来的，不是自动分配出来的。
     may_exceed = False
     if render:
         if (
@@ -3250,9 +3265,8 @@ def update_timing(
         # png 都打开重算一遍摘要才能确认：实测一次 2.42 秒，挂在拖拽上就
         # 是每松手卡两秒半，那和之前跑 ffmpeg 没差多少。
         #
-        # 猜错的代价仍旧是零：原图真被删了的话，出片那一步照旧夹回素材长
-        # 度并说一句 clamped。
-        may_exceed = timeline.baked_from_an_image(material)
+        # 现在不用猜了：图片重渲，视频定格，哪一种都放行。
+        may_exceed = True
 
     timing = timeline.normalise_timing(
         source_duration=source_duration,
@@ -3272,6 +3286,14 @@ def update_timing(
         )
     scene["clamped"] = timing["clamped"]
     scene["source_duration"] = timing["source_duration"]
+    # How long the scene shows its clip's last frame, in seconds on screen. A
+    # picture has none: it is drawn again at the new length.
+    scene["held"] = 0.0
+    if needed_source is not None and not timeline.baked_from_an_image(material) and (
+        scene_manifest.material_kind(material) == "video"
+    ):
+        scene["held"] = round(timeline.held_seconds(
+            source_duration, timing["trim_start"], needed_source) / max(float(speed), 1e-6), 3)
     return scene
 
 

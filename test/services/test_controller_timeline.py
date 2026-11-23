@@ -102,16 +102,16 @@ class TestTimingUpdates:
         assert scene["trim_start"] == 1.0
         assert scene["duration"] == 2.0
 
-    def test_a_duration_past_the_material_is_clamped_and_flagged(self, client, reviewed):
-        """拖过素材末尾不报错，但要让界面知道被收住了。"""
+    def test_a_duration_past_the_material_is_kept(self, client, reviewed):
+        """A scene is as long as the user sets it, however long its material is."""
         response = client.put(
             f"/api/v1/tasks/{reviewed}/scenes/0/timing",
             json={"trim_start": 0.0, "duration": 99.0},
         )
         assert response.status_code == 200
         body = response.json()["data"]
-        assert body["duration"] == 5.0
-        assert body["clamped"] is True
+        assert body["duration"] == 99.0
+        assert body["clamped"] is False
 
     def test_reset_returns_the_scene_to_an_automatic_duration(self, client, reviewed):
         client.put(

@@ -163,13 +163,29 @@ class TestBuildEditList:
                     timeline.build_edit_list(two_scenes, scenes)
         assert extend.call_count == 1
 
-    def test_a_video_held_longer_is_clamped_instead_of_re_rendered(self, two_scenes):
+    def test_a_video_held_longer_keeps_its_last_frame_instead_of_being_cut(self, two_scenes):
+        scenes = [{"index": 0, "material": "1.mp4", "duration": 9.0}]
+        lengths = {"held.mp4": 9.1}
+        with patch.object(scene_manifest, "material_kind", return_value="video"):
+            with patch.object(timeline, "ensure_image_length") as extend, \
+                    patch.object(timeline, "ensure_video_length",
+                                 return_value="held.mp4") as hold, \
+                    patch.object(timeline, "probe_duration",
+                                 side_effect=lambda path: lengths.get(path, 5.0)):
+                edit_list = timeline.build_edit_list(two_scenes, scenes)
+        assert extend.call_count == 0
+        assert hold.call_count == 1 and hold.call_args.args[2] == 9.0
+        assert edit_list[0]["path"] == "held.mp4"
+        assert edit_list[0]["end"] == 9.0
+
+    def test_a_clip_that_cannot_be_held_ends_where_it_does(self, two_scenes):
+        """ffmpeg failing costs that one scene its extra seconds, not the render."""
         scenes = [{"index": 0, "material": "1.mp4", "duration": 9.0}]
         with patch.object(scene_manifest, "material_kind", return_value="video"):
-            with patch.object(timeline, "ensure_image_length") as extend:
-                with patch.object(timeline, "probe_duration", return_value=5.0):
-                    edit_list = timeline.build_edit_list(two_scenes, scenes)
-        assert extend.call_count == 0
+            with patch.object(timeline, "ensure_video_length",
+                              side_effect=lambda task, material, needed: material), \
+                    patch.object(timeline, "probe_duration", return_value=5.0):
+                edit_list = timeline.build_edit_list(two_scenes, scenes)
         assert edit_list[0]["end"] == 5.0
 
 

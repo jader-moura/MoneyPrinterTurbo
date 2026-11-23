@@ -385,6 +385,113 @@ def _extend_images(task_id: str, wanted: list[tuple[str, float]]) -> dict:
     return dict(zip(unique, rendered))
 
 
+#: Where the held copies of clips are kept, inside the video's own folder. A
+#: folder of its own so that the list of a video's earlier media, which reads
+#: only the files beside the manifest, never offers one as a clip to pick.
+HELD_DIR = "held"
+
+
+def held_seconds(source_duration: float, trim_start: Any, needed_source: Any) -> float:
+    """How long a scene outlasts the footage it shows, in source seconds."""
+    try:
+        over = float(needed_source) - (float(source_duration) - float(trim_start or 0.0))
+    except (TypeError, ValueError):
+        return 0.0
+    return round(over, 3) if over > 1e-6 else 0.0
+
+
+def ensure_video_length(task_id: str, material: str, needed_source: float) -> str:
+    """A copy of this clip that holds its last frame until it is long enough.
+
+    A scene may be set longer than the clip it shows. A picture is drawn again
+    at the new length (``ensure_image_length``); footage has no more frames to
+    give, so its last one stays on screen for the rest — what a video editor
+    does when a clip is dragged past its end.
+
+    ``needed_source`` is measured from the start of the file, like the length
+    ``ensure_image_length`` takes. The copy is named after the file it was made
+    from and the length, so asking again for the same one costs nothing.
+    Returns the material untouched when it is already long enough, and when
+    ffmpeg fails: the caller then cuts the scene at the clip's end, as before,
+    rather than losing the whole render to one scene.
+    """
+    import subprocess
+
+    source_duration = probe_duration(material)
+    if float(needed_source) <= source_duration + 1e-6:
+        return material
+    # A few frames over what is asked. A file is a whole number of frames
+    # long, and one that came out a frame short would cut the scene short by
+    # that much; what is over is simply not shown.
+    target = round(max(MIN_CLIP_DURATION, float(needed_source)) + 0.1, 2)
+
+    try:
+        path, modified, size = _file_identity(material)
+    except OSError:
+        return material
+    digest = hashlib.sha256(f"{path}|{modified}|{size}|{target:.2f}".encode()).hexdigest()
+    folder = os.path.join(os.path.dirname(path), HELD_DIR)
+    held = os.path.join(folder, f"held-{digest[:24]}.mp4")
+    if os.path.isfile(held) and os.path.getsize(held) > 0:
+        return held
+
+    os.makedirs(folder, exist_ok=True)
+    part = held + ".part.mp4"
+    extra = target - source_duration
+    done = subprocess.run(
+        [utils.get_ffmpeg_binary(), "-v", "error", "-y", "-i", material,
+         # A little more than is asked for, then cut to the length exactly:
+         # the filter rounds to whole frames and a frame short would show.
+         "-vf", f"tpad=stop_mode=clone:stop_duration={extra + 0.5:.3f}",
+         "-t", f"{target:.3f}",
+         # The finished video never carries a clip's own sound.
+         "-an", "-c:v", "libx264", "-preset", "medium", "-crf", "16",
+         "-pix_fmt", "yuv420p", part],
+        stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
+    if done.returncode != 0 or not os.path.isfile(part):
+        try:
+            os.remove(part)
+        except OSError:
+            pass
+        logger.warning(
+            f"could not hold the last frame of {os.path.basename(material)} to "
+            f"{target:.2f}s; the scene ends where the clip does, task_id: {task_id}: "
+            f"{done.stderr.decode('utf-8', 'replace')[-200:]}"
+        )
+        return material
+    os.replace(part, held)
+    logger.info(
+        f"held the last frame of {os.path.basename(material)} for {extra:.2f}s "
+        f"to cover a {target:.2f}s scene, task_id: {task_id}"
+    )
+    return held
+
+
+def _hold_videos(task_id: str, wanted: list[tuple[str, float]]) -> dict:
+    """Hold the last frame of each of these clips, several at a time.
+
+    Returns ``{(material, length): the clip to use}``, like ``_extend_images``.
+    """
+    unique = list(dict.fromkeys(wanted))
+    if not unique:
+        return {}
+    from app.services import video as video_service
+    from app.utils import logging_utils
+
+    def hold(pair):
+        material, needed = pair
+        return ensure_video_length(task_id, material, needed)
+
+    workers = min(video_service._get_clip_processing_concurrency(), len(unique))
+    if workers <= 1:
+        return {pair: hold(pair) for pair in unique}
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="video-hold") as pool:
+        made = list(pool.map(logging_utils.bind_log_scope(hold), unique))
+    return dict(zip(unique, made))
+
+
 def build_edit_list(
     task_id: str,
     scenes: Iterable[dict],
@@ -434,25 +541,35 @@ def build_edit_list(
         # unstretchable video, and twelve five-second clips can then never
         # cover a 64s narration. The test is therefore "not a video file, or
         # its source image is still on disk" — a downloaded video matches
-        # neither and stays clamped to its own length.
+        # neither: it has no more frames to give, so its last one is held for
+        # the rest of the scene (``ensure_video_length``). The scene is as long
+        # as the user made it either way.
+        extend_to = hold_to = None
         if needed_source is not None and (
             needed_source > source_duration - float(trim_start) + 1e-6
-        ) and (
-            scene_manifest.material_kind(material) != "video"
-            or source_image_for(task_id, material) is not None
         ):
-            extend_to = float(trim_start) + needed_source
-        else:
-            extend_to = None
+            if (
+                scene_manifest.material_kind(material) != "video"
+                or source_image_for(task_id, material) is not None
+            ):
+                extend_to = float(trim_start) + needed_source
+            else:
+                hold_to = float(trim_start) + needed_source
         prepared.append({
             "scene": scene, "material": material, "source_duration": source_duration,
             "requested": requested, "trim_start": trim_start, "extend_to": extend_to,
+            "hold_to": hold_to,
         })
 
     extended_clips = _extend_images(
         task_id,
         [(item["material"], item["extend_to"]) for item in prepared
          if item["extend_to"] is not None],
+    )
+    held_clips = _hold_videos(
+        task_id,
+        [(item["material"], item["hold_to"]) for item in prepared
+         if item["hold_to"] is not None],
     )
 
     edit_list: list[dict] = []
@@ -466,6 +583,11 @@ def build_edit_list(
             extended = extended_clips[(material, item["extend_to"])]
             if extended != material:
                 material = extended
+                source_duration = probe_duration(material)
+        elif item["hold_to"] is not None:
+            held = held_clips[(material, item["hold_to"])]
+            if held != material:
+                material = held
                 source_duration = probe_duration(material)
 
         timing = normalise_timing(

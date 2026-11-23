@@ -12,8 +12,8 @@ later in the edition the user must be able to do whatever he wants"。
 里），而 ``material_kind`` 按后缀把它判成 video，于是"要停更久就重渲一段"
 那条路根本走不到，一张图就被钉死在出片时烘出来的那个长度上。
 
-真·视频（网上下回来的素材）仍然停不过它本身的长度——那是物理，不是策略，
-而且会照旧报 ``clamped``。
+真·视频（网上下回来的素材、Wan 片段）没有更多的帧可给，但场景照样想多长
+就多长：多出来的那一截定在最后一帧上。见 test_hold_a_clip_longer.py。
 """
 
 import os
@@ -184,37 +184,53 @@ class TestTheDragHandleKnowsToo:
             scenes = scene_editor.describe(task_id, with_timing=True)["scenes"]
         assert scenes[0]["can_hold_longer"] is True
 
-    def test_a_downloaded_clip_is_flagged_as_fixed_length(self, task_root, idle_task):
+    def test_a_downloaded_clip_can_be_held_longer_too_on_its_last_frame(
+        self, task_root, idle_task
+    ):
         task_id, _ = a_task(task_root, material="downloaded.mp4")
         with patch.object(timeline, "probe_duration", return_value=BAKED):
             scenes = scene_editor.describe(task_id, with_timing=True)["scenes"]
-        assert scenes[0]["can_hold_longer"] is False
+        assert scenes[0]["can_hold_longer"] is True
+        assert scenes[0]["holds_last_frame"] is True
 
-    def test_the_editor_clamps_on_the_flag_not_on_the_kind(self):
-        """``scene.kind`` 对一段 .zoom-*.mp4 来说就是 video。"""
+    def test_a_picture_is_drawn_again_rather_than_frozen(self, task_root, idle_task):
+        task_id, _ = a_task(task_root, material=("c" * 64) + ".zoom-abc.mp4")
+        with patch.object(timeline, "probe_duration", return_value=BAKED):
+            scenes = scene_editor.describe(task_id, with_timing=True)["scenes"]
+        assert scenes[0]["holds_last_frame"] is False
+
+    def test_the_editor_does_not_cap_the_drag_at_the_material(self):
+        """The handle used to stop at the end of the clip, in the browser,
+        before the server was ever asked."""
         source = (
             Path(__file__).parents[2] / "resource" / "public" / "editor" / "editor.js"
         ).read_text(encoding="utf-8")
-        assert "!scene.can_hold_longer" in source
-        assert 'scene.kind === "video"' not in source
+        assert "!scene.can_hold_longer" not in source
+        assert "(source - nextTrimStart) / state.speed" not in source
 
 
 class TestWhatStaysTheSame:
-    def test_a_real_video_still_cannot_outlast_itself(self, task_root, idle_task):
-        """网上下回来的片子停不过它自己的长度，而且照旧说出来。
-
-        ``ensure_image_length`` 找不到原图就原样返回，这里就是那条路。
-        """
+    def test_a_real_video_is_as_long_as_it_is_set_and_says_what_is_held(
+        self, task_root, idle_task
+    ):
+        """The scene keeps the length it was given; nothing is encoded on a
+        drag, and the answer says how long the last frame will stay."""
         task_id, material = a_task(task_root, material="downloaded.mp4")
 
         with patch.object(timeline, "probe_duration", return_value=BAKED):
-            with patch.object(
-                timeline, "ensure_image_length", return_value=material
-            ):
+            with patch.object(timeline, "ensure_video_length") as hold:
                 scene = scene_editor.update_timing(task_id, 0, duration=10.0)
 
-        assert scene["duration"] == pytest.approx(BAKED)
-        assert scene["clamped"]
+        assert scene["duration"] == pytest.approx(10.0)
+        assert not scene["clamped"]
+        assert scene["held"] == pytest.approx(10.0 - BAKED)
+        hold.assert_not_called()
+
+    def test_a_picture_reports_nothing_held(self, task_root, idle_task):
+        task_id, _ = a_task(task_root)
+        with patch.object(timeline, "probe_duration", return_value=BAKED):
+            scene = scene_editor.update_timing(task_id, 0, duration=10.0)
+        assert scene["held"] == 0.0
 
     def test_making_it_shorter_never_re_renders(self, task_root, idle_task):
         """缩短不需要新素材，碰都不该碰出图那一步。"""

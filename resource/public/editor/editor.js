@@ -1036,6 +1036,10 @@ async function applyTiming(index, body) {
     return `Scene ${index + 1} was pulled back to the length of its material`
       + (scene.duration != null ? ` (${scene.duration.toFixed(2)}s).` : ".");
   }
+  if (scene && scene.held > 0.05) {
+    return `Scene ${index + 1} is now ${scene.held.toFixed(1)}s longer than its clip; `
+      + "the clip's last frame stays on screen for that time.";
+  }
   return "";
 }
 
@@ -5130,6 +5134,9 @@ function drawInspector() {
   note.textContent = source != null
     ? `Source material is ${source.toFixed(2)}s long.`
       + (scene.kind === "image" ? " Images are re-rendered when held longer." : "")
+      + (scene.holds_last_frame
+        ? " The scene can be any length: past the end of the clip, its last frame stays on screen."
+        : "")
     : "Source length unknown.";
   ui.inspBody.appendChild(note);
 
@@ -5480,16 +5487,15 @@ function startTrim(event) {
   const onMove = (move) => {
     const deltaSeconds = (move.clientX - startX) / state.pxPerSecond;
     if (side === "right") {
+      // 想拖多长就多长，不按素材长度夹。图片会按新时长重渲；视频没有更多
+      // 的帧，多出来的那一截定在最后一帧上——出片时如此，预览里播放器走到
+      // 文件末尾也正是这样停的。
+      //
+      // As long as the user drags it: no cap at the material's length. A
+      // picture is drawn again at the new length. A clip has no more frames,
+      // so its last one is held for the rest, in the finished video and in
+      // the preview alike (a player stops on the last frame of a file).
       nextSpan = Math.max(MIN_DURATION, startSpan + deltaSeconds);
-      if (source != null && !scene.can_hold_longer) {
-        // 真·视频拉不过源长度：没法凭空造帧。
-        //
-        // 判断依据是服务端给的 can_hold_longer，不是 scene.kind：图片烘出
-        // 来的片段（推拉镜头在文件里）后缀也是 .mp4，kind 也是 video，按
-        // 它来夹就等于把"把这张图停久一点"这件事整个挡掉——而那正是出片时
-        // 的 max_clip_duration 不该管到的地方。
-        nextSpan = Math.min(nextSpan, (source - nextTrimStart) / state.speed);
-      }
     } else {
       // 拖左把手是"改入点同时保持出点不动"，所以时长要反向跟着变。
       const shift = deltaSeconds * state.speed;
@@ -5663,7 +5669,9 @@ function tick() {
   } else {
     const { index, offset } = clipAt(state.playhead);
     const scene = state.scenes[index];
-    if (scene && !ui.preview.paused) {
+    // ``ended`` as well as ``paused``: a clip that has run out while its scene
+    // has not is the held last frame, and the clock has to keep walking.
+    if (scene && !ui.preview.paused && !ui.preview.ended) {
       const within = ui.preview.currentTime - (scene.trim_start || 0);
       state.playhead = sceneOffsets()[index] + Math.max(0, within / state.speed);
     } else {
@@ -5939,6 +5947,11 @@ ui.preview.addEventListener("ended", () => {
   if (narrationIsTheClock()) return;
   const { index } = clipAt(state.playhead);
   const offsets = sceneOffsets();
+  // A scene set longer than its clip keeps the last frame on screen for the
+  // rest of its time, as the finished video does. The player has already
+  // stopped on that frame; tick walks the playhead to the end of the scene.
+  if (index >= 0
+    && state.playhead < offsets[index] + screenDuration(state.scenes[index]) - 0.1) return;
   if (index >= 0 && index + 1 < state.scenes.length) {
     state.playhead = offsets[index + 1];
     syncPreview(false);
@@ -6652,7 +6665,7 @@ function fitNote(fit) {
   return ` It was slowed to ${pace}% speed to cover the scene`
     + (fit.short > 0.05
       ? `, which is as slow as it goes; the scene is still ${fit.short.toFixed(1)}s `
-        + "longer than the clip, so shorten the scene."
+        + "longer than the clip, and its last frame is held for that time."
       : ".");
 }
 
