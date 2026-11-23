@@ -281,7 +281,9 @@ def _material_job(
     """一个出图的活，验过的。入队由调用方做——写提示词那条路要把"入队"和
     "这个活完成了"放进同一次加锁里。"""
     plan = scene_editor.check_regenerate(
-        task_id, index, keyword=keyword, image_style=image_style
+        task_id, index, keyword=keyword, image_style=image_style,
+        # A photo used as it is draws nothing.
+        drawing=str(follow or "") != scene_editor.AS_IT_IS,
     )
     return _Job(
         task_id=task_id,
@@ -408,7 +410,9 @@ def enqueue_pending(task_id: str) -> dict:
     ]
     # 照片的排前面，用改图模型的那几张又排在最前：换一次模型要一分钟，
     # 同一种画法挨在一起就只换一次。同一组里还是时间线的顺序。
-    jobs.sort(key=lambda job: 0 if job.follow else 1 if job.from_photo else 2)
+    # Photos used as they are go first of all: they take a second each.
+    jobs.sort(key=lambda job: -1 if job.follow == scene_editor.AS_IT_IS
+              else 0 if job.follow else 1 if job.from_photo else 2)
 
     queued = []
     with _LOCK:

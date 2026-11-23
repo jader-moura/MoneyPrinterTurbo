@@ -362,7 +362,10 @@ class TestThePage:
 
     def test_choosing_it_sends_the_word_instead_of_a_number(self):
         queue = JS.split("async function queueRegeneration(")[1].split("\n}\n")[0]
-        assert "if (strength === SAME_PICTURE) body.follow = SAME_PICTURE;" in queue
+        # A way of using the photo ("picture", and now "original") is sent as
+        # the word; see test_the_photo_itself.py for the other one.
+        assert "value === SAME_PICTURE || value === AS_IT_IS ? value" in JS
+        assert "if (photoWay(strength)) body.follow = strength;" in queue
         assert "else if (strength) body.strength = strength;" in queue
 
     def test_every_way_of_choosing_a_photo_reads_the_one_choice(self):
@@ -372,6 +375,6 @@ class TestThePage:
         assert JS.count("photoKeepOf(") == 2  # 定义一次，用一次
 
     def test_the_queue_and_the_scene_say_which_way_it_was(self):
-        assert '(job.follow ? " · same picture, my style" : "")' in JS
+        assert ': job.follow ? " · same picture, my style" : "")' in JS
         note = JS.split("function usedPhotoNote(scene)")[1].split("\n}\n")[0]
         assert 'lines.push("same picture, in your style");' in note

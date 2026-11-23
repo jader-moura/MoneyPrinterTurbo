@@ -205,8 +205,12 @@ def check_regenerate(
     *,
     keyword: str | None = None,
     image_style: str | None = None,
+    drawing: bool = True,
 ) -> dict:
     """能不能重生成这一段；能的话返回执行它需要的东西。
+
+    ``drawing=False`` is a photo used as it is: nothing is drawn, so the
+    graphics card, the picture source, the prompt and the style do not matter.
 
     为排队而拆出来的：这些失败改请求才能解决（任务在渲染中、下标越界、这个
     素材源不按关键词出图、风格 id 不认识），所以必须在**排队的那一刻**就说，
@@ -220,19 +224,26 @@ def check_regenerate(
     later, where they would look like a generator failure.
     """
     _require_idle(task_id)
-    _require_free_card()
     params = load_params(task_id)
+    with _editing(task_id):
+        scenes = _scenes_or_fail(task_id)
+        position = _scene_at(scenes, index)
+        scene = dict(scenes[position])
+    term = str(keyword if keyword is not None else scene.get("keyword") or "").strip()
+    if not drawing:
+        return {
+            "index": position,
+            "keyword": term,
+            "scene_id": scene_manifest.scene_id(scene),
+            "material": str(scene.get("material") or ""),
+        }
+    _require_free_card()
     source = str(getattr(params, "video_source", "") or "")
     if source in _UNSUPPORTED_REGEN_SOURCES:
         raise SceneError(
             f"video source {source!r} does not generate materials from keywords; "
             "replace this scene with your own file instead"
         )
-    with _editing(task_id):
-        scenes = _scenes_or_fail(task_id)
-        position = _scene_at(scenes, index)
-        scene = dict(scenes[position])
-    term = str(keyword if keyword is not None else scene.get("keyword") or "").strip()
     if not term:
         term = suggested_keyword(task_id, position)
     if not term:
@@ -775,6 +786,20 @@ def framed_photo(task_id: str, reference: Any, frame: Any) -> Any:
     ).to_resolution()
     scale = FRAMED_LONG_EDGE / max(wide, high)
     width, height = int(wide * scale + 0.5), int(high * scale + 0.5)
+    return _placed_in_frame(reference, width, height, zoom, x, y)
+
+
+def _placed_in_frame(
+    reference: Any, width: int, height: int,
+    zoom: float = 1.0, x: float = 0.0, y: float = 0.0,
+) -> Any:
+    """The photo on a ``width`` x ``height`` frame: whole and centred unless
+    told otherwise, with a blurred copy of itself where it does not reach."""
+    import dataclasses
+    import io
+
+    from PIL import Image, ImageFilter
+
     try:
         with Image.open(io.BytesIO(reference.data)) as opened:
             photo = opened.convert("RGB")
@@ -849,8 +874,11 @@ def regenerate_material(
     队列里排着的活执行时下标可能已经指向别的画面了（用户删了、插了、重排
     了），给了它就按身份把那一段找回来。见 ``_locate_scene``。
     """
+    follow = str(follow or "").strip()
+    as_it_is = follow == AS_IT_IS
     _require_idle(task_id)
-    _require_free_card()
+    if not as_it_is:
+        _require_free_card()
     with _editing(task_id):
         scenes = _scenes_or_fail(task_id)
         position = _scene_at(scenes, index)
@@ -858,6 +886,8 @@ def regenerate_material(
         term = str(
             keyword if keyword is not None else scene.get("keyword") or ""
         ).strip()
+        seconds = scene.get("duration") or scene.get("clip_duration") or 0
+        own_motion = str(scene.get("image_motion") or "")
         # 三种情况要分开，否则界面上那个下拉框会说谎。
         #
         # 不传（``None``）：沿用这一段上次挑过的风格。不这样的话，在编辑器里
@@ -881,27 +911,36 @@ def regenerate_material(
     # 照着照片画有两种办法，一次只用一种：
     #   * 从照片出发，改掉一部分（``strength`` 说改多少）；
     #   * 只留照片的轮廓，按我的画风从头画（``follow``）——同一张图，换了画风。
-    follow = str(follow or "").strip()
+    #   * 第三种不画：照片本身放上去（``original``）。
     if follow and follow not in FOLLOW_WAYS:
         raise SceneError(
             f"unknown way of following a photo {follow!r}; pick one of: "
             f"{', '.join(FOLLOW_WAYS)}"
         )
     if follow and reference is None:
-        raise SceneError("redrawing a photo in your style needs a photo")
+        raise SceneError(
+            "using a photo as it is needs a photo" if as_it_is
+            else "redrawing a photo in your style needs a photo"
+        )
     kept = None
     if reference is not None and not follow:
         kept = float(strength) if strength else reference_image.strength()
 
-    new_path, source = _produce_material(
-        task_id,
-        term,
-        what=f"scene {position}",
-        image_style=style,
-        reference=reference,
-        strength=kept,
-        follow=follow,
-    )
+    if as_it_is:
+        new_path = _photo_as_material(
+            task_id, reference, seconds=seconds, motion=own_motion
+        )
+        source = "local"
+    else:
+        new_path, source = _produce_material(
+            task_id,
+            term,
+            what=f"scene {position}",
+            image_style=style,
+            reference=reference,
+            strength=kept,
+            follow=follow,
+        )
     # 照着画的那张照片留一份（锁外面：只是写一个文件）。
     used_photo = keep_used_photo(task_id, reference) if reference is not None else ""
 
@@ -968,7 +1007,9 @@ def regenerate_material(
 USED_PHOTO_DIR = "references"
 
 #: 照着照片画时"跟着它的什么走"。现在只有一种：轮廓。
-FOLLOW_WAYS = ("outlines", "picture")
+FOLLOW_WAYS = ("outlines", "picture", "original")
+#: The photo itself, not a drawing of it.
+AS_IT_IS = "original"
 _USED_PHOTO_NAME = re.compile(r"[0-9a-f]{16}\.png")
 
 
@@ -1037,6 +1078,46 @@ def kept_reference_photo(task_id: str, name: str) -> Any:
                 creator=str(recorded.get("creator") or ""),
             )
     return reference
+
+
+def _photo_as_material(
+    task_id: str, reference: Any, *, seconds: Any = 0, motion: str = ""
+) -> str:
+    """The chosen photo, untouched by any model, as this scene's clip.
+
+    It is fitted to the video's frame the way the user placed it (or whole and
+    centred, a blurred copy of itself filling what it does not cover), saved in
+    the task as a picture, and baked into a clip like every other picture, so
+    it can be held longer, given another motion, or animated afterwards.
+    """
+    import hashlib
+
+    from app.services import video as video_service
+
+    params = load_params(task_id)
+    wide, high = (int(side) for side in VideoAspect(
+        getattr(params, "video_aspect", None) or VideoAspect.portrait
+    ).to_resolution())
+    # A photo the user already placed in the frame has the frame's shape.
+    if not (reference.width and reference.height
+            and abs(reference.width * high - reference.height * wide)
+            <= max(reference.width, reference.height)):
+        reference = _placed_in_frame(reference, wide, high)
+    name = "photo-" + hashlib.sha256(reference.data).hexdigest()[:16] + ".png"
+    picture = os.path.join(utils.task_dir(task_id), name)
+    try:
+        if not os.path.isfile(picture):
+            with open(picture + ".part", "wb") as handle:
+                handle.write(reference.data)
+            os.replace(picture + ".part", picture)
+        length = float(seconds or 0) or float(
+            getattr(params, "video_clip_duration", 5) or 5)
+        wanted = motion or str(
+            _enum_value(getattr(params, "image_motion", "")) or "zoom")
+        return video_service.render_image_zoom_video(
+            picture, round(max(1.0, length), 2), image_motion=wanted)
+    except Exception as exc:
+        raise SceneError(f"the photo could not be put on the scene: {exc}") from exc
 
 
 def _image_prompt_template(params: VideoParams, image_style: str | None) -> str:

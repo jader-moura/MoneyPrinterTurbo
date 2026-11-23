@@ -166,7 +166,10 @@ class TestThePhotoCanBeResized:
         assert "Math.min(wide / w, high / h) * photoInHand.zoom" in placed
         assert "wide / 2 + photoInHand.x * wide - (w * fit) / 2" in placed
         source = (ROOT / "app/services/scene_editor.py").read_text(encoding="utf-8")
-        body = source.split("def framed_photo(")[1].split("\ndef ")[0]
+        # The placing itself is shared with a photo used as it is.
+        assert "return _placed_in_frame(reference, width, height, zoom, x, y)" in (
+            source.split("def framed_photo(")[1].split("\ndef ")[0])
+        body = source.split("def _placed_in_frame(")[1].split("\ndef ")[0]
         assert "min(width / photo.width, height / photo.height) * zoom" in body
         assert "width / 2 + x * width - size[0] / 2" in body
 

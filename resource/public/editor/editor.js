@@ -629,6 +629,12 @@ const KEEP_MY_STYLE = 0.95;
  * 画风。照片里每样东西都在原位，画出来的是我的画风——上面那两个值给不了
  * 的"两样都要"。这一段的画面提示词在这里不用：画面就是那张照片。 */
 const SAME_PICTURE = "picture";
+/* The fourth is not a drawing at all: the photograph itself goes on the scene,
+ * fitted to the frame. No model touches it, so it takes a second. */
+const AS_IT_IS = "original";
+/** A choice that is a way of using the photo, not an amount of it kept. */
+const photoWay = (value) =>
+  (value === SAME_PICTURE || value === AS_IT_IS ? value : "");
 
 // 上一次选的那个。整个编辑器记着：连着重画好几段的时候，用户的意图通常
 // 是同一个，每一段都要重选一遍是白费的点击。
@@ -647,6 +653,7 @@ function photoKeepPicker() {
     [KEEP_THE_PHOTO, "Keep the photograph — the real subject and framing"],
     [KEEP_MY_STYLE, "Loosely inspired — my style exactly"],
     [SAME_PICTURE, "Same picture — redrawn in my style"],
+    [AS_IT_IS, "Use the photo itself — the original, not redrawn"],
   ];
   for (const [value, label] of choices) {
     const option = document.createElement("option");
@@ -656,8 +663,7 @@ function photoKeepPicker() {
   }
   input.value = String(photoKeep);
   input.addEventListener("change", () => {
-    photoKeep = input.value === SAME_PICTURE
-      ? SAME_PICTURE : (Number(input.value) || KEEP_THE_PHOTO);
+    photoKeep = photoWay(input.value) || Number(input.value) || KEEP_THE_PHOTO;
   });
   wrap.append(caption, input);
   return { wrap, input };
@@ -665,8 +671,7 @@ function photoKeepPicker() {
 
 /** 下拉框现在选的是哪一种：一个数（保留多少），或者"同一张图"。 */
 function photoKeepOf(input) {
-  return input.value === SAME_PICTURE
-    ? SAME_PICTURE : (Number(input.value) || photoKeep);
+  return photoWay(input.value) || Number(input.value) || photoKeep;
 }
 
 /** 队列行上那半句："这一张是照着照片画的，还是只借了个意思"。 */
@@ -682,7 +687,7 @@ async function queueRegeneration(index, keyword, imageStyle, fromPhoto, strength
     if (fromPhoto) {
       body.from_photo = true;
       // 没选就不发：由服务端用配置里那个值，而不是在这里硬写一个默认。
-      if (strength === SAME_PICTURE) body.follow = SAME_PICTURE;
+      if (photoWay(strength)) body.follow = strength;
       else if (strength) body.strength = strength;
       // 用户自己挑的那一张（搜索结果里的地址，或者传上来的那张的名字）。
       Object.assign(body, photo || {});
@@ -696,6 +701,8 @@ async function queueRegeneration(index, keyword, imageStyle, fromPhoto, strength
       body
     );
     const how = !fromPhoto ? ""
+      : chose && strength === AS_IT_IS
+        ? " The photo you chose goes on it as it is."
       : chose ? " It will be drawn from the photo you chose."
         : " It will find a photo first.";
     say(job && job.position > 1
@@ -789,7 +796,8 @@ function drawQueue() {
         // 选的是哪一头也要写上：同一段重画两次、两次选得不一样，事后得看
         // 得出来哪一张是怎么来的。
         + keptLabel(job.strength)
-        + (job.follow ? " · same picture, my style" : "")
+        + (job.follow === AS_IT_IS ? " · the photo itself, not redrawn"
+          : job.follow ? " · same picture, my style" : "")
       : "";
     // 写提示词那种活说的是另一件事。两种活排同一条队（它们抢同一块显卡），
     // 所以这一行要分得出来是哪一种，否则"正在出图"会盖在一个根本没在出图
@@ -3325,7 +3333,9 @@ const photoKeepChoice = photoKeepPicker();
 photoKeepChoice.wrap.title = "Measured on this model: keeping the photograph gives you "
   + "the real subject and framing but a photographic picture, and loosely "
   + "inspired gives your style exactly while the photograph only hints at "
-  + "the subject. Same picture gives both; it ignores the prompt.";
+  + "the subject. Same picture gives both; it ignores the prompt. "
+  + "The photo itself is not drawn at all: the original goes on the scene, "
+  + "fitted to the frame, in about a second.";
 ui.photoKeepSlot.appendChild(photoKeepChoice.wrap);
 
 /* ---------- 手里的那张照片，摆进画框里 ----------
@@ -3601,7 +3611,7 @@ async function keepRoundPhoto(pick) {
   const scene = photoRound.scenes[photoRound.at];
   const body = pick.skip ? { skip: true } : { ...(pick.photo || {}) };
   if (!pick.skip) {
-    if (pick.strength === SAME_PICTURE) body.follow = SAME_PICTURE;
+    if (photoWay(pick.strength)) body.follow = pick.strength;
     else if (pick.strength) body.strength = pick.strength;
   }
   photoNote(pick.skip ? "Skipping this scene…" : "Keeping this photo…", "pending");
@@ -4757,15 +4767,18 @@ function usedPhotoNote(scene) {
   words.appendChild(head);
   const lines = [];
   if (used.width && used.height) lines.push(`${used.width} × ${used.height}`);
-  if (used.follow) {
+  if (used.follow === AS_IT_IS) {
+    lines.push("the photo itself, not redrawn");
+  } else if (used.follow) {
     lines.push("same picture, in your style");
   } else if (used.strength) {
     lines.push(used.strength <= 0.7 ? "kept the photograph" : "loosely inspired by it");
   }
   if (used.query) lines.push(`searched: ${used.query}`);
   if (used.file) {
-    head.textContent = "Drawn from this photo";
-    const address = `${API}/tasks/${encodeURIComponent(state.taskId)}`
+    head.textContent = used.follow === AS_IT_IS
+      ? "This photo, as it is" : "Drawn from this photo";
+    const address =`${API}/tasks/${encodeURIComponent(state.taskId)}`
       + `/photos/used/${encodeURIComponent(used.file)}`;
     const shot = document.createElement("img");
     shot.alt = "The photo this scene was drawn from";

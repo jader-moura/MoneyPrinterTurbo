@@ -858,7 +858,8 @@ class SceneRegenerateRequest(BaseModel):
     photo_picked: bool = False
     # "outlines"：同一张照片，换成我的画风——只跟着照片的轮廓，按画风从头
     # 画。给了它就不看 ``strength``。
-    follow: Optional[str] = Field(default=None, pattern="^(outlines|picture)$")
+    # "original": the photo itself goes on the scene; nothing is drawn.
+    follow: Optional[str] = Field(default=None, pattern="^(outlines|picture|original)$")
     # 用户在窗里把照片摆好的大小和位置。只对挑好的那一张有意义。
     frame: Optional[PhotoFrame] = None
 
@@ -879,7 +880,7 @@ class ScenePhotoPickRequest(BaseModel):
     photo_url: Optional[str] = Field(default=None, max_length=2000)
     photo_upload: Optional[str] = Field(default=None, max_length=80)
     photo_kept: Optional[str] = Field(default=None, max_length=40)
-    follow: Optional[str] = Field(default=None, pattern="^(outlines|picture)$")
+    follow: Optional[str] = Field(default=None, pattern="^(outlines|picture|original)$")
     # 用户在窗里把照片摆好的大小和位置。只对挑好的那一张有意义。
     frame: Optional[PhotoFrame] = None
 
