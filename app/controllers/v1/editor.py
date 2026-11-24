@@ -1195,6 +1195,17 @@ def start_video_scenes(
     )
 
 
+@router.delete(
+    "/tasks/{task_id}/video-scenes",
+    summary="Take this video out of the video scene queue, or forget its ended batch",
+)
+def leave_video_scenes(
+    request: Request, task_id: str = Path(..., description="Task ID")
+):
+    """Never stops the batch that is running: that is ``DELETE /video-scenes``."""
+    return utils.get_response(200, scene_video.forget(task_id))
+
+
 @router.get(
     "/tasks/{task_id}/video-scenes/pictures",
     summary="Which scenes animating every picture would animate",

@@ -96,6 +96,10 @@ WORKER = os.path.join(
 )
 
 WAITING, RUNNING, DONE, FAILED, STOPPED = "waiting", "running", "done", "failed", "stopped"
+#: A batch for another video, waiting for the one that has the card.
+QUEUED = "queued"
+#: How many batches that ended, and were followed by another, are remembered.
+ENDED_KEPT = 8
 
 
 #: Added to what a scene needs when its clip is fitted. The timeline clamps a
@@ -181,13 +185,17 @@ def availability() -> dict:
 
 
 class _Batch:
-    def __init__(self, task_id: str, clips: list[dict]) -> None:
+    def __init__(self, task_id: str, clips: list[dict], state: str = RUNNING) -> None:
         self.task_id = task_id
         self.clips = clips
-        self.state = RUNNING
+        self.state = state
         self.error = ""
         self.phase = "preparing"
-        self.note = "Freeing the graphics card"
+        self.note = ("Freeing the graphics card" if state == RUNNING
+                     else "Waiting for the video ahead")
+        # Set when it waited in the queue: its scenes are read again when its
+        # turn comes, because the video may have been edited in the meantime.
+        self.waited = state == QUEUED
         self.started_at = time.time()
         self.finished_at = 0.0
         self.current: Optional[dict] = None
@@ -197,7 +205,14 @@ class _Batch:
 
 
 _LOCK = threading.Lock()
+#: The batch that has the card, or the last one that had it.
 _BATCH: Optional[_Batch] = None
+#: Batches for other videos, in the order they were asked for. One video at a
+#: time has the card; the next starts by itself when that one ends.
+_QUEUE: list[_Batch] = []
+#: Batches that ended and were followed by another, so the editor of that
+#: video can still say how it went. Newest last.
+_ENDED: list[_Batch] = []
 
 
 def running() -> bool:
@@ -234,12 +249,19 @@ def refuse_for_task(task_id: str) -> None:
     """
     with _LOCK:
         batch = _BATCH
-        if batch is None or batch.state != RUNNING or batch.task_id != str(task_id):
-            return
-    raise scene_editor.SceneBusyError(
-        "video scenes are being made for this video; wait for them to finish, "
-        "or stop them first"
-    )
+        waiting = any(one.task_id == str(task_id) for one in _QUEUE)
+        making = (batch is not None and batch.state == RUNNING
+                  and batch.task_id == str(task_id))
+    if making:
+        raise scene_editor.SceneBusyError(
+            "video scenes are being made for this video; wait for them to finish, "
+            "or stop them first"
+        )
+    if waiting:
+        raise scene_editor.SceneBusyError(
+            "this video is waiting its turn to have video scenes made; take it "
+            "out of the queue first"
+        )
 
 
 def snapshot() -> dict:
@@ -254,55 +276,86 @@ def snapshot() -> dict:
         "max_scene_seconds": round(max_scene_seconds(), 2),
     }
     with _LOCK:
-        batch = _BATCH
-        if batch is None:
-            return payload
-        clips = [dict(clip) for clip in batch.clips]
-        current = batch.current["id"] if batch.current else ""
         now = time.time()
-        # Work is counted in frames: a clip of fewer frames is that much
-        # quicker. A clip part-way through counts for the steps it has had,
-        # with decoding as one more.
-        def progress(clip: dict) -> float:
-            if clip["state"] in (DONE, FAILED, STOPPED):
-                return 1.0
-            return min(clip.get("step", 0), STEPS) / (STEPS + 1)
-
-        worked = sum(clip["frames"] * progress(clip) for clip in clips if clip["state"] != FAILED)
-        left = sum(clip["frames"] * (1 - progress(clip)) for clip in clips)
-        elapsed = (batch.finished_at or now) - batch.started_at
-        if worked >= MAX_FRAMES:
-            # A full clip's worth is behind us: go by what this machine did,
-            # loading included.
-            remaining = left * elapsed / worked
-        else:
-            remaining = (left * TYPICAL_CLIP_SECONDS / MAX_FRAMES
-                         + batch.groups_left * TYPICAL_GROUP_SECONDS)
-        payload.update({
-            "running": batch.state == RUNNING,
-            "task_id": batch.task_id,
-            "state": batch.state,
-            "error": batch.error,
-            "phase": batch.phase,
-            "note": batch.note,
-            "stopping": batch.stopping,
-            "total": len(clips),
-            "done": sum(1 for clip in clips if clip["state"] == DONE),
-            "failed": sum(1 for clip in clips if clip["state"] == FAILED),
-            "current": current,
-            "steps": STEPS,
-            "elapsed": round(elapsed, 1),
-            "remaining": round(remaining) if batch.state == RUNNING else 0,
-            "clips": [
-                {
-                    "id": clip["id"], "scene": clip["index"], "mode": clip["mode"],
-                    "state": clip["state"], "error": clip.get("error", ""),
-                    "step": clip.get("step", 0),
-                }
-                for clip in clips
-            ],
-        })
+        if _BATCH is not None:
+            payload.update(_describe(_BATCH, now))
+        # Every video waiting, and when its turn is likely to come: after what
+        # is left of the one running and all of those ahead of it.
+        ahead = payload.get("remaining", 0) if payload["running"] else 0
+        queue = []
+        for position, waiting in enumerate(_QUEUE, start=1):
+            queue.append({
+                **_describe(waiting, now),
+                "position": position,
+                "starts_in": round(ahead),
+                "seconds": round(_expected_seconds(waiting.clips)),
+            })
+            ahead += _expected_seconds(waiting.clips)
+        payload["queue"] = queue
+        payload["ended"] = [
+            {**_describe(ended, now), "ended": True} for ended in _ENDED
+        ]
     return payload
+
+
+def _expected_seconds(clips: list[dict]) -> float:
+    """How long a batch that has not started is likely to take."""
+    groups = sum(
+        -(-sum(1 for clip in clips if clip["mode"] == mode) // CLIPS_PER_GROUP)
+        for mode in MODES
+    )
+    frames = sum(clip["frames"] for clip in clips)
+    return frames * TYPICAL_CLIP_SECONDS / MAX_FRAMES + groups * TYPICAL_GROUP_SECONDS
+
+
+def _describe(batch: _Batch, now: float) -> dict:
+    """One batch as the editor shows it. Called with the lock held."""
+    clips = [dict(clip) for clip in batch.clips]
+    current = batch.current["id"] if batch.current else ""
+
+    # Work is counted in frames: a clip of fewer frames is that much
+    # quicker. A clip part-way through counts for the steps it has had,
+    # with decoding as one more.
+    def progress(clip: dict) -> float:
+        if clip["state"] in (DONE, FAILED, STOPPED):
+            return 1.0
+        return min(clip.get("step", 0), STEPS) / (STEPS + 1)
+
+    worked = sum(clip["frames"] * progress(clip) for clip in clips if clip["state"] != FAILED)
+    left = sum(clip["frames"] * (1 - progress(clip)) for clip in clips)
+    elapsed = 0.0 if batch.state == QUEUED else (
+        (batch.finished_at or now) - batch.started_at)
+    if worked >= MAX_FRAMES:
+        # A full clip's worth is behind us: go by what this machine did,
+        # loading included.
+        remaining = left * elapsed / worked
+    else:
+        remaining = (left * TYPICAL_CLIP_SECONDS / MAX_FRAMES
+                     + batch.groups_left * TYPICAL_GROUP_SECONDS)
+    return {
+        "running": batch.state == RUNNING,
+        "task_id": batch.task_id,
+        "state": batch.state,
+        "error": batch.error,
+        "phase": batch.phase,
+        "note": batch.note,
+        "stopping": batch.stopping,
+        "total": len(clips),
+        "done": sum(1 for clip in clips if clip["state"] == DONE),
+        "failed": sum(1 for clip in clips if clip["state"] == FAILED),
+        "current": current,
+        "steps": STEPS,
+        "elapsed": round(elapsed, 1),
+        "remaining": round(remaining) if batch.state == RUNNING else 0,
+        "clips": [
+            {
+                "id": clip["id"], "scene": clip["index"], "mode": clip["mode"],
+                "state": clip["state"], "error": clip.get("error", ""),
+                "step": clip.get("step", 0),
+            }
+            for clip in clips
+        ],
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -481,6 +534,9 @@ def start(task_id: str, everything: bool = False) -> dict:
 
     With `everything`, every still picture is marked first, so the batch
     animates the whole video in one go.
+
+    While another video's batch has the card, this one is queued: it starts by
+    itself when the ones ahead of it have ended.
     """
     global _BATCH
     scene_editor._require_idle(task_id)
@@ -507,11 +563,30 @@ def start(task_id: str, everything: bool = False) -> dict:
         raise SceneError("no scene is marked to become a video; mark some first")
     clips = [_plan_clip(task_id, params, scene, scene["animate"]) for scene in marked]
 
+    task_id = str(task_id)
     with _LOCK:
-        if _BATCH is not None and _BATCH.state == RUNNING:
-            raise scene_editor.SceneBusyError("video scenes are already being made")
-        batch = _Batch(task_id, clips)
-        _BATCH = batch
+        busy = _BATCH is not None and _BATCH.state == RUNNING
+        if busy and _BATCH.task_id == task_id:
+            raise scene_editor.SceneBusyError(
+                "video scenes are already being made for this video")
+        if any(waiting.task_id == task_id for waiting in _QUEUE):
+            raise scene_editor.SceneBusyError(
+                "this video is already waiting its turn to have video scenes made")
+        # A new batch for this video replaces what is remembered of its last.
+        _ENDED[:] = [ended for ended in _ENDED if ended.task_id != task_id]
+        if busy:
+            _QUEUE.append(_Batch(task_id, clips, state=QUEUED))
+            position = len(_QUEUE)
+        else:
+            if _BATCH is not None and _BATCH.task_id != task_id:
+                _remember_ended(_BATCH)
+            batch = _Batch(task_id, clips)
+            _BATCH = batch
+    if busy:
+        logger.success(
+            f"queued {len(clips)} video scene(s) for task {task_id}, "
+            f"number {position} in line")
+        return snapshot()
     threading.Thread(
         target=_run, args=(batch,), name="scene-video-batch", daemon=True
     ).start()
@@ -530,6 +605,48 @@ def stop() -> dict:
         process = batch.process
     _end_process(process)
     return snapshot()
+
+
+def forget(task_id: str) -> dict:
+    """Take this video out of the queue, and forget how its last batch ended.
+
+    The batch that is running is not touched: that is `stop`.
+    """
+    task_id = str(task_id)
+    with _LOCK:
+        left = [waiting for waiting in _QUEUE if waiting.task_id != task_id]
+        taken = len(_QUEUE) - len(left)
+        _QUEUE[:] = left
+        _ENDED[:] = [ended for ended in _ENDED if ended.task_id != task_id]
+    if taken:
+        logger.info(f"task {task_id} left the video scene queue")
+    return snapshot()
+
+
+def _remember_ended(batch: _Batch) -> None:
+    """Keep an ended batch another is about to replace. Lock held."""
+    _ENDED[:] = [ended for ended in _ENDED if ended.task_id != batch.task_id]
+    _ENDED.append(batch)
+    del _ENDED[:-ENDED_KEPT]
+
+
+def _plan_again(batch: _Batch) -> None:
+    """Read the scenes of a batch that waited, now that its turn has come.
+
+    Hours may have passed: scenes were edited, unmarked, or the video is being
+    rendered. What is made is what is marked now.
+    """
+    scene_editor._require_idle(batch.task_id)
+    params = scene_editor.load_params(batch.task_id)
+    scenes = scene_editor._scenes_or_fail(batch.task_id)
+    marked = [scene for scene in scenes if scene.get("animate") in MODES]
+    if not marked:
+        raise SceneError(
+            "no scene of this video was still marked when its turn came")
+    clips = [_plan_clip(batch.task_id, params, scene, scene["animate"])
+             for scene in marked]
+    with _LOCK:
+        batch.clips = clips
 
 
 def dismiss() -> dict:
@@ -602,7 +719,11 @@ def _work_dir(task_id: str) -> str:
 
 
 def _run(batch: _Batch) -> None:
+    global _BATCH
+    following: Optional[_Batch] = None
     try:
+        if batch.waited:
+            _plan_again(batch)
         groups = [
             (mode, clips[at:at + CLIPS_PER_GROUP])
             for mode in MODES
@@ -639,11 +760,27 @@ def _run(batch: _Batch) -> None:
             batch.current = None
             batch.process = None
             batch.finished_at = time.time()
+            # The next video takes the card in the same breath, so that no
+            # picture can start being drawn in between. However this one
+            # ended: stopping a batch stops that video's, not the others'.
+            if _QUEUE and _BATCH is batch:
+                following = _QUEUE.pop(0)
+                _remember_ended(batch)
+                following.state = RUNNING
+                following.note = "Freeing the graphics card"
+                following.started_at = time.time()
+                _BATCH = following
         shutil.rmtree(os.path.join(utils.task_dir(batch.task_id), WORK_DIR), ignore_errors=True)
         logger.info(
             f"video scene batch for task {batch.task_id} ended {batch.state}: "
             f"{made} of {len(batch.clips)} made"
         )
+        if following is not None:
+            logger.success(
+                f"starting the queued video scenes of task {following.task_id}")
+            threading.Thread(
+                target=_run, args=(following,), name="scene-video-batch", daemon=True
+            ).start()
 
 
 def _run_worker(batch: _Batch, mode: str, clips: list[dict], number: int) -> None:

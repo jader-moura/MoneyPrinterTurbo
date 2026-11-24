@@ -6829,11 +6829,47 @@ async function fetchVideo() {
   return state.video;
 }
 
+/* One video at a time has the graphics card. A batch asked for while another
+   video's is running waits in a queue and starts by itself. */
+
+/** This video's place in that queue, if it is waiting. */
+function videoQueued(video = state.video || {}) {
+  return (video.queue || []).find((one) => one.task_id === state.taskId) || null;
+}
+
+/** How this video's batch ended, when another video has the card since. */
+function videoEnded(video = state.video || {}) {
+  return (video.ended || []).find((one) => one.task_id === state.taskId) || null;
+}
+
+/** Another video's batch is running, not this one's. */
+function videoElsewhere(video = state.video || {}) {
+  return !!video.running && video.task_id !== state.taskId;
+}
+
+/** "in about 2 h", or "next" when nothing measurable is ahead. */
+function startsIn(seconds) {
+  return seconds > 0 ? `in ${aboutTime(seconds)}` : "next";
+}
+
 /** The button in the top bar. Only there once something is marked. */
 function drawVideoButton() {
   const marked = markedScenes().length;
   const video = state.video || {};
-  if (video.running) {
+  const queued = videoQueued(video);
+  if (queued) {
+    ui.videoScenes.hidden = EMBEDDED;
+    ui.videoScenes.disabled = false;
+    ui.videoScenes.textContent = `Video scenes queued · starts ${startsIn(queued.starts_in)}…`;
+    ui.videoScenes.title = "Another video is making its video scenes. This "
+      + "video's start by themselves when it is done. Click to see, or to "
+      + "take this video out of the queue.";
+    ui.animateAll.hidden = true;
+    return;
+  }
+  // Another video's batch, and scenes marked here: the button queues them.
+  const elsewhere = videoElsewhere(video);
+  if (video.running && !(elsewhere && marked)) {
     // A batch is running, for this video or another. The button is its
     // progress, and opens the window again after it was hidden.
     const finished = (video.done || 0) + (video.failed || 0);
@@ -6843,16 +6879,25 @@ function drawVideoButton() {
       + (video.remaining ? ` · ${aboutTime(video.remaining)} left` : "") + "…";
     ui.videoScenes.title = "Video scenes are being made. Click to see how far "
       + "they are, or to stop them. Pictures cannot be drawn until they finish.";
-    ui.animateAll.hidden = true;
+    // In another video, every picture of this one can still be queued.
+    ui.animateAll.hidden = !elsewhere || EMBEDDED || !state.taskId
+      || !(state.scenes || []).length;
+    ui.animateAll.disabled = state.taskBusy;
+    ui.animateAll.title = "Turn every still picture of this video into a moving "
+      + "clip. Another video is making its scenes now, so these wait their turn.";
     return;
   }
   ui.videoScenes.hidden = !marked || EMBEDDED;
-  ui.videoScenes.textContent = `Make ${marked} video scene${marked === 1 ? "" : "s"}…`;
+  ui.videoScenes.textContent = `${elsewhere ? "Queue" : "Make"} ${marked} `
+    + `video scene${marked === 1 ? "" : "s"}…`;
   ui.videoScenes.disabled = !!state.queue.busy || state.taskBusy;
   ui.videoScenes.title = state.queue.busy
     ? "Pictures are still being drawn. Video scenes need the whole graphics "
       + "card, so wait for the queue to finish."
-    : "Make a video clip for every scene you marked, one after another.";
+    : elsewhere
+      ? "Another video is making its video scenes. These are queued and "
+        + "start by themselves when it is done."
+      : "Make a video clip for every scene you marked, one after another.";
 
   ui.animateAll.hidden = EMBEDDED || !state.taskId || !(state.scenes || []).length
     || video.available === false;
@@ -7026,9 +7071,18 @@ function askForVideoScenes(pictures) {
     + groups * ((state.video && state.video.typical_group_seconds) || 150);
   ui.videoModal.hidden = false;
   ui.videoBox.classList.remove("failed");
+  // Another video has the card: these are queued behind it, and behind
+  // every video already waiting.
+  const elsewhere = videoElsewhere();
+  const ahead = ((state.video || {}).remaining || 0)
+    + ((state.video || {}).queue || []).reduce((sum, one) => sum + (one.seconds || 0), 0);
   ui.videoTitle.textContent =
-    `Make ${marked.length} video scene${marked.length === 1 ? "" : "s"}?`;
-  ui.videoNote.textContent = `This takes ${aboutTime(total)}. Until it is done `
+    `${elsewhere ? "Queue" : "Make"} ${marked.length} video scene${marked.length === 1 ? "" : "s"}?`;
+  ui.videoNote.textContent = (elsewhere
+    ? "Another video is making its video scenes, so these wait their turn: "
+      + `they start by themselves ${startsIn(ahead)}. `
+    : "")
+    + `This takes ${aboutTime(total)}. Until it is done `
     + "the editor is locked and no pictures can be drawn: the video model needs "
     + "the whole graphics card. Each scene keeps its picture, so any of them "
     + "can be put back afterwards."
@@ -7061,6 +7115,31 @@ function drawVideoBatch(video) {
   if (!video.running) state.videoHidden = false;
   ui.videoModal.hidden = !!state.videoHidden;
   drawVideoButton();
+  ui.videoStop.textContent = "Stop";
+  const queued = video.running ? videoQueued(video) : null;
+  if (queued) {
+    // This video is waiting behind another one's batch.
+    const others = queued.position - 1;
+    drawVideoList((queued.clips || []).map((clip) => ({
+      what: videoSceneName(clip), kind: "waiting", state: "waiting",
+    })));
+    ui.videoBox.classList.remove("failed");
+    ui.videoTitle.textContent = `Waiting its turn · ${queued.total} video `
+      + `scene${queued.total === 1 ? "" : "s"}`;
+    ui.videoNote.textContent = "Another video is making its video scenes"
+      + (others ? `, and ${others} more ${others === 1 ? "is" : "are"} ahead of this one` : "")
+      + `. These start by themselves ${startsIn(queued.starts_in)} and take `
+      + `${aboutTime(queued.seconds)}. You can hide this and keep working, here `
+      + "or in another video. What is marked when their turn comes is what is made.";
+    ui.videoProgress.hidden = true;
+    ui.videoPct.textContent = "";
+    ui.videoElapsed.textContent = "";
+    videoButtons(["Hide", "Stop"]);
+    ui.videoStop.textContent = "Leave the queue";
+    ui.videoStop.disabled = false;
+    setTitleNote("Video scenes queued");
+    return;
+  }
   const clips = video.clips || [];
   const finished = (video.done || 0) + (video.failed || 0);
   const here = video.task_id === state.taskId;
@@ -7131,7 +7210,22 @@ async function watchVideoBatch() {
   try {
     for (;;) {
       const video = await fetchVideo();
+      const ended = videoEnded(video);
+      if (ended) {
+        // This video's batch is over and the next video has the card. Say how
+        // it went; Close picks the watching up again.
+        try { await refresh(); } catch { /* the timeline on screen is still valid */ }
+        drawVideoBatch(ended);
+        break;
+      }
       if (!video.state) { ui.videoModal.hidden = true; break; }
+      if (!video.running && video.task_id !== state.taskId) {
+        // The last batch was another video's: its result is told there.
+        ui.videoModal.hidden = true;
+        setTitleNote("");
+        drawVideoButton();
+        break;
+      }
       if (video.task_id === state.taskId && video.done !== seen) {
         // A clip just replaced a picture on disk; show it under the window.
         if (seen >= 0 || !video.running) {
@@ -7152,11 +7246,15 @@ async function watchVideoBatch() {
 async function adoptVideoBatch() {
   const video = await fetchVideo();
   drawInspector();
-  if (video.running || (video.state && video.task_id === state.taskId)) watchVideoBatch();
+  if (video.running || videoEnded(video)
+    || (video.state && video.task_id === state.taskId)) watchVideoBatch();
 }
 
 ui.videoScenes.addEventListener("click", () => {
-  if (state.video && state.video.running) {
+  const video = state.video || {};
+  // Scenes marked here while another video has the card: ask, then queue.
+  const toQueue = videoElsewhere(video) && !videoQueued(video) && markedScenes().length;
+  if (video.running && !toQueue) {
     state.videoHidden = false;
     drawVideoBatch(state.video);
     return;
@@ -7204,6 +7302,17 @@ ui.videoStart.addEventListener("click", async () => {
 ui.videoStop.addEventListener("click", async () => {
   ui.videoStop.disabled = true;
   try {
+    if (videoQueued()) {
+      // Waiting, not running: leave the queue. The video that has the card
+      // is not touched.
+      state.video = await call(
+        "DELETE", `/tasks/${encodeURIComponent(state.taskId)}/video-scenes`);
+      ui.videoModal.hidden = true;
+      setTitleNote("");
+      drawVideoButton();
+      say("This video is out of the queue. Its scenes are still marked.");
+      return;
+    }
     await call("DELETE", "/video-scenes");
   } catch (error) {
     ui.videoNote.textContent = String(error.message || error);
@@ -7214,9 +7323,20 @@ ui.videoDone.addEventListener("click", async () => {
   ui.videoModal.hidden = true;
   setTitleNote("");
   // Forget the finished batch, or the window would come back on reload.
-  try { await call("DELETE", "/video-scenes"); } catch { /* nothing to forget */ }
-  state.video = await fetchVideo();
+  // By this video's name first: the plain route would stop a batch another
+  // video has started since.
+  try {
+    await call("DELETE", `/tasks/${encodeURIComponent(state.taskId)}/video-scenes`);
+  } catch { /* an older server; or nothing to forget */ }
+  let video = await fetchVideo();
+  if (!video.running && video.state && video.task_id === state.taskId) {
+    try { await call("DELETE", "/video-scenes"); } catch { /* nothing to forget */ }
+    video = await fetchVideo();
+  }
   try { await refresh(); } catch { /* the timeline on screen is still valid */ }
+  drawVideoButton();
+  // Another video is still at it: keep the button's count moving.
+  if (video.running) watchVideoBatch();
 });
 
 /* ---------- 做过的片子 ----------
