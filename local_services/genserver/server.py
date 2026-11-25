@@ -42,6 +42,7 @@ from __future__ import annotations
 import argparse
 import base64
 import ctypes
+import faulthandler
 import gc
 import io
 import json
@@ -1826,6 +1827,10 @@ def main() -> int:
         "Not the default: run by hand in a terminal, stdin is the keyboard.",
     )
     args = parser.parse_args()
+    # A crash inside torch or the driver kills the process without a Python
+    # traceback: twice the log simply ended after the last drawing step. This
+    # writes where every thread was to stderr, which the launcher keeps.
+    faulthandler.enable(all_threads=True)
     if args.exit_with_parent:
         exit_with_parent()
 
