@@ -545,13 +545,20 @@ def start(task_id: str, everything: bool = False) -> dict:
         raise SceneError(f"video scenes cannot be made here: {state['reason']}")
 
     # Pictures still being drawn hold the card, and the batch is about to ask
-    # the image server to drop its model.
+    # the image server to drop its model. The same queue records narration
+    # lines again, and the voice is on that card too.
     from app.services import scene_regen_queue
 
-    if scene_regen_queue.snapshot()["busy"]:
+    waiting = scene_regen_queue.snapshot()
+    if waiting["busy"]:
+        active = [job for job in waiting.get("jobs") or []
+                  if job.get("state") in ("queued", "running")]
+        voice_only = bool(active) and all(
+            job.get("kind") == scene_regen_queue.NARRATION for job in active)
         raise scene_editor.SceneBusyError(
-            "pictures are still being drawn; wait for the queue to finish "
-            "before making video scenes"
+            ("narration lines are still being recorded" if voice_only
+             else "pictures are still being drawn")
+            + "; wait for the queue to finish before making video scenes"
         )
 
     if everything:

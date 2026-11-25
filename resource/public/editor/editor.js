@@ -349,6 +349,7 @@ async function load(taskId) {
     state.imageStyle = data.image_style || "";
     state.imageStylePinned = !!data.image_style_pinned;
     state.selected = state.scenes.length ? 0 : -1;
+    state.line = -1;
     state.playhead = 0;
     state.loadedClip = -1;
     ui.narration.src = data.audio_url || "";
@@ -534,6 +535,13 @@ async function fetchQueue() {
     state.queue = EMPTY_QUEUE;
   }
   drawQueue();
+  // The panel of a narration line says where its retake is in the queue.
+  const lines = (state.queue.jobs || []).filter((job) => job.kind === "narration")
+    .map((job) => `${job.id}:${job.state}:${job.position}`).join(",");
+  if (lines !== state.queueLines) {
+    state.queueLines = lines;
+    if (selectedLine()) drawInspector();
+  }
   return state.queue;
 }
 
@@ -550,6 +558,15 @@ async function watchQueue() {
       const fresh = doneIds(queue).filter((id) => !state.queueSeen.includes(id));
       if (fresh.length) {
         state.queueSeen.push(...fresh);
+        // A line recorded again: same address, new sound. Without this the
+        // browser keeps playing the old take.
+        const address = (state.data && state.data.audio_url) || "";
+        if (address && (queue.jobs || []).some(
+          (job) => job.kind === "narration" && fresh.includes(job.id))) {
+          if (state.playing) stop();
+          ui.narration.src = address + (address.includes("?") ? "&" : "?")
+            + "take=" + Date.now();
+        }
         await refresh();
       }
       if (!queue.busy) break;
@@ -742,11 +759,13 @@ function drawQueue() {
     ? `${writing.length} prompt${writing.length === 1 ? "" : "s"} being written`
     : "";
   const summary = running
-    ? `Regenerating scene ${running.index + 1} · ${fmt(running.elapsed)}`
+    ? (running.kind === "narration"
+      ? `Recording narration line ${running.line + 1} again`
+      : `Regenerating scene ${running.index + 1}`) + ` · ${fmt(running.elapsed)}`
       + (waiting ? ` · ${waiting} waiting` : "")
       + (writingNote ? ` · ${writingNote}` : "")
     : waiting
-      ? `${waiting} picture${waiting === 1 ? "" : "s"} waiting`
+      ? `${waiting} waiting`
         + (writingNote ? ` · ${writingNote}` : "")
       : writingNote || "Nothing left to regenerate";
   title.textContent = (state.queueCollapsed ? "▸ " : "▾ ")
@@ -784,8 +803,10 @@ function drawQueue() {
     // 这一行说的是哪一段。按现在的位置说，所以重排之后它跟着那张图走。
     // 那一段已经不在时间线上了（被删了）就别报一个编号——报出来的一定是
     // 别人的编号。
-    const at = jobScene(job);
-    const where = at === null ? "A deleted scene" : `Scene ${at + 1}`;
+    const voiced = job.kind === "narration";
+    const at = voiced ? null : jobScene(job);
+    const where = voiced ? `Narration line ${job.line + 1}`
+      : at === null ? "A deleted scene" : `Scene ${at + 1}`;
     // 照着照片画的那条路：搜什么词、照片来自哪个网站，都得写在这一行上。
     // 不写的话用户没法知道那张图是照着什么画的，而这正是他要能回答的问题。
     const photo = job.from_photo
@@ -803,7 +824,21 @@ function drawQueue() {
     // 所以这一行要分得出来是哪一种，否则"正在出图"会盖在一个根本没在出图
     // 的活上。
     const writingOne = job.kind === "prompt";
-    if (job.state === "running") {
+    if (voiced) {
+      const reason = String(job.error || "unknown error").replace(/\s+/g, " ").trim();
+      const by = Number(job.added) || 0;
+      label.textContent = `${where}${term} · ` + (
+        job.state === "running" ? `recording ${fmt(job.elapsed)}`
+          : job.state === "queued"
+            ? "waiting to be recorded"
+              + (job.position > 1 ? ` (${job.position - 1} ahead)` : " (next)")
+            : job.state === "done"
+              ? `recorded again in ${fmt(job.elapsed)}`
+                + (Math.abs(by) >= 0.05
+                  ? `, ${Math.abs(by).toFixed(1)}s ${by > 0 ? "longer" : "shorter"}` : "")
+              : `failed: ${reason}`);
+      if (job.state === "failed") label.title = String(job.error || "");
+    } else if (job.state === "running") {
       label.textContent = `${where}${term}${photo} · `
         + (writingOne
           ? `writing a prompt ${fmt(job.elapsed)}`
@@ -845,6 +880,14 @@ function drawQueue() {
     label.addEventListener("click", () => {
       // 跳走之前先把框里没存的那一笔存掉。
       savePromptEdit();
+      if (voiced) {
+        if (!((state.data && state.data.narration_segments) || [])[job.line]) return;
+        state.line = job.line;
+        state.adding = false;
+        drawInspector();
+        markLine();
+        return;
+      }
       // 跳到它**现在**在的那一段，不是排队时那一段。
       if (at === null || !state.scenes[at]) return;
       state.selected = at;
@@ -886,7 +929,8 @@ function drawApprove() {
   ui.approve.hidden = false;
 
   const queued = (state.queue.jobs || []).filter(
-    (job) => job.state === "queued" || job.state === "running"
+    (job) => job.kind !== "narration"
+      && (job.state === "queued" || job.state === "running")
   ).length;
   const left = Math.max(0, waiting.length - queued);
   // 已经有图的那几段。数它是为了把"不会重画"说出口：先试过一张的人
@@ -4161,6 +4205,8 @@ function drawVoice() {
   segments.forEach((segment, index) => {
     const bar = document.createElement("div");
     bar.className = "voice-bar line";
+    bar.dataset.line = index;
+    bar.classList.toggle("selected", index === state.line);
     bar.style.left = segment.start * state.pxPerSecond + "px";
     bar.style.width = Math.max(
       3, (segment.end - segment.start) * state.pxPerSecond - 2
@@ -4176,6 +4222,13 @@ function drawVoice() {
       state.loadedClip = -1;
       syncPreview(true);
       movePlayhead();
+      // The line is also what the right-hand panel is about now: that is
+      // where it can be heard on its own and recorded again.
+      savePromptEdit();
+      state.line = index;
+      state.adding = false;
+      drawInspector();
+      markLine();
     });
     // 双击直接改这一条的文字。画面上那行字也能点开同一个面板，但旁白比
     // 画面长的时候后面那几句没有画面可点，这里是它们唯一的入口。
@@ -4186,6 +4239,208 @@ function drawVoice() {
     bar.title += "\nDouble-click to edit this caption";
     ui.audioTrack.appendChild(bar);
   });
+}
+
+/* ---------- one narration line ----------
+   Click a line of the narration and the right-hand panel is about that line:
+   hear it alone, or have the voice say it again. Only that line is recorded;
+   it is put back where the old take was and everything after it moves by the
+   difference in length. */
+
+/** The narration line the panel is about, or null. */
+function selectedLine() {
+  const segments = (state.data && state.data.narration_segments) || [];
+  const index = Number.isInteger(state.line) ? state.line : -1;
+  return index >= 0 && index < segments.length
+    ? { index, ...segments[index] }
+    : null;
+}
+
+/** Only the highlight; the bars are not rebuilt. */
+function markLine() {
+  for (const bar of ui.audioTrack.querySelectorAll(".voice-bar.line")) {
+    bar.classList.toggle("selected", Number(bar.dataset.line) === state.line);
+  }
+}
+
+/* The bars are drawn at the caption times, which are estimates and can be a
+   second off. The server knows when the words were really heard, and how the
+   script writes the line. Asked for once per line and take. */
+const lineHeard = { key: "", data: null };
+
+async function heardLine(line) {
+  const key = `${state.taskId}:${line.index}:${ui.narration.src}`;
+  if (lineHeard.key === key) return lineHeard.data;
+  let data = null;
+  try {
+    data = await call(
+      "GET", `/tasks/${encodeURIComponent(state.taskId)}/narration/${line.index}`);
+  } catch { /* an older server: the caption's own times and text */ }
+  lineHeard.key = key;
+  lineHeard.data = data;
+  return data;
+}
+
+/** Play from the start of a line and stop where it ends. */
+async function playLine(line) {
+  if (state.playing) stop();
+  const heard = await heardLine(line);
+  const from = heard ? Math.max(0, heard.start - 0.1) : line.start;
+  const until = heard ? heard.end + 0.2 : line.end;
+  state.playhead = from;
+  state.loadedClip = -1;
+  syncPreview(true);
+  movePlayhead();
+  play();
+  const watch = setInterval(() => {
+    if (!state.playing) { clearInterval(watch); return; }
+    if (state.playhead >= until) { clearInterval(watch); stop(); }
+  }, 40);
+}
+
+/** Why this line cannot be recorded again right now; "" when it can. */
+function retakeRefusal() {
+  if (state.data && state.data.audio_stale) {
+    return "The script was changed since the narration was recorded, so the "
+      + "lines no longer match it. Re-record the whole narration first.";
+  }
+  if (state.taskBusy) return "This video is busy. Wait for it to finish.";
+  if ((state.video || {}).running) {
+    return "Video scenes are being made and have the whole graphics card. "
+      + "Record the line when they are done.";
+  }
+  return "";
+}
+
+/** The retake of this line that is waiting or being recorded, if any. */
+function lineJob(line) {
+  return (state.queue.jobs || []).find(
+    (job) => job.kind === "narration" && job.line === line.index
+      && (job.state === "queued" || job.state === "running")) || null;
+}
+
+/** Puts the retake in the queue. The request comes back at once: the line
+    waits its turn behind the pictures, and is never recorded while one is
+    drawn. */
+async function retakeLine(line) {
+  try {
+    const job = await call(
+      "POST",
+      `/tasks/${encodeURIComponent(state.taskId)}/narration/${line.index}/retake`);
+    say(job && job.position > 1
+      ? `Line ${line.index + 1} queued to be recorded again — ${job.position - 1} ahead of it.`
+      : `Line ${line.index + 1} queued to be recorded again. Queue another or keep editing.`);
+    await fetchQueue();
+    drawInspector();
+    watchQueue();
+  } catch (error) {
+    say(String(error.message || error), "error");
+  }
+}
+
+function deleteLine(line) {
+  if (!window.confirm(
+    `Delete narration line ${line.index + 1}?\n\n"${line.text}"\n\n`
+    + "Its sound and its caption are taken out, and everything after it comes "
+    + "earlier. This cannot be undone.")) return undefined;
+  return run(`Deleting line ${line.index + 1}`, async () => {
+    if (state.playing) stop();
+    const made = await call(
+      "DELETE", `/tasks/${encodeURIComponent(state.taskId)}/narration/${line.index}`);
+    const address = (state.data && state.data.audio_url) || "";
+    if (address) {
+      ui.narration.src = address + (address.includes("?") ? "&" : "?") + "take=" + Date.now();
+    }
+    // The line after it now has this number; the panel goes back to the scene.
+    state.line = -1;
+    const by = made && made.removed ? Number(made.removed) : 0;
+    return `Line ${line.index + 1} was deleted; the narration is ${by.toFixed(1)}s shorter.`;
+  });
+}
+
+function drawLinePanel(line) {
+  ui.inspTitle.textContent = `Narration line ${line.index + 1}`;
+
+  const said = inspectorGroup("What is said");
+  const text = document.createElement("p");
+  text.className = "line-text";
+  text.textContent = line.text;
+  const when = document.createElement("p");
+  when.className = "hint";
+  when.textContent = `${line.start.toFixed(2)}s – ${line.end.toFixed(2)}s · `
+    + `${(line.end - line.start).toFixed(1)}s long`;
+  const listen = document.createElement("div");
+  listen.className = "row";
+  listen.append(button("Play this line", "small", () => playLine(line)));
+  said.append(text, when, listen);
+  ui.inspBody.appendChild(said);
+  // The line as the script writes it, which is what the voice is given.
+  heardLine(line).then((heard) => {
+    if (heard && heard.text && text.isConnected) text.textContent = heard.text;
+  });
+
+  const again = inspectorGroup("Record it again");
+  const note = document.createElement("p");
+  note.className = "hint";
+  note.textContent = "The same voice says this line again, with the same "
+    + "words, and the new take replaces the old one. Nothing else is recorded. "
+    + "A new take is never exactly as long as the old one, so the picture on "
+    + "screen and everything after this line move by the difference.";
+  const refusal = retakeRefusal();
+  const record = button("Record this line again", "small", () => retakeLine(line));
+  const lineWaiting = lineJob(line);
+  record.disabled = !!refusal || !!state.busy || !!lineWaiting;
+  const row = document.createElement("div");
+  row.className = "row";
+  row.append(record);
+  again.append(note, row);
+  if (refusal) {
+    const why = document.createElement("p");
+    why.className = "hint warn";
+    why.textContent = refusal;
+    again.appendChild(why);
+  } else {
+    const wait = document.createElement("p");
+    wait.className = "hint";
+    wait.textContent = lineWaiting
+      ? (lineWaiting.state === "running"
+        ? "This line is being recorded now."
+        : "This line is in the queue"
+          + (lineWaiting.position > 1 ? `, ${lineWaiting.position - 1} ahead of it.` : ", next."))
+        + " The new take appears here when it is done."
+      : "It goes in the queue with the pictures, so it never runs while one "
+        + "is drawn, and takes about a minute once its turn comes. To change "
+        + "the words, edit the script and re-record the narration instead.";
+    again.appendChild(wait);
+  }
+  ui.inspBody.appendChild(again);
+
+  const out = inspectorGroup("Delete it");
+  const outNote = document.createElement("p");
+  outNote.className = "hint";
+  outNote.textContent = "Takes this line out of the narration: its sound, its "
+    + "caption and its place in the script. The picture on screen gets "
+    + "shorter and everything after it comes earlier. It cannot be undone.";
+  const remove = button("Delete this line", "small", () => deleteLine(line));
+  remove.disabled = !!refusal || !!state.busy
+    || ((state.data && state.data.narration_segments) || []).length < 2;
+  const outRow = document.createElement("div");
+  outRow.className = "row";
+  outRow.append(remove);
+  out.append(outNote, outRow);
+  ui.inspBody.appendChild(out);
+
+  const more = document.createElement("div");
+  more.className = "row";
+  more.append(
+    button("Edit the caption…", "small", () => openCaption(line.index)),
+    button("Back to the scene", "small", () => {
+      state.line = -1;
+      markLine();
+      drawInspector();
+    }),
+  );
+  ui.inspBody.appendChild(more);
 }
 
 function drawTotals() {
@@ -4836,6 +5091,8 @@ function usedPhotoNote(scene) {
 function drawInspector() {
   ui.inspBody.innerHTML = "";
   if (state.adding) { drawAddForm(); return; }
+  const line = selectedLine();
+  if (line) { drawLinePanel(line); return; }
 
   const scene = state.scenes[state.selected];
   if (!scene) {
@@ -5432,6 +5689,9 @@ function startDrag(event) {
   const index = Number(event.currentTarget.dataset.index);
   state.selected = index;
   state.adding = false;
+  // Clicking a picture takes the panel back from a narration line.
+  state.line = -1;
+  markLine();
   drawInspector();
   markSelection();
 
@@ -6892,8 +7152,8 @@ function drawVideoButton() {
     + `video scene${marked === 1 ? "" : "s"}…`;
   ui.videoScenes.disabled = !!state.queue.busy || state.taskBusy;
   ui.videoScenes.title = state.queue.busy
-    ? "Pictures are still being drawn. Video scenes need the whole graphics "
-      + "card, so wait for the queue to finish."
+    ? "Pictures are still being drawn or narration lines recorded. Video "
+      + "scenes need the whole graphics card, so wait for the queue to finish."
     : elsewhere
       ? "Another video is making its video scenes. These are queued and "
         + "start by themselves when it is done."

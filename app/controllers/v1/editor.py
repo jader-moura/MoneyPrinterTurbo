@@ -76,6 +76,7 @@ from app.services import bgm as bgm_service
 from app.services import transition_sound as transition_sound_service
 from app.services import app_settings
 from app.services import direction_preview
+from app.services import narration_retake
 from app.services import new_video
 from app.services import picture_shelf
 from app.services import reference_image
@@ -2059,8 +2060,72 @@ def rerecord_audio(request: Request, task_id: str = Path(..., description="Task 
     """
     request_id = base.get_task_id(request)
     _require_task(task_id, request_id)
+    # One kind of generation at a time: the voice shares the graphics card
+    # with the pictures and the video scenes.
+    _handle(task_id, request_id, scene_video.refuse_while_running)
+    _handle(task_id, request_id,
+            lambda: scene_regen_queue.refuse_while_busy("recording the narration"))
     params = _handle(task_id, request_id, lambda: scene_editor.prepare_audio_rerun(task_id))
     return _submit(task_id, request_id, params, stop_at="subtitle", start_from="audio")
+
+
+@router.get(
+    "/tasks/{task_id}/narration/{index}",
+    summary="One narration line: what the voice says for it, and when",
+)
+def read_narration_line(
+    request: Request,
+    task_id: str = Path(..., description="Task ID"),
+    index: int = Path(..., ge=0, description="Narration line, counted like the captions"),
+):
+    request_id = base.get_task_id(request)
+    _require_task(task_id, request_id)
+    data = _handle(
+        task_id, request_id, lambda: narration_retake.line(task_id, index)
+    )
+    return utils.get_response(200, data)
+
+
+@router.post(
+    "/tasks/{task_id}/narration/{index}/retake",
+    summary="Queue one narration line to be recorded again",
+)
+def retake_narration_line(
+    request: Request,
+    task_id: str = Path(..., description="Task ID"),
+    index: int = Path(..., ge=0, description="Narration line, counted like the captions"),
+):
+    """One line, same words, same voice. Everything timed to the voice after
+    it (subtitles, word times, the picture on screen) moves by the difference
+    in length. Answers at once with the queued job: the line waits its turn
+    in the same queue as the pictures, so the two never run together.
+    """
+    request_id = base.get_task_id(request)
+    _require_task(task_id, request_id)
+    data = _handle(
+        task_id, request_id, lambda: scene_regen_queue.enqueue_retake(task_id, index)
+    )
+    return utils.get_response(200, data)
+
+
+@router.delete(
+    "/tasks/{task_id}/narration/{index}",
+    summary="Take one narration line out: its sound, its caption, its place in the script",
+)
+def delete_narration_line(
+    request: Request,
+    task_id: str = Path(..., description="Task ID"),
+    index: int = Path(..., ge=0, description="Narration line, counted like the captions"),
+):
+    """Nothing is recorded. Everything timed to the voice after the line comes
+    earlier by its length, and the picture on screen gets shorter by the same.
+    """
+    request_id = base.get_task_id(request)
+    _require_task(task_id, request_id)
+    data = _handle(
+        task_id, request_id, lambda: narration_retake.remove(task_id, index)
+    )
+    return utils.get_response(200, data)
 
 
 @router.post(
@@ -2084,7 +2149,7 @@ def render_task(request: Request, task_id: str = Path(..., description="Task ID"
             task_id=task_id,
             status_code=409,
             message=(
-                f"{request_id}: {pending} picture(s) are still being regenerated; "
+                f"{request_id}: {pending} picture(s) or narration line(s) are still being regenerated; "
                 "wait for them to finish or cancel them before rendering"
             ),
         )

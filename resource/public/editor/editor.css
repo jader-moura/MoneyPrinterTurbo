@@ -1280,6 +1280,14 @@ body {
   text-overflow: ellipsis;
 }
 .voice-bar.line:hover { background: #3f5f90; border-color: var(--accent); }
+/* The line the right-hand panel is about. */
+.voice-bar.line.selected {
+  background: #4a6fa8;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+  color: #fff;
+}
+.line-text { margin: 0 0 6px; font-size: 13px; line-height: 1.45; }
 
 /* 配乐条。和旁白块一个形状，换个颜色：它是另一回事，而且从头铺到尾。
    点一下打开音乐面板——用户看见它第一件想做的事就是换一首。 */

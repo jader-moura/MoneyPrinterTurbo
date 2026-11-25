@@ -67,6 +67,10 @@ _HISTORY_LIMIT = 40
 # 写这一段的提示词。排同一条队、同一个工作线程，所以永远不会同时发生。
 MATERIAL = "material"
 PROMPT = "prompt"
+# One narration line recorded again. In this queue for the same reason: the
+# voice loads onto the card the pictures are drawn on, so the two never run
+# at the same time. Nothing here is a scene: ``line`` says which line.
+NARRATION = "narration"
 
 
 class _Job:
@@ -94,6 +98,9 @@ class _Job:
         "prompt",
         "reference",
         "photo",
+        "line",
+        "caption",
+        "added",
     )
 
     def __init__(
@@ -152,6 +159,11 @@ class _Job:
         # 用户自己挑的（或者传的）那张照片，已经下载、验过了。有它就不再搜。
         # 不进 ``payload``：那是几 MB 的字节。
         self.photo = photo
+        # A narration line: its number, the caption it had when queued (how it
+        # is found again), and how much longer the new take turned out.
+        self.line: Optional[int] = None
+        self.caption = ""
+        self.added: Optional[float] = None
         if photo is not None:
             self.from_photo = True
             self.reference = photo.payload()
@@ -194,6 +206,8 @@ class _Job:
             "direction": self.direction,
             "prompt": self.prompt,
             "reference": self.reference,
+            "line": self.line,
+            "added": self.added,
         }
 
 
@@ -352,6 +366,44 @@ def enqueue_prompt(
     return job.payload(position)
 
 
+def enqueue_retake(task_id: str, index: Any) -> dict:
+    """Queue one narration line to be recorded again. Returns at once.
+
+    Behind the pictures already waiting, and ahead of the ones queued after
+    it: one worker does them all, so a line is never recorded while a picture
+    is drawn, and video scenes do not start while anything waits here.
+    """
+    from app.services import narration_retake
+
+    found = narration_retake.check(task_id, index)
+    job = _Job(
+        task_id=task_id,
+        index=found["index"],
+        keyword=found["text"],
+        image_style=None,
+        anchor="",
+        kind=NARRATION,
+    )
+    job.line = found["index"]
+    job.caption = found["caption"]
+    with _LOCK:
+        waiting = list(_QUEUE) + ([_RUNNING] if _RUNNING is not None else [])
+        if any(one.kind == NARRATION and one.task_id == task_id
+               and one.caption == job.caption and one.line == job.line
+               for one in waiting):
+            raise SceneError(
+                f"narration line {job.line + 1} is already waiting to be recorded again")
+        _QUEUE.append(job)
+        position = len(_QUEUE)
+        _ensure_worker()
+        _READY.notify()
+    logger.info(
+        f"queued narration line {job.line + 1} of task {task_id} to be "
+        f"recorded again (position {position})"
+    )
+    return job.payload(position)
+
+
 def enqueue_pending(task_id: str) -> dict:
     """把还没出图的那几段一次全排进队列——用户在提示词那一屏点的"开画"。
 
@@ -376,7 +428,7 @@ def enqueue_pending(task_id: str) -> dict:
 
     # 已经排着的不要再排一遍：用户点两下"开画"不该把每一张画两次。
     with _LOCK:
-        busy = {job.anchor for job in _QUEUE}
+        busy = {job.anchor for job in _QUEUE if job.kind != NARRATION}
         if _RUNNING is not None and _RUNNING.task_id == task_id:
             busy.add(_RUNNING.anchor)
 
@@ -520,6 +572,23 @@ def snapshot(task_id: str = "") -> dict:
     }
 
 
+def refuse_while_busy(what: str) -> None:
+    """Raises while anything waits or runs here, for any video. ``what`` is
+    the thing that cannot start, said in the refusal."""
+    with _LOCK:
+        jobs = list(_QUEUE) + ([_RUNNING] if _RUNNING is not None else [])
+    if not jobs:
+        return
+    lines = sum(1 for job in jobs if job.kind == NARRATION)
+    parts = []
+    if len(jobs) - lines:
+        parts.append(f"{len(jobs) - lines} picture(s) are still being drawn")
+    if lines:
+        parts.append(f"{lines} narration line(s) are still being recorded")
+    raise scene_editor.SceneBusyError(
+        " and ".join(parts) + f"; wait for the queue to finish before {what}")
+
+
 def cancel(job_id: str) -> dict:
     """撤掉一个还排着的活。
 
@@ -589,7 +658,43 @@ def _run(job: _Job) -> None:
     if job.kind == PROMPT:
         _run_prompt(job)
         return
+    if job.kind == NARRATION:
+        _run_narration(job)
+        return
     _run_material(job)
+
+
+def _run_narration(job: _Job) -> None:
+    """Record the line again. It is found by its caption first: a line
+    deleted while this one waited has moved its number."""
+    global _RUNNING
+    from app.services import narration_retake
+
+    try:
+        job.line = job.index = narration_retake.where(job.task_id, job.line, job.caption)
+        made = narration_retake.retake(job.task_id, job.line, wait=True)
+        job.added = float(made.get("added") or 0.0)
+    except SceneError as exc:
+        job.state = FAILED
+        job.error = str(exc)
+        logger.warning(
+            f"queued retake of narration line {job.index + 1} of task "
+            f"{job.task_id} failed: {exc}"
+        )
+    except Exception as exc:  # noqa: BLE001 - the worker must outlive one bad job
+        job.state = FAILED
+        job.error = f"unexpected error: {exc}"
+        logger.exception(
+            f"queued retake of narration line {job.index + 1} of task "
+            f"{job.task_id} hit an unexpected error"
+        )
+    else:
+        job.state = DONE
+    finally:
+        job.finished_at = time.time()
+        with _LOCK:
+            _RUNNING = None
+            _remember(job)
 
 
 def _run_prompt(job: _Job) -> None:
