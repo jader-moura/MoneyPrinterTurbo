@@ -834,6 +834,9 @@ def build_params(choices: Mapping) -> TaskVideoRequest:
         params["video_script"] = scene_plan.script_of(plan)
         params["video_terms"] = scene_plan.prompts_of(plan)
         params["scene_plan"] = scene_plan.stored(plan)
+        if plan["look"]:
+            # The plan was written for a look: it decides, not the form.
+            params["finish_look"] = plan["look"]
         params["photo_scene_percent"] = scene_plan.photo_percent(params["scene_plan"])
 
     mode = str(chosen.get("voice_mode") or _saved_voice_mode(ui)).strip()

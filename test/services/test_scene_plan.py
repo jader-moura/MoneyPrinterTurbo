@@ -51,6 +51,35 @@ def _text(plan=PLAN):
     return json.dumps(plan)
 
 
+class TestTheLookAPlanAsksFor:
+    def test_a_plan_can_name_its_look(self):
+        plan = scene_plan.parse(_text({**PLAN, "look": "Cinematic"}))
+        assert plan["look"] == "cinematic"
+        assert "look: cinematic" in scene_plan.report(plan)
+
+    def test_a_plan_that_does_not_say_leaves_it_to_the_form(self):
+        plan = scene_plan.parse(_text())
+        assert plan["look"] == ""
+        assert "look:" not in scene_plan.report(plan)
+
+    def test_an_unknown_look_is_named_with_the_ones_there_are(self):
+        with pytest.raises(scene_plan.ScenePlanError, match="cinematic"):
+            scene_plan.parse(_text({**PLAN, "look": "sepia"}))
+
+    def test_the_plans_look_wins_over_the_forms(self, saved):
+        params = new_video.build_params({
+            "scene_plan": _text({**PLAN, "look": "cinematic"}), "finish_look": "warm"})
+        assert params.finish_look == "cinematic"
+        params = new_video.build_params({"scene_plan": _text(), "finish_look": "warm"})
+        assert params.finish_look == "warm"
+
+    def test_a_direction_file_can_name_one_too(self):
+        assert scene_plan.redirected_look('{"look": "noir", "scenes": {}}') == "noir"
+        assert scene_plan.redirected_look('{"scenes": {}}') == ""
+        with pytest.raises(scene_plan.ScenePlanError):
+            scene_plan.redirected_look('{"look": "sepia"}')
+
+
 class TestReadingAPlan:
     def test_it_gives_the_narration_the_prompts_and_the_photo_scenes(self):
         plan = scene_plan.parse(_text())

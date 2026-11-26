@@ -213,6 +213,7 @@ def redirect(task_id: str, text: str) -> str:
     payload, plan = _stored_plan(task_id)
     spoken = narration_pauses.recorded(task_id)
     directed = scene_plan.redirected(plan, text, recorded=spoken)
+    look = scene_plan.redirected_look(text)
 
     task_dir = utils.task_dir(task_id)
     backup = os.path.join(task_dir, BACKUP)
@@ -237,6 +238,8 @@ def redirect(task_id: str, text: str) -> str:
             raise scene_plan.ScenePlanError(str(exc)) from exc
         payload = scene_manifest.load_raw(task_id)
     payload["params"]["scene_plan"] = directed
+    if look:
+        payload["params"]["finish_look"] = look
     task_artifacts.write_script_data(task_id, payload)
     mapped = _place_maps(task_id, plan, directed)
 
@@ -245,6 +248,8 @@ def redirect(task_id: str, text: str) -> str:
     start = next(at for at, line in enumerate(said)
                  if line.startswith(("direction:", "no direction")))
     lines = said[start:]
+    if look:
+        lines.append(f"look: {look} (this video's Finish is now set to it)")
     if paused is not None:
         if paused["inserted"]:
             whole = paused["duration"] or 0.0

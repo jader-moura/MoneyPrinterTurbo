@@ -294,6 +294,33 @@ def _words(value: Any) -> str:
     return " ".join(str(value or "").split())
 
 
+def look(data: Any) -> str:
+    """The finish look a plan or a direction file asks for with a top-level
+    ``"look"`` (``"cinematic"``, ``"cold_documentary"``...); ``""`` when it
+    does not say, which leaves the choice to the form or the editor."""
+    name = _words(data.get("look")) if isinstance(data, dict) else ""
+    name = name.strip().lower().replace(" ", "_").replace("-", "_")
+    if not name:
+        return ""
+    from app.services import finishing  # it imports this module
+
+    if name not in finishing.LOOKS:
+        raise ScenePlanError(
+            f'"look": {name!r} is not a finish look; it is one of '
+            f"{', '.join(finishing.LOOKS)}"
+        )
+    return name
+
+
+def redirected_look(text: str) -> str:
+    """The ``"look"`` of a direction file (see :func:`redirected`)."""
+    try:
+        data = json.loads(_strip_fence(str(text or "")).strip())
+    except ValueError:
+        return ""
+    return look(data)
+
+
 def parse(text: str) -> dict:
     """读一份分镜，返回 ``{"subject", "scenes"}``；每一段是
     ``{"narration", "prompt", "photo"}``，``photo`` 是 ``None`` 或
@@ -397,7 +424,8 @@ def parse(text: str) -> dict:
             "End each scene's narration with a full stop, question mark or "
             "exclamation mark"
         )
-    return {"subject": _words(data.get("subject")), "scenes": scenes}
+    return {"subject": _words(data.get("subject")), "scenes": scenes,
+            "look": look(data)}
 
 
 def script_of(plan: dict) -> str:
@@ -471,6 +499,7 @@ def redirected(
     旁白已经录好了，所以这里不重写分镜，只写"哪几段上加什么"::
 
         {
+          "look": "cinematic",
           "title": {"text": "The Cadaver Synod", "tagline": "Rome, 897", "scene": 8},
           "scenes": {
             "1": {"card": "January 897 | Rome"},
@@ -725,6 +754,8 @@ def report(plan: dict) -> str:
         f"{len(photos)} drawn from a photo ({photo_percent(scenes)}%)"
         + (f": scenes {', '.join(str(at) for at in photos)}" if photos else ""),
     ]
+    if plan.get("look"):
+        lines.append(f"look: {plan['look']} (the plan chooses the Finish)")
     held = [f"{at} ({length:.0f}s)" for at, length in enumerate(seconds, start=1)
             if length > 9.0]
     if held:

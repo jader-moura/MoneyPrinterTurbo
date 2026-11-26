@@ -71,6 +71,16 @@ JSON in it. The format is the same:
   `photo_name` is the real name; `photo_search` is what to type into an image
   search to find it.
 
+**The look.** Add `"look"` next to `"subject"` when the video should be
+finished in a particular look; the plan then decides it, whatever the form
+says. Leave it out to let the user choose. The looks are `"cinematic"` (only
+red keeps its colour, teal shadows, glow, grain: thrillers and true crime),
+`"cold_documentary"`, `"warm"`, `"vivid"`, `"noir"` and `"clean"`.
+
+```json
+{ "subject": "The Green River Killer", "look": "cinematic", "scenes": [ ... ] }
+```
+
 ## Dividing the narration
 
 - One scene is one picture. Aim for **3 to 7 seconds** of speech, about 8 to
@@ -388,6 +398,9 @@ This only works for a video that was made from a scene plan.
      }
    }
    ```
+
+   A `"look"` next to `"title"` (`"look": "cinematic"`) sets the video's
+   Finish to that look; without it the Finish stays as it is.
 
    `scenes` is keyed by scene number, or by a run like `"5-7"`. A scene named
    by several keys gets all of them. The fields are `card`, `impact`, `music`,

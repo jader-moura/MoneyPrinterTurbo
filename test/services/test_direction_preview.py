@@ -476,6 +476,16 @@ class TestDirectingAVideoThatExists:
         assert found["state"] == "ready" and found["title"]["text"] == "Dyatlov"
         assert [card["title"] for card in found["cards"]] == ["February 1959"]
 
+    def test_a_look_in_the_file_sets_the_videos_finish(self, task_root):
+        task_id = _task(task_root)
+        said = direction_preview.redirect(
+            task_id, json.dumps({"look": "cinematic", "scenes": {"1": {"impact": "end"}}}))
+        assert "look: cinematic" in said
+        assert task_artifacts.read_script_data(task_id)["params"]["finish_look"] == "cinematic"
+        # A file that does not name one leaves the Finish alone.
+        direction_preview.redirect(task_id, json.dumps({"scenes": {"1": {"impact": "end"}}}))
+        assert task_artifacts.read_script_data(task_id)["params"]["finish_look"] == "cinematic"
+
     def test_the_first_backup_is_the_one_that_stays(self, task_root):
         task_id = _task(task_root)
         before = task_artifacts.read_script_data(task_id)
