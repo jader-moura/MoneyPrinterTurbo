@@ -939,7 +939,7 @@ voice_id = "default"
 [finish]
 # The finishing pass: a second way to make the final file, done entirely in
 # ffmpeg (app/services/finishing.py). A video uses it when its "Finish" is set
-# to a look - "clean", "cold_documentary", "warm", "vivid" or "noir" - in the
+# to a look - "clean", "cold_documentary", "cinematic", "warm", "vivid" or "noir" - in the
 # new-video form or in the editor's effects panel. With Finish off the classic
 # renderer runs and nothing in this section is read.
 #
@@ -957,7 +957,7 @@ voice_id = "default"
 # loudness = -14.0
 
 # Film grain strength (0 = none) and the darkened corners. Both apply only to
-# the looks that have texture: cold_documentary, warm and noir.
+# the looks that have texture: cold_documentary, cinematic, warm and noir.
 # grain = 5
 # vignette = true
 

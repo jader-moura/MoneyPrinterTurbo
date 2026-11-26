@@ -157,6 +157,43 @@ class TestThePicture:
         assert "saturation=0.82" in chain and "vignette=angle=PI/7" in chain
         assert "noise=c0s=5" in chain
 
+    def test_the_cinematic_look_keeps_red_and_has_its_own_texture(self):
+        chain = finishing.picture_filters(look="cinematic", duration=60.0)
+        # The colour table first, then the glow.
+        assert "lut3d=file=" in chain and "blend=all_mode=addition" in chain
+        assert chain.index("lut3d") < chain.index("gblur")
+        # A deeper vignette and coarser grain than the other looks, after it.
+        assert "vignette=angle=PI/4.6" in chain and "noise=c0s=6" in chain
+        assert chain.index("blend=all_mode=addition") < chain.index("vignette")
+        assert chain.endswith("format=yuv420p")
+
+    def test_the_cinematic_table_keeps_red_and_mutes_the_rest(self):
+        import numpy as np
+
+        def saturation(colour):
+            return (max(colour) - min(colour)) / max(colour)
+
+        red, orange, green = finishing._cinematic_colours(np.array(
+            [[0.70, 0.10, 0.14], [0.85, 0.50, 0.10], [0.20, 0.60, 0.25]]))
+        assert saturation(red) > 0.85
+        assert saturation(orange) < 0.65 and saturation(green) < 0.45
+        # Blacks are lifted and tinted teal; white is warm.
+        black, white = finishing._cinematic_colours(np.array([[0.0] * 3, [1.0] * 3]))
+        assert black[2] > black[0] > 0 and white[0] > white[2]
+
+    def test_the_cinematic_table_is_a_cube_file_written_once(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(finishing.utils, "storage_dir",
+                            lambda sub="", create=False: str(tmp_path))
+        monkeypatch.setattr(finishing, "_CINEMATIC_LUT_SIZE", 5)
+        path = finishing._cinematic_lut()
+        rows = open(path, encoding="ascii").read().splitlines()
+        assert rows[0] == "LUT_3D_SIZE 5" and len(rows) == 1 + 5 ** 3
+        # Red runs fastest: the second entry is a dark red, not a dark blue.
+        second = [float(value) for value in rows[2].split()]
+        assert second[0] > second[2]
+        stamp = os.path.getmtime(path)
+        assert finishing._cinematic_lut() == path and os.path.getmtime(path) == stamp
+
     def test_subtitles_are_burned_before_the_fades(self):
         chain = finishing.picture_filters(
             look="clean", duration=60.0, subtitle_file="final-1.ass",

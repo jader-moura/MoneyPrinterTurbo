@@ -55,6 +55,86 @@ from app.services.utils import ass_subtitles
 from app.utils import file_security, utils
 from app.utils.subtitle_reader import moviepy_subtitles
 
+# The cinematic look. Its colour is a 3D lookup table, because "keep the reds,
+# mute everything else" is a decision about each colour and no ffmpeg filter
+# makes it cleanly: hsvhold cannot tell a dark red coat from bright orange
+# leaves. The table is written once to ``storage/looks`` and reused.
+#
+# For every colour, in this order:
+#   1. How red it is: 1 within 12 degrees of hue 355, falling to 0 at 26, and
+#      only for colours that have some saturation (0.30 to 0.55).
+#   2. Saturation times 0.52 where it is not red, 1.22 where it is.
+#   3. Exposure down 3%, then a soft S (60% straight, 40% smoothstep).
+#   4. Teal into the shadows, warmth into the highlights, blacks lifted.
+_CINEMATIC_LUT_SIZE = 49
+_CINEMATIC_LUT_VERSION = 1
+
+
+def _cinematic_colours(rgb):
+    """``rgb`` is an (N, 3) array of colours from 0 to 1; the graded ones."""
+    import numpy as np
+
+    red, green, blue = rgb[:, 0], rgb[:, 1], rgb[:, 2]
+    high, low = rgb.max(axis=1), rgb.min(axis=1)
+    spread = high - low
+    safe = np.where(spread > 0, spread, 1.0)
+    hue = np.where(
+        high == red, ((green - blue) / safe) % 6.0,
+        np.where(high == green, (blue - red) / safe + 2.0, (red - green) / safe + 4.0),
+    ) * 60.0
+    hue = np.where(spread > 0, hue, 0.0)
+    saturation = np.where(high > 0, spread / np.where(high > 0, high, 1.0), 0.0)
+    away = np.abs(hue - 355.0)
+    away = np.minimum(away, 360.0 - away)
+    is_red = (np.clip(1.0 - (away - 12.0) / 14.0, 0.0, 1.0)
+              * np.clip((saturation - 0.30) / 0.25, 0.0, 1.0))[:, None]
+    luma = (rgb @ np.array([0.2126, 0.7152, 0.0722]))[:, None]
+    out = luma + (rgb - luma) * (0.52 * (1.0 - is_red) + 1.22 * is_red)
+    out = np.clip(out * 0.97, 0.0, 1.0)
+    out = out * 0.60 + (out * out * (3.0 - 2.0 * out)) * 0.40
+    shadows, highlights = (1.0 - luma) ** 2, luma ** 2
+    out = (out + shadows * np.array([-0.022, 0.004, 0.030])
+           + highlights * np.array([0.020, 0.008, -0.024]))
+    return np.clip(0.015 + out * 0.985, 0.0, 1.0)
+
+
+def _cinematic_lut() -> str:
+    """The path of the cinematic look's table, written if it is not there."""
+    import numpy as np
+
+    size = _CINEMATIC_LUT_SIZE
+    target = os.path.join(
+        utils.storage_dir("looks", create=True),
+        f"cinematic-v{_CINEMATIC_LUT_VERSION}-{size}.cube")
+    if os.path.exists(target) and os.path.getsize(target) > 0:
+        return target
+    steps = np.linspace(0.0, 1.0, size)
+    # A .cube file lists red fastest, then green, then blue.
+    blue, green, red = np.meshgrid(steps, steps, steps, indexing="ij")
+    graded = _cinematic_colours(
+        np.stack([red.ravel(), green.ravel(), blue.ravel()], axis=1))
+    partial = f"{target}.{os.getpid()}.part"
+    with open(partial, "w", encoding="ascii", newline="\n") as handle:
+        handle.write(f"LUT_3D_SIZE {size}\n")
+        handle.write("\n".join(f"{r:.5f} {g:.5f} {b:.5f}" for r, g, b in graded))
+        handle.write("\n")
+    os.replace(partial, target)
+    return target
+
+
+# After the table: a warm glow around the highlights, made at a quarter of the
+# size, and a faint flicker in the exposure. It is a small graph, not a chain;
+# its labels start with ``cine_`` so nothing else can collide with them.
+_CINEMATIC_GRADE = (
+    "format=gbrp,split=2[cine_m][cine_b];"
+    "[cine_b]scale=iw/4:ih/4:flags=area,"
+    "curves=all='0/0 0.6/0 0.7/0.044 0.8/0.2 0.9/0.506 1/1',"
+    "colorchannelmixer=rr=0.42:gg=0.33:bb=0.26,gblur=sigma=9,"
+    "scale=iw*4:ih*4:flags=bilinear,format=gbrp[cine_g];"
+    "[cine_m][cine_g]blend=all_mode=addition,format=yuv420p,"
+    "eq=eval=frame:brightness='0.006*sin(n*2.1)*sin(n*0.37)'"
+)
+
 # 调色。"clean" 是什么都不调：只要声音、淡入淡出和字幕。
 #
 # cold_documentary 是在一条悬疑纪录片上调出来、用户看过说好的那一套：
@@ -81,6 +161,16 @@ LOOKS: dict[str, dict[str, Any]] = {
         "label": "Vivid",
         "grade": "eq=contrast=1.06:saturation=1.18",
         "texture": False,
+    },
+    # Red is the only colour left standing: a thriller's grade. Its vignette is
+    # deeper and its grain a little coarser than the other looks'.
+    "cinematic": {
+        "label": "Cinematic (red on muted)",
+        "lut": _cinematic_lut,
+        "grade": _CINEMATIC_GRADE,
+        "texture": True,
+        "vignette": "PI/4.6",
+        "grain": 6,
     },
     "noir": {
         "label": "Black and white",
@@ -378,14 +468,17 @@ def picture_filters(
     if hold > 0.05:
         # 多垫半秒，由编码时的 -t 截齐：宁可多一帧，不能少一帧露出黑。
         chain.append(f"tpad=stop_mode=clone:stop_duration={hold + 0.5:.3f}")
+    if spec.get("lut"):
+        chain.append(f"lut3d=file={_quoted(spec['lut']())}:interp=tetrahedral")
     if spec["grade"]:
         chain.append(spec["grade"])
     if spec["texture"]:
         if setting("vignette"):
             # PI/4.5 实测太暗。
-            chain.append("vignette=angle=PI/7")
+            chain.append(f"vignette=angle={spec.get('vignette', 'PI/7')}")
         grain = setting("grain")
         if grain > 0:
+            grain = max(grain, int(spec.get("grain", 0)))
             chain.append(f"noise=c0s={min(grain, 40)}:c0f=t+u")
     if subtitle_file:
         fonts = f":fontsdir={_quoted(fonts_dir)}" if fonts_dir else ""
