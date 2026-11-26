@@ -947,7 +947,8 @@ def editor_direction(
         # The same numbers the render draws the strip from.
         "timeline": {
             "top": top,
-            "holes": _windows(ass_subtitles.timeline_holes(title, cards, top)),
+            "holes": _windows(ass_subtitles.timeline_holes(
+                title, cards, top, direction.timelines)),
             "edge": ass_subtitles.TIMELINE_EDGE,
             "from_edge": (ass_subtitles.TIMELINE_FROM_TOP if top
                           else ass_subtitles.TIMELINE_FROM_BOTTOM),

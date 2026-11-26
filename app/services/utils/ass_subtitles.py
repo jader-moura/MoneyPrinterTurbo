@@ -600,6 +600,11 @@ TIMELINE_FROM_TOP = 118     # ... or from the top, when captions have the bottom
 TIMELINE_MOVE_SECONDS = 0.6   # the marker's slide to the next event
 TIMELINE_LABEL_SECONDS = 8.0  # how long an event's label stays under its date
 TIMELINE_FADE_SECONDS = 0.5
+# The strip is not on screen for the whole run. It comes up a moment before the
+# marker moves, stays this long after, and is away until the next event.
+TIMELINE_SHOW_SECONDS = 8.0
+TIMELINE_LEAD_SECONDS = 0.6
+_TIMELINE_SHORTEST_REST = 2.0  # a shorter gap than this and it simply stays
 _TIMELINE_DATE_SIZE = 62
 _TIMELINE_LABEL_SIZE = 34
 _TIMELINE_END_SIZE = 30
@@ -637,11 +642,28 @@ def open_spans(start: float, end: float,
     return [(begins, stops) for begins, stops in pieces if stops - begins >= 0.5]
 
 
+def timeline_rests(timelines: Sequence["Timeline"]) -> List[Tuple[float, float]]:
+    """The stretches of a run the strip is away in: from a while after each
+    event until just before the next one, and after the last."""
+    rests: List[Tuple[float, float]] = []
+    for line in timelines:
+        events = sorted(line.events, key=lambda event: event.at)
+        for number, event in enumerate(events):
+            shown_from = line.start if number == 0 else max(line.start, event.at)
+            away = shown_from + TIMELINE_SHOW_SECONDS
+            back = (events[number + 1].at - TIMELINE_LEAD_SECONDS
+                    if number + 1 < len(events) else line.end)
+            if back - away >= _TIMELINE_SHORTEST_REST:
+                rests.append((away, back))
+    return rests
+
+
 def timeline_holes(title: Optional[Title], cards: Sequence[TitleCard],
-                   top: bool) -> List[Tuple[float, float]]:
-    """When the timeline gives way: under the title, which has the whole
-    frame, and under each card when the strip is at the top with them."""
-    holes: List[Tuple[float, float]] = []
+                   top: bool, timelines: Sequence["Timeline"] = ()) -> List[Tuple[float, float]]:
+    """When the timeline is not on screen: between its events (see
+    ``timeline_rests``), under the title, which has the whole frame, and
+    under each card when the strip is at the top with them."""
+    holes: List[Tuple[float, float]] = timeline_rests(timelines)
     if title is not None and title.end - title.start >= 1.0:
         holes.append((title.start, title.end))
     if top:
@@ -658,7 +680,8 @@ def _timelines(sheet: _Sheet, timelines: Sequence[Timeline],
     The band, axis and ticks are one set of events for the whole run. The
     fill, the marker and the words are one set per event, each starting where
     the one before it stopped and sliding to its own place. ``holes`` are the
-    stretches the strip gives way in (the title; cards, when it is on top).
+    stretches the strip is away in (between events; the title; cards, when it
+    is on top).
     """
     scale = min(sheet.width, sheet.height) / 1080.0
     x0 = TIMELINE_EDGE * scale
@@ -787,7 +810,7 @@ def build(
                 _highlighted(sheet, timed)
     if timelines:
         top = timeline_on_top(style, bool(cues))
-        _timelines(sheet, timelines, timeline_holes(title, title_cards, top), top)
+        _timelines(sheet, timelines, timeline_holes(title, title_cards, top, timelines), top)
     _cards(sheet, title_cards)
     _title(sheet, title)
     return _header(sheet) + "\n".join(sheet.events) + "\n"

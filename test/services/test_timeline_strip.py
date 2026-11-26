@@ -169,18 +169,39 @@ class TestTheBurnedInStrip:
         assert "\\an1\\pos(138,946)" in text          # 1929, reading rightwards
         assert "\\an3\\move(162,946,1377,946,0,600)" in text  # 1988, reading leftwards
 
-    def test_a_label_leaves_after_eight_seconds_and_the_date_stays(self):
+    def test_the_strip_leaves_eight_seconds_after_the_last_change(self):
         events = [line for line in self._build().splitlines() if "Dialogue" in line]
         label = next(line for line in events if "Second day of digging" in line)
         date = next(line for line in events if "NOV 12, 1988" in line)
+        plates = [line for line in events if "\\blur50" in line]
         assert ",0:00:20.00,0:00:28.00," in label
-        assert ",0:00:20.00,0:00:40.00," in date
+        assert ",0:00:20.00,0:00:28.00," in date
+        # Two events ten seconds apart: too short a gap to go away in.
+        assert [line.split(",")[1:3] for line in plates] == [["0:00:10.00", "0:00:28.00"]]
+
+    def test_between_events_far_apart_it_is_away(self):
+        event = ass_subtitles.TimelineEvent
+        line = ass_subtitles.Timeline(
+            start=9.7, end=120.0, first="1929", last="2011",
+            events=[event(10.0, "1929", "Born", 0.0), event(60.0, "1988", "", 0.75),
+                    event(65.0, "2011", "", 1.0)])
+        # Up for eight seconds, back 0.6 s before the marker moves again.
+        assert ass_subtitles.timeline_rests([line]) == [(17.7, 59.4), (73.0, 120.0)]
+        text = ass_subtitles.build([], width=1920, height=1080,
+                                   style=ass_subtitles.Style(font="Inter"), timelines=[line])
+        plates = [row for row in text.splitlines() if "\\blur50" in row]
+        assert [row.split(",")[1:3] for row in plates] == [
+            ["0:00:09.70", "0:00:17.70"], ["0:00:59.40", "0:01:13.00"]]
+        # It comes back on the old date, then the marker slides to the new one.
+        old = [row for row in text.splitlines() if "}1929" in row and "CardTitle" in row]
+        assert [row.split(",")[1:3] for row in old] == [
+            ["0:00:09.70", "0:00:17.70"], ["0:00:59.40", "0:01:00.00"]]
 
     def test_it_gives_way_to_the_title(self):
         text = self._build(title=ass_subtitles.Title(14.0, 18.0, "Dorothea Puente"))
         plates = [line for line in text.splitlines() if "\\blur50" in line]
         assert [line.split(",")[1:3] for line in plates] == [
-            ["0:00:10.00", "0:00:14.00"], ["0:00:18.00", "0:00:40.00"]]
+            ["0:00:10.00", "0:00:14.00"], ["0:00:18.00", "0:00:28.00"]]
 
     def test_captions_at_the_bottom_send_it_to_the_top(self):
         cues = [((0.0, 2.0), "A caption.")]
