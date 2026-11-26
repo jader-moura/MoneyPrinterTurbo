@@ -86,6 +86,8 @@ MAX_PAUSE_SECONDS = 4.0
 MIN_PAUSE_SECONDS = 0.2
 _CARD_TITLE_CHARS = 40
 _CARD_SUBTITLE_CHARS = 60
+_STAT_FIGURE_CHARS = 16
+_STAT_CAPTION_CHARS = 48
 _TIMELINE_DATE_CHARS = 14
 _TIMELINE_LABEL_CHARS = 36
 
@@ -237,6 +239,23 @@ def _direction(entry: dict, number: int) -> dict:
         card["subtitle"] = card["subtitle"][:_CARD_SUBTITLE_CHARS]
         found["card"] = card
 
+    # A figure the narration has just said, large in the lower left with a
+    # line under it saying what it counts: "7 BODIES / found in her garden".
+    if entry.get("stat") not in (None, "", False):
+        stat = _lines(entry["stat"], number, "stat", "figure", "caption")
+        if not stat["figure"]:
+            raise ScenePlanError(
+                f'scene {number}: the stat has no figure; write it like '
+                '"7 bodies | Found in her garden in three days"'
+            )
+        for key, most in (("figure", _STAT_FIGURE_CHARS), ("caption", _STAT_CAPTION_CHARS)):
+            if len(stat[key]) > most:
+                raise ScenePlanError(
+                    f"scene {number}: the stat's {key} is {len(stat[key])} "
+                    f"characters; the most is {most}"
+                )
+        found["stat"] = stat
+
     timeline = entry.get("timeline")
     if timeline not in (None, "", False):
         found["timeline"] = _timeline(timeline, number)
@@ -264,6 +283,16 @@ def _title(data: dict, scenes: List[dict]) -> None:
             f"{_CARD_TITLE_CHARS}"
         )
     title["tagline"] = title["tagline"][:_CARD_SUBTITLE_CHARS]
+    # "on": "black" - the title alone on a black frame, in the silence before
+    # its scene, instead of over that scene's darkened picture.
+    over = _words(raw.get("on")).lower() if isinstance(raw, dict) else ""
+    if over in ("black", "a black frame"):
+        title["on"] = "black"
+    elif over not in ("", "picture", "the picture"):
+        raise ScenePlanError(
+            f'the title\'s "on" is {over!r}; it is "black" (alone on a black '
+            'frame) or "picture" (over its scene, the usual)'
+        )
     at = raw.get("scene", 1) if isinstance(raw, dict) else 1
     try:
         at = int(at)
@@ -279,6 +308,11 @@ def _title(data: dict, scenes: List[dict]) -> None:
     if scenes[at - 1]["direction"].get("card"):
         raise ScenePlanError(
             f"scene {at} has both the title and a card; put the card on "
+            "another scene"
+        )
+    if scenes[at - 1]["direction"].get("stat"):
+        raise ScenePlanError(
+            f"scene {at} has both the title and a stat; put the stat on "
             "another scene"
         )
     scenes[at - 1]["direction"]["title"] = title
@@ -467,8 +501,8 @@ def directed(plan_scenes: Any) -> bool:
 
 
 #: 给一条已经做出来的片子补导演项时，一段上能写的那几样。
-_REDIRECT_FIELDS = ("card", "impact", "music", "ambience", "pause_after", "map",
-                    "timeline")
+_REDIRECT_FIELDS = ("card", "stat", "impact", "music", "ambience", "pause_after",
+                    "map", "timeline")
 
 
 def _scene_numbers(key: Any, total: int) -> List[int]:
@@ -585,6 +619,8 @@ def outline(plan_scenes: List[dict]) -> str:
             marks.append(f"title: {direction['title'].get('text', '')}")
         if direction.get("card"):
             marks.append(f"card: {direction['card'].get('title', '')}")
+        if direction.get("stat"):
+            marks.append(f"stat: {direction['stat'].get('figure', '')}")
         if direction.get("map"):
             marks.append(f"map: {direction['map'].get('label', '')}")
         if direction.get("timeline"):
@@ -771,8 +807,11 @@ def report(plan: dict) -> str:
 
         titled = having("title")
         noted = [
-            f"title over scene {titled[0]}" if titled else "no title",
+            (f"title over scene {titled[0]}"
+             + (" (on black)" if scenes[titled[0] - 1]["direction"]["title"].get("on")
+                else "")) if titled else "no title",
             counted("card", "card"),
+            *([counted("stat", "stat")] if having("stat") else []),
             f"{len(having('pause_after'))} pause"
             f"{'' if len(having('pause_after')) == 1 else 's'} ({pauses:.1f}s)",
             counted("impact", "impact"),

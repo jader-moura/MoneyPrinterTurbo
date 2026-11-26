@@ -44,6 +44,8 @@ const ui = {
   dirTitleText: el("dir-title-text"), dirTagline: el("dir-tagline"),
   dirCard: el("dir-card"), dirCardTitle: el("dir-card-title"),
   dirCardSub: el("dir-card-sub"),
+  dirStat: el("dir-stat"), dirStatFigure: el("dir-stat-figure"),
+  dirStatCaption: el("dir-stat-caption"),
   dirTimeline: el("dir-timeline"), dirTlTicks: el("dir-tl-ticks"),
   dirTlFirst: el("dir-tl-first"), dirTlLast: el("dir-tl-last"),
   dirTlDate: el("dir-tl-date"), dirTlLabel: el("dir-tl-label"),
@@ -6718,7 +6720,9 @@ function drawDirection() {
   const title = found && found.title;
   const unitPx = Math.min(ui.frame.clientWidth || 0, ui.frame.clientHeight || 0) / 1080;
   const lines = (found && found.timelines) || [];
-  if (!found || !unitPx || (!title && !cards.length && !lines.length)) {
+  const stats = (found && found.stats) || [];
+  if (!found || !unitPx
+      || (!title && !cards.length && !lines.length && !stats.length)) {
     ui.direction.hidden = true;
     return;
   }
@@ -6735,23 +6739,45 @@ function drawDirection() {
 
   // 片名：整个画面压暗，正中一行大字。长的缩到放得下（字宽照字数估，和
   // 成片是同一个估法，所以缩的比例也一样）。
+  if (found.serif_font) {
+    box.setProperty("--serif-font",
+      `"${String(found.serif_font).replace(/"/g, "")}", Georgia, serif`);
+  }
   let shown = 0;
+  let dim = 0;
+  const onBlack = !!(title && title.on_black);
+  ui.direction.classList.toggle("black-title", onBlack);
   if (title && at >= title.start && at < title.end) {
-    shown = unit((at - title.start) / 0.5) * unit((title.end - at) / 0.7);
     const text = String(title.text || "");
     ui.dirTitleText.textContent = text;
     ui.dirTagline.textContent = String(title.tagline || "");
     ui.dirTagline.hidden = !String(title.tagline || "").trim();
-    const advance = 170 * 0.62 * squeeze + 12;
     const wide = ui.frame.clientWidth / unitPx;
-    const shrink = Math.min(1, 0.86 * wide / Math.max(1, text.length * advance));
-    const grow = 0.96 + 0.04 * unit((at - title.start) / Math.max(0.1, title.end - title.start));
-    box.setProperty("--shrink", String(shrink));
-    box.setProperty("--grow", String(grow));
+    const through = unit((at - title.start) / Math.max(0.1, title.end - title.start));
+    if (onBlack) {
+      // The black is there at once; the words and the rule take longer
+      // (ass_subtitles.py, _black_title).
+      dim = unit((at - title.start) / 0.13) * unit((title.end - at) / 0.33);
+      shown = unit((at - title.start - 0.13) / 0.53) * unit((title.end - at) / 0.53);
+      const advance = 112 * (0.62 + 0.22);
+      box.setProperty("--shrink",
+        String(Math.min(1, 0.84 * wide / Math.max(1, text.length * advance))));
+      box.setProperty("--spread", String(0.16 + 0.06 * through));
+      box.setProperty("--rule", String(unit((at - title.start - 0.33) / 0.87)));
+    } else {
+      shown = unit((at - title.start) / 0.5) * unit((title.end - at) / 0.7);
+      dim = 0.64 * shown;
+      const advance = 170 * 0.62 * squeeze + 12;
+      box.setProperty("--shrink",
+        String(Math.min(1, 0.86 * wide / Math.max(1, text.length * advance))));
+      box.setProperty("--grow", String(0.96 + 0.04 * through));
+      box.setProperty("--rule", "1");
+    }
   }
   ui.dirTitle.style.opacity = String(shown);
-  ui.dirDim.style.opacity = String(0.64 * shown);
+  ui.dirDim.style.opacity = String(dim);
   drawDirectionTimeline(found, at, unitPx);
+  drawDirectionStat(found, at, unitPx);
 
   // 标题卡：左上角，从左边滑进来 20 个单位。
   const index = cards.findIndex((card) => at >= card.start && at < card.end);
@@ -6777,6 +6803,37 @@ function drawDirection() {
   ui.dirCard.style.opacity = String(unit(since / 0.45) * unit((card.end - at) / 0.45));
   box.setProperty("--slide", (112 + 20 * unit(since / 0.6)) * unitPx + "px");
   box.setProperty("--slide-sub", (112 + 20 * unit(since / 0.75)) * unitPx + "px");
+}
+
+/** A stat as the finished video has it at `at`: the darkened lower left, the
+    red rule growing in, the figure rising under it with its letters
+    spreading, and the caption a moment later. The geometry and the timings
+    are the render's (ass_subtitles.py, `_stats`), sent with the direction. */
+function drawDirectionStat(found, at, unitPx) {
+  const box = ui.dirStat;
+  const stat = ((found && found.stats) || [])
+    .find((one) => at >= one.start && at < one.end);
+  if (!stat) { box.style.opacity = "0"; return; }
+  const how = found.stat || {};
+  const since = at - stat.start;
+  const left = stat.end - at;
+  const fadeIn = Number(how.in) || 0.33;
+  const fadeOut = Number(how.out) || 0.23;
+  const grown = unit(since / (Number(how.rule) || 0.47));
+  const through = unit(since / Math.max(0.1, stat.end - stat.start));
+  box.style.opacity = String(unit(since / fadeIn) * unit(left / fadeOut));
+  box.style.setProperty("--stat-edge", (Number(how.edge) || 150) * unitPx + "px");
+  box.style.setProperty("--stat-y",
+    ui.frame.clientHeight - (Number(how.rule_from_bottom) || 320) * unitPx + "px");
+  box.style.setProperty("--stat-rule", String(grown));
+  box.style.setProperty("--stat-rise",
+    (Number(how.rise) || 14) * (1 - grown) * unitPx + "px");
+  box.style.setProperty("--stat-spread", String(0.035 + 0.03 * through));
+  box.style.setProperty("--stat-caption-spread", String(0.40 + 0.04 * through));
+  ui.dirStatFigure.textContent = String(stat.figure || "");
+  ui.dirStatCaption.textContent = String(stat.caption || "");
+  ui.dirStatCaption.style.opacity = String(
+    unit((since - (Number(how.caption_delay) || 0.17)) / fadeIn));
 }
 
 /** The timeline strip as the finished video has it at `at`: the axis, a tick
@@ -6916,6 +6973,10 @@ function drawDirectionTrack() {
     mark.classList.toggle("selected",
       !!state.card && state.card.start !== null
         && Math.abs(state.card.start - card.start) < 0.01);
+  }
+  for (const stat of ready.stats || []) {
+    span("stat", "row-a", stat.start, stat.end, stat.figure,
+      `Stat: ${stat.figure}${stat.caption ? " — " + stat.caption : ""}`);
   }
   for (const [start, end] of ready.music_off || []) {
     span("music-off", "row-b", start, end, "music off",

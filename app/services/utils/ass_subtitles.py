@@ -75,6 +75,20 @@ class Style:
     # 到百分之几：一个正常宽度的 DIN 压到 78% 就是纪录片里那种窄体字。
     card_font: str = ""
     card_squeeze: int = 100
+    # The serif a stat's figure and a title on black are set in; "" = the
+    # card font.
+    serif_font: str = ""
+
+
+@dataclass
+class Stat:
+    """A figure in the lower left with a line under it saying what it counts:
+    "7 BODIES" over "FOUND IN HER GARDEN IN THREE DAYS"."""
+
+    start: float
+    end: float
+    figure: str
+    caption: str = ""
 
 
 @dataclass
@@ -95,6 +109,8 @@ class Title:
     end: float
     text: str
     tagline: str = ""
+    # Alone on a black frame, in a serif, instead of over the darkened picture.
+    on_black: bool = False
 
 
 @dataclass
@@ -425,6 +441,13 @@ def _header(sheet: _Sheet) -> str:
         f"Style: TitleSub,{card_font},{_TITLE_SUB_SIZE * scale:g},&H00E8E8E8,&H00FFFFFF,"
         f"&H00000000,&H78000000,0,0,0,0,{min(100, squeeze + 14)},100,{14 * scale:g},0,1,0,"
         f"{2 * scale:g},5,0,0,0,1",
+        # A stat's figure and a title on black: a serif, not bold, off-white.
+        f"Style: Serif,{style.serif_font or card_font},{_STAT_FIGURE_SIZE * scale:g},"
+        f"{_OFF_WHITE},&H00FFFFFF,&H00000000,&H78000000,0,0,0,0,100,100,0,0,1,0,"
+        f"{2 * scale:g},7,0,0,0,1",
+        f"Style: SmallCaps,{card_font},{_STAT_CAPTION_SIZE * scale:g},&H00DCE3E6,"
+        f"&H00FFFFFF,&H00000000,&H78000000,0,0,0,0,100,100,0,0,1,0,{2 * scale:g},"
+        "7,0,0,0,1",
     ]
     return (
         "[Script Info]\n"
@@ -556,12 +579,117 @@ def _cards(sheet: _Sheet, cards: Sequence[TitleCard]) -> None:
                   2, "CardSub")
 
 
+# A stat and a title on black. Every number is a unit of a 1080-high frame,
+# and the editor's preview (``drawDirectionStat`` in editor.js, ``.dir-stat``
+# in editor.css) draws from the same ones: change them together.
+STAT_EDGE = 150            # from the left of the frame to the rule and the words
+STAT_RULE_FROM_BOTTOM = 320  # the red rule; the figure hangs under it
+STAT_LIFT = 170            # how far it all moves up when captions have the bottom
+STAT_IN_SECONDS = 0.33
+STAT_OUT_SECONDS = 0.23
+STAT_RULE_SECONDS = 0.47   # the rule's growth, and the figure's rise
+STAT_CAPTION_DELAY = 0.17
+STAT_RISE = 14
+_STAT_FIGURE_SIZE = 128
+_STAT_CAPTION_SIZE = 30
+_BLACK_TITLE_SIZE = 112
+_OFF_WHITE = "&H00E6F0F5"    # BGR: a warm white
+_STAT_RED = "&H00231AD9"     # BGR: #D91A23
+
+
+def stat_lifted(style: Style, captions: bool) -> bool:
+    """Whether stats move up: captions at the bottom would sit on them."""
+    return timeline_on_top(style, captions)
+
+
+def _stats(sheet: _Sheet, stats: Sequence[Stat], lifted: bool) -> None:
+    """Each stat: the lower left of the picture darkened, a short red rule
+    that grows in, the figure in a serif rising under it with its letters
+    slowly spreading, and a line of small spaced capitals a moment later."""
+    scale = min(sheet.width, sheet.height) / 1080.0
+    x = STAT_EDGE * scale
+    rule_y = sheet.height - (STAT_RULE_FROM_BOTTOM + (STAT_LIFT if lifted else 0)) * scale
+    fade_in, fade_out = int(STAT_IN_SECONDS * 1000), int(STAT_OUT_SECONDS * 1000)
+    grow = int(STAT_RULE_SECONDS * 1000)
+    for stat in stats:
+        figure = _clean(stat.figure).upper()
+        if not figure or stat.end - stat.start < 0.8:
+            continue
+        caption = _clean(stat.caption).upper()
+        length = int((stat.end - stat.start) * 1000)
+        fade = f"\\fad({fade_in},{fade_out})"
+        # The dark corner the words are read against.
+        _line(sheet, stat.start, stat.end,
+              f"{{{fade}\\pos(0,0)\\1c&H000000&\\1a&H50&\\blur{90 * scale:.0f}\\p1}}"
+              f"{_box(-200 * scale, rule_y - 90 * scale, 1150 * scale, sheet.height + 200 * scale)}"
+              "{\\p0}", 0, "CardBar")
+        _line(sheet, stat.start, stat.end,
+              f"{{{fade}\\pos({x:.0f},{rule_y:.0f})\\1c&H{_STAT_RED[4:]}&\\fscx1"
+              f"\\t(0,{grow},\\fscx100)\\p1}}{_box(0, 0, 72 * scale, 3 * scale)}{{\\p0}}",
+              2, "CardBar")
+        top = rule_y + 14 * scale
+        size = _STAT_FIGURE_SIZE * scale
+        _line(sheet, stat.start, stat.end,
+              f"{{{fade}\\move({x:.0f},{top + STAT_RISE * scale:.0f},{x:.0f},{top:.0f},0,{grow})"
+              f"\\blur{0.6 * scale:.1f}\\fsp{size * 0.035:.1f}"
+              f"\\t(0,{length},\\fsp{size * 0.065:.1f})}}{figure}", 3, "Serif")
+        if caption:
+            small = _STAT_CAPTION_SIZE * scale
+            begins = stat.start + STAT_CAPTION_DELAY
+            _line(sheet, begins, stat.end,
+                  f"{{{fade}\\pos({x + 3 * scale:.0f},{rule_y + 172 * scale:.0f})"
+                  f"\\fsp{small * 0.40:.1f}"
+                  f"\\t(0,{max(1, length - int(STAT_CAPTION_DELAY * 1000))},"
+                  f"\\fsp{small * 0.44:.1f})}}{caption}", 3, "SmallCaps")
+
+
+def _black_title(sheet: _Sheet, title: Title) -> None:
+    """The title alone on black: a moment of nothing, then the name in a serif
+    with a red glow behind it, its letters spreading, and a red rule that
+    grows out from the centre."""
+    text = _clean(title.text).upper()
+    scale = min(sheet.width, sheet.height) / 1080.0
+    width, height = sheet.width, sheet.height
+    length = int((title.end - title.start) * 1000)
+    base = _BLACK_TITLE_SIZE * scale
+    # Long titles are set smaller: the width is estimated from the letters.
+    advance = base * (0.62 + 0.22)
+    shrink = min(1.0, 0.84 * width / max(1.0, len(text) * advance))
+    size = base * shrink
+    centre, middle = width / 2, height / 2 - 26 * scale
+    # The black comes in fast and leaves fast; the words take longer.
+    _line(sheet, title.start, title.end,
+          f"{{\\fad(130,330)\\pos(0,0)\\1c&H000000&\\1a&H00&\\p1}}"
+          f"{_box(0, 0, width, height)}{{\\p0}}", 5, "CardBar")
+    words_from = title.start + 0.13
+    words = f"\\fad(530,530)\\an5\\pos({centre:.0f},{middle:.0f})\\fs{size:.0f}" \
+            f"\\fsp{size * 0.16:.1f}\\t(0,{length},\\fsp{size * 0.22:.1f})"
+    _line(sheet, words_from, title.end,
+          f"{{{words}\\1c&H1A1A4D&\\1a&H50&\\blur{22 * scale:.0f}}}{text}", 6, "Serif")
+    _line(sheet, words_from, title.end,
+          f"{{{words}\\blur{0.6 * scale:.1f}}}{text}", 7, "Serif")
+    rule_y = middle + size * 0.5 + 36 * scale
+    _line(sheet, title.start + 0.33, title.end,
+          f"{{\\fad(300,530)\\an7\\pos({centre:.0f},{rule_y:.0f})\\1c&H{_STAT_RED[4:]}&\\fscx1"
+          f"\\t(0,870,\\fscx100)\\p1}}{_box(-130 * scale, 0, 130 * scale, 3 * scale)}{{\\p0}}",
+          7, "CardBar")
+    tagline = _clean(title.tagline).upper()
+    if tagline:
+        small = _STAT_CAPTION_SIZE * scale
+        _line(sheet, title.start + 0.5, title.end,
+              f"{{\\fad(530,530)\\an8\\pos({centre:.0f},{rule_y + 34 * scale:.0f})"
+              f"\\fsp{small * 0.40:.1f}}}{tagline}", 7, "SmallCaps")
+
+
 def _title(sheet: _Sheet, title: Optional[Title]) -> None:
     """片名：整个画面压暗，正中一行大字、一道红线、一行小字。"""
     if title is None:
         return
     text = _clean(title.text).upper()
     if not text or title.end - title.start < 1.0:
+        return
+    if title.on_black:
+        _black_title(sheet, title)
         return
     scale = min(sheet.width, sheet.height) / 1080.0
     squeeze = min(100, max(50, sheet.style.card_squeeze or 100)) / 100.0
@@ -792,6 +920,7 @@ def build(
     title_cards: Sequence[TitleCard] = (),
     title: Optional[Title] = None,
     timelines: Sequence[Timeline] = (),
+    stats: Sequence[Stat] = (),
 ) -> str:
     """整份 ASS 文件的内容。``cues`` 为空时只有标题卡（如果有的话）。
 
@@ -810,7 +939,12 @@ def build(
                 _highlighted(sheet, timed)
     if timelines:
         top = timeline_on_top(style, bool(cues))
-        _timelines(sheet, timelines, timeline_holes(title, title_cards, top, timelines), top)
+        holes = timeline_holes(title, title_cards, top, timelines)
+        if not top:
+            # A stat has the lower left, where the strip is.
+            holes += [(stat.start, stat.end) for stat in stats]
+        _timelines(sheet, timelines, holes, top)
+    _stats(sheet, stats, stat_lifted(style, bool(cues)))
     _cards(sheet, title_cards)
     _title(sheet, title)
     return _header(sheet) + "\n".join(sheet.events) + "\n"

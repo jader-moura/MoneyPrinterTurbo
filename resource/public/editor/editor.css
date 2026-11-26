@@ -1373,6 +1373,77 @@ body {
   text-shadow: calc(2 * var(--u)) calc(2 * var(--u)) 0 rgba(0, 0, 0, .53);
   transform: translate(-50%, -50%) scaleX(min(1, calc(var(--squeeze) + .14)));
 }
+/* A title on black (ass_subtitles.py, _black_title): the frame goes black and
+   the name is set in a serif, its letters spreading, over a short red rule. */
+.direction.black-title .dir-title-text {
+  top: calc(50% - 26 * var(--u));
+  font-family: var(--serif-font, "Palatino Linotype", Georgia, serif);
+  font-weight: 400;
+  font-size: calc(112 * var(--u) * var(--shrink, 1));
+  letter-spacing: calc(112 * var(--u) * var(--shrink, 1) * var(--spread, .16));
+  color: #f5f0e6;
+  text-shadow: 0 0 calc(22 * var(--u)) rgba(77, 26, 26, .7);
+  transform: translate(-50%, -50%);
+}
+.direction.black-title .dir-rule {
+  top: calc(50% + 10 * var(--u) + 56 * var(--u) * var(--shrink, 1));
+  width: calc(260 * var(--u) * var(--rule, 1));
+  height: calc(3 * var(--u));
+  margin-left: calc(-130 * var(--u) * var(--rule, 1));
+  background: #d91a23;
+}
+.direction.black-title .dir-tagline {
+  top: calc(50% + 59 * var(--u) + 56 * var(--u) * var(--shrink, 1));
+  font-size: calc(30 * var(--u));
+  letter-spacing: calc(12 * var(--u));
+  color: #e6e3dc;
+  text-shadow: none;
+  transform: translate(-50%, -50%);
+}
+/* A stat. --stat-y is the rule; the figure hangs under it. */
+.dir-stat { position: absolute; inset: 0; opacity: 0; }
+.dir-stat-plate {
+  position: absolute;
+  left: calc(-200 * var(--u));
+  top: calc(var(--stat-y, 0px) - 90 * var(--u));
+  width: calc(1350 * var(--u));
+  bottom: calc(-200 * var(--u));
+  background: rgba(0, 0, 0, .69);
+  filter: blur(calc(45 * var(--u)));
+}
+.dir-stat-rule {
+  position: absolute;
+  left: var(--stat-edge, 0px);
+  top: var(--stat-y, 0px);
+  width: calc(72 * var(--u) * var(--stat-rule, 1));
+  height: calc(3 * var(--u));
+  background: #d91a23;
+}
+.dir-stat-figure,
+.dir-stat-caption {
+  position: absolute;
+  white-space: nowrap;
+  line-height: 1;
+  text-transform: uppercase;
+}
+.dir-stat-figure {
+  left: var(--stat-edge, 0px);
+  top: calc(var(--stat-y, 0px) + 14 * var(--u) + var(--stat-rise, 0px));
+  font-family: var(--serif-font, "Palatino Linotype", Georgia, serif);
+  font-size: calc(128 * var(--u));
+  letter-spacing: calc(128 * var(--u) * var(--stat-spread, .035));
+  color: #f5f0e6;
+  text-shadow: calc(2 * var(--u)) calc(2 * var(--u)) 0 rgba(0, 0, 0, .53);
+}
+.dir-stat-caption {
+  left: calc(var(--stat-edge, 0px) + 3 * var(--u));
+  top: calc(var(--stat-y, 0px) + 172 * var(--u));
+  font-size: calc(30 * var(--u));
+  letter-spacing: calc(30 * var(--u) * var(--stat-caption-spread, .4));
+  color: #e6e3dc;
+  text-shadow: calc(2 * var(--u)) calc(2 * var(--u)) 0 rgba(0, 0, 0, .53);
+}
+.dir-mark.stat { background: #3a3326; border: 1px solid #d9b25a; color: #f3e6c4; }
 .dir-card { position: absolute; inset: 0; opacity: 0; }
 /* 暗底：让白字在雪地、天空上也读得出来。宽度跟着字走。 */
 .dir-plate {

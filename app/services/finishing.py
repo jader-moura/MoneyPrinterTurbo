@@ -222,6 +222,13 @@ _BGM_VOLUME_SLOPE = 0.3
 # 片子的最后一帧最多定住多久，等旁白说完、配乐淡掉。
 _MAX_END_HOLD_SECONDS = 6.0
 _TITLE_CARD_SECONDS = 6.0
+# A stat stays while its line is spoken, within these.
+_STAT_SHORTEST_SECONDS = 2.2
+_STAT_LONGEST_SECONDS = 5.0
+# A title on black takes the silence before its scene when there is at least
+# this much; otherwise this long from the start of the scene.
+_BLACK_TITLE_SHORTEST_SECONDS = 1.8
+_BLACK_TITLE_SECONDS = 3.8
 _TITLE_CARD_MIN_VIDEO_SECONDS = 60.0
 _TITLE_CARDS_FILE = "title-cards.json"
 
@@ -528,6 +535,19 @@ def _card_font() -> Tuple[str, int]:
     return "", 100
 
 
+def _serif_font() -> str:
+    """The serif a stat's figure and a title on black are set in: an
+    old-style face that ships with Windows. ``""`` elsewhere, which falls back
+    to the card font."""
+    windows = os.environ.get("WINDIR") or os.environ.get("SystemRoot") or ""
+    for file_name, family in (("pala.ttf", "Palatino Linotype"),
+                              ("constan.ttf", "Constantia"),
+                              ("georgia.ttf", "Georgia")):
+        if windows and os.path.isfile(os.path.join(windows, "Fonts", file_name)):
+            return family
+    return ""
+
+
 def subtitle_style(params: VideoParams) -> ass_subtitles.Style:
     """把任务里的字幕设置翻成 ASS 的样式。"""
     font_name = params.font_name or "STHeitiMedium.ttc"
@@ -544,6 +564,7 @@ def subtitle_style(params: VideoParams) -> ass_subtitles.Style:
     return ass_subtitles.Style(
         card_font=card_font,
         card_squeeze=card_squeeze,
+        serif_font=_serif_font(),
         font=_font_family(font_path),
         # libass 的字号是"上沿到下沿"，PIL 的是 em：同一个数字看起来小一圈。
         size=round(float(params.font_size or 60) * 1.12, 1),
@@ -663,6 +684,7 @@ class Direction:
     music_off: List[Tuple[float, float]] = field(default_factory=list)
     beds: dict = field(default_factory=dict)
     timelines: List[ass_subtitles.Timeline] = field(default_factory=list)
+    stats: List[ass_subtitles.Stat] = field(default_factory=list)
 
     @property
     def sounds(self) -> bool:
@@ -703,6 +725,14 @@ def direct(
         words, [str(scene.get("narration") or "") for scene in scenes])
     sound = setting("sound_design")
     found.timelines = _timelines(scenes, places, duration)
+    # When the narration before each scene stops: a title on black sits in
+    # the silence between that and its own scene.
+    quiet_since: List[float] = []
+    spoken_until = 0.0
+    for place in places:
+        quiet_since.append(spoken_until)
+        if place is not None:
+            spoken_until = max(spoken_until, place[1])
     for number, (scene, place) in enumerate(zip(scenes, places), start=1):
         wanted = scene.get("direction") or {}
         if not wanted:
@@ -718,13 +748,30 @@ def direct(
         if isinstance(card, dict) and card.get("title"):
             found.cards.append(
                 (start, str(card["title"]), str(card.get("subtitle") or "")))
+        stat = wanted.get("stat")
+        if isinstance(stat, dict) and stat.get("figure"):
+            found.stats.append(ass_subtitles.Stat(
+                start,
+                min(max(end + 0.25, start + _STAT_SHORTEST_SECONDS),
+                    start + _STAT_LONGEST_SECONDS, duration - 2.5),
+                str(stat["figure"]), str(stat.get("caption") or "")))
         title = wanted.get("title")
         if isinstance(title, dict) and title.get("text"):
+            shown = (max(0.0, start - 0.15), min(end + 0.55, duration - 2.5))
+            on_black = title.get("on") == "black"
+            if on_black:
+                # In the silence before the scene when there is enough of it;
+                # otherwise over the scene's first seconds.
+                quiet = (quiet_since[number - 1] + 0.15, start - 0.1)
+                if quiet[1] - quiet[0] >= _BLACK_TITLE_SHORTEST_SECONDS:
+                    shown = quiet
+                else:
+                    shown = (shown[0], min(shown[1], shown[0] + _BLACK_TITLE_SECONDS))
             found.title = ass_subtitles.Title(
-                max(0.0, start - 0.15), min(end + 0.55, duration - 2.5),
-                str(title["text"]), str(title.get("tagline") or ""))
+                shown[0], shown[1], str(title["text"]),
+                str(title.get("tagline") or ""), on_black=on_black)
             if sound:
-                found.hits.append(max(0.0, start - 0.1))
+                found.hits.append(max(0.0, shown[0] if on_black else start - 0.1))
         if not sound:
             continue
         if wanted.get("impact") == "start":
@@ -735,6 +782,10 @@ def direct(
             found.music_off.append((start, end))
         if wanted.get("ambience") in sound_design.BED_RMS_DB:
             found.beds.setdefault(wanted["ambience"], []).append((start, end))
+    # One stat leaves before the next one comes.
+    found.stats.sort(key=lambda stat: stat.start)
+    for stat, after in zip(found.stats, found.stats[1:]):
+        stat.end = min(stat.end, after.start - 0.15)
     # 片名和"这一句开头落一记"会落在同一处：只落一记，不然就是两倍响。
     hits: List[float] = []
     for at in sorted(at for at in found.hits if at < duration - 1.0):
@@ -981,12 +1032,13 @@ def editor_direction(
     title = direction.title
     if title is not None and title.end - title.start < 1.0:
         title = None
-    top = False
-    if direction.timelines and params.subtitle_enabled and cues:
+    top = top_captions = False
+    if (direction.timelines or direction.stats) and params.subtitle_enabled and cues:
         try:
-            top = ass_subtitles.timeline_on_top(subtitle_style(params), True)
+            top_captions = ass_subtitles.timeline_on_top(subtitle_style(params), True)
         except Exception as exc:  # a missing caption font is the render's to report
             logger.warning(f"the timeline is previewed at the bottom: {exc}")
+        top = top_captions and bool(direction.timelines)
     return {
         "planned": direction.planned,
         "timing": "recording" if heard else "estimate",
@@ -994,7 +1046,24 @@ def editor_direction(
         "title": None if title is None else {
             "start": round(title.start, 3), "end": round(title.end, 3),
             "text": title.text, "tagline": title.tagline,
+            "on_black": bool(title.on_black),
         },
+        "stats": [
+            {"start": round(stat.start, 3), "end": round(stat.end, 3),
+             "figure": stat.figure, "caption": stat.caption}
+            for stat in direction.stats if stat.end - stat.start >= 0.8
+        ],
+        # The same numbers the render draws a stat from.
+        "stat": {
+            "edge": ass_subtitles.STAT_EDGE,
+            "rule_from_bottom": ass_subtitles.STAT_RULE_FROM_BOTTOM + (
+                ass_subtitles.STAT_LIFT if top_captions else 0),
+            "in": ass_subtitles.STAT_IN_SECONDS, "out": ass_subtitles.STAT_OUT_SECONDS,
+            "rule": ass_subtitles.STAT_RULE_SECONDS,
+            "caption_delay": ass_subtitles.STAT_CAPTION_DELAY,
+            "rise": ass_subtitles.STAT_RISE,
+        },
+        "serif_font": _serif_font(),
         "cards": [
             {"start": round(card.start, 3), "end": round(card.end, 3),
              "title": card.title, "subtitle": card.subtitle}
@@ -1075,14 +1144,15 @@ def write_subtitles(
     cards = title_cards(
         task_dir, params, words, duration,
         planned=direction.cards if direction.planned else None)
-    if not captions and not cards and direction.title is None and not direction.timelines:
+    if (not captions and not cards and direction.title is None
+            and not direction.timelines and not direction.stats):
         return ""
     style = subtitle_style(params)
     content = ass_subtitles.build(
         cues if captions else [], width=width, height=height, style=style, mode=mode,
         max_lines=int(getattr(params, "subtitle_max_lines", 0) or 0),
         words=words, title_cards=cards, title=direction.title,
-        timelines=direction.timelines,
+        timelines=direction.timelines, stats=direction.stats,
     )
     target = os.path.splitext(output_file)[0] + ".ass"
     with open(target, "w", encoding="utf-8") as handle:

@@ -137,7 +137,8 @@ class TestWhatTheEditorIsTold:
             found = direction_preview.describe(_task(task_root))
         assert found["state"] == "ready" and found["planned"]
         assert found["title"] == {
-            "start": 0.0, "end": 2.55, "text": "Dyatlov", "tagline": "Nine hikers"}
+            "start": 0.0, "end": 2.55, "text": "Dyatlov", "tagline": "Nine hikers",
+            "on_black": False}
         assert found["cards"] == [
             {"start": 2.4, "end": 8.4, "title": "Igor Dyatlov", "subtitle": "Leader"}]
         # 片名自带一记，"这一句开头落一记"是另一记。

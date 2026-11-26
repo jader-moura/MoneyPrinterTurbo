@@ -189,7 +189,8 @@ same file:
 
 | Field | Where | What it does |
 | --- | --- | --- |
-| `title` | top level | The video's title, large and centred over a dimmed picture, for as long as scene number `scene` (counting from 1) is spoken. `text` is at most 40 characters; `tagline` is one short line under it. A low impact lands with it. |
+| `title` | top level | The video's title, large and centred over a dimmed picture, for as long as scene number `scene` (counting from 1) is spoken. `text` is at most 40 characters; `tagline` is one short line under it. A low impact lands with it. With `"on": "black"` the title is instead alone on a black frame, in a serif over a short red rule, during the silence before that scene: give the scene before it a `pause_after` of 3 to 4 seconds, or the title only gets the first seconds of its own scene. |
+| `stat` | a scene | A **figure** the narration has just said, large in the lower left under a short red rule, with a line of small capitals saying what it counts: `figure` (at most 16 characters, digits not words: `"7 bodies"`, `"$87,000"`, `"60 signatures"`) and `caption` (at most 48). Also written `"7 bodies \| Found in her garden in three days"`. It is up while the scene is spoken, between about two and five seconds. |
 | `card` | a scene | A small card in the top-left corner for six seconds from the start of this scene: `title` (at most 40 characters) and `subtitle` (at most 60). |
 | `pause_after` | a scene | Seconds of real silence recorded after this scene's narration, 0.2 to 4. The picture stays on screen through it. |
 | `impact` | a scene | A low hit: `"end"` lands just after the scene's last word, `"start"` just before its first. |
@@ -216,7 +217,18 @@ How to use them:
   back to the start ("To answer that, we have to go back to the beginning."),
   not on the first scene: the first scene is the hook. `text` is the name of
   the person or the case; `tagline` is the angle. The title scene cannot also
-  carry a card.
+  carry a card or a stat. Use `"on": "black"` when the cold open ends on a
+  held beat ("This is how it stayed hidden."): put the title on the next
+  scene and a `pause_after` of 3 to 4 seconds on the line before it, so the
+  name lands alone in the silence.
+- **Stats.** For the numbers a cold open or a summing-up is built on: bodies,
+  dollars, years, victims. One per sentence that states a figure, and only
+  where the figure is the point of the sentence; three in a row is a strong
+  run, more than that in a minute stops being read. Write the figure as the
+  viewer should remember it ("$87,000", not "about eighty seven thousand
+  dollars") and let the caption carry the hedge ("Approximate total in benefit
+  checks"). A stat shares the lower left with the timeline strip, which steps
+  aside for it, so avoid putting one on a dated scene.
 - **Cards.** About one every ninety seconds at most: three to six in a
   five-minute video, up to nine or ten in a fifteen-minute one. A card names
   what the viewer needs to hold on to: a date and place when the story jumps in
@@ -405,9 +417,10 @@ This only works for a video that was made from a scene plan.
    Finish to that look; without it the Finish stays as it is.
 
    `scenes` is keyed by scene number, or by a run like `"5-7"`. A scene named
-   by several keys gets all of them. The fields are `card`, `impact`, `music`,
-   `ambience`, `pause_after` and `map`, with the same meanings and the same
-   rules as above.
+   by several keys gets all of them. The fields are `card`, `stat`, `impact`,
+   `music`, `ambience`, `pause_after`, `map` and `timeline`, with the same
+   meanings and the same rules as above. The title takes `"on": "black"` here
+   too.
 
 3. Store it:
 
