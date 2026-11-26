@@ -189,7 +189,7 @@ same file:
 
 | Field | Where | What it does |
 | --- | --- | --- |
-| `title` | top level | The video's title, large and centred over a dimmed picture, for as long as scene number `scene` (counting from 1) is spoken. `text` is at most 40 characters; `tagline` is one short line under it. A low impact lands with it. With `"on": "black"` the title is instead alone on a black frame, in a serif over a short red rule, during the silence before that scene: give the scene before it a `pause_after` of 3 to 4 seconds, or the title only gets the first seconds of its own scene. |
+| `title` | top level | The video's title, large and centred over a dimmed picture, for as long as scene number `scene` (counting from 1) is spoken. `text` is at most 40 characters; `tagline` is one short line under it. A low impact lands with it. With `"on": "black"` the title is instead alone on a black frame, in a serif over a short red rule, during the silence before that scene: give the scene before it a `pause_after` of 3 to 4 seconds, or the title only gets the first seconds of its own scene. With `"score": "cold open"` the video opens with a score made for it, from the first frame up to the title: a low drone, slow chords, a heartbeat, a clock, a piano note on each cut, a riser and one large impact on the title. The video's own music then comes in after the title instead of at the start. |
 | `stat` | a scene | A **figure** the narration has just said, large in the lower left under a short red rule, with a line of small capitals saying what it counts: `figure` (at most 16 characters, digits not words: `"7 bodies"`, `"$87,000"`, `"60 signatures"`) and `caption` (at most 48). Also written `"7 bodies \| Found in her garden in three days"`. It is up while the scene is spoken, between about two and five seconds. |
 | `card` | a scene | A small card in the top-left corner for six seconds from the start of this scene: `title` (at most 40 characters) and `subtitle` (at most 60). |
 | `pause_after` | a scene | Seconds of real silence recorded after this scene's narration, 0.2 to 4. The picture stays on screen through it. |
@@ -221,6 +221,15 @@ How to use them:
   held beat ("This is how it stayed hidden."): put the title on the next
   scene and a `pause_after` of 3 to 4 seconds on the line before it, so the
   name lands alone in the silence.
+- **Cold-open score.** Add `"score": "cold open"` to the title when the
+  video opens with a cold open of its own, half a minute to a minute and a
+  half of the story's worst facts before the title; it goes well with
+  `"on": "black"`. It needs the title at least 12 seconds in, and it changes
+  with the pictures, so a cold open of short scenes (two to four seconds
+  each) gives it more to play on. Up to the title it replaces the music and
+  every `impact`, so write no `impact` or `"music": "off"` on those scenes.
+  Leave it out for a video whose title is on the first scenes, or one that is
+  calm from the start.
 - **Stats.** For the numbers a cold open or a summing-up is built on: bodies,
   dollars, years, victims. One per sentence that states a figure, and only
   where the figure is the point of the sentence; three in a row is a strong
@@ -419,8 +428,8 @@ This only works for a video that was made from a scene plan.
    `scenes` is keyed by scene number, or by a run like `"5-7"`. A scene named
    by several keys gets all of them. The fields are `card`, `stat`, `impact`,
    `music`, `ambience`, `pause_after`, `map` and `timeline`, with the same
-   meanings and the same rules as above. The title takes `"on": "black"` here
-   too.
+   meanings and the same rules as above. The title takes `"on": "black"` and
+   `"score": "cold open"` here too.
 
 3. Store it:
 

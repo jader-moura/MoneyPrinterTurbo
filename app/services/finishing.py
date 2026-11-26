@@ -49,7 +49,7 @@ from loguru import logger
 from app.config import config
 from app.models.schema import VideoAspect, VideoParams
 from app.services import bgm as bgm_service
-from app.services import scene_plan, sound_design
+from app.services import cold_open_score, scene_plan, sound_design
 from app.services import transition_sound as transition_sound_service
 from app.services.utils import ass_subtitles
 from app.utils import file_security, utils
@@ -229,6 +229,13 @@ _STAT_LONGEST_SECONDS = 5.0
 # this much; otherwise this long from the start of the scene.
 _BLACK_TITLE_SHORTEST_SECONDS = 1.8
 _BLACK_TITLE_SECONDS = 3.8
+# After a cold-open score the music starts this long after the title appears,
+# and takes this long to come up.
+_MUSIC_AFTER_TITLE_SECONDS = 1.5
+_MUSIC_IN_SECONDS = 4.0
+# The score is written for a mix at this loudness; the narration is mixed at
+# ``_VOICE_LUFS`` before the whole is brought up.
+_SCORE_MIX_LUFS = -14.0
 _TITLE_CARD_MIN_VIDEO_SECONDS = 60.0
 _TITLE_CARDS_FILE = "title-cards.json"
 
@@ -386,11 +393,17 @@ def mix_graph(
     music_off: Sequence[Tuple[float, float]] = (),
     hits: Optional[Tuple[int, Sequence[float]]] = None,
     beds: Sequence[Tuple[int, Sequence[Tuple[float, float]]]] = (),
+    score: Optional[Tuple[int, float, float]] = None,
 ) -> str:
     """混音那张滤镜图。输入 0 是旁白，1 是配乐（有的话），后面是转场音效。
 
     ``music_off`` 是配乐让开的那几段；``hits`` 是重音那个输入和它落在哪几秒；
     ``beds`` 是每一种环境声的输入（循环着读）和它响的那几段。
+
+    ``score`` is the cold-open score: its input, the gain it takes in dB and
+    the second its title lands on. The music then starts from its beginning
+    just after the title instead of at the first frame, and the score gives
+    way a little under the narration.
 
     出来两路一样的：``[mix]`` 写成文件，``[meter]`` 只是量响度。
     """
@@ -405,11 +418,25 @@ def mix_graph(
     voice.append(f"apad=whole_dur={duration:.3f}")
     parts: List[str] = []
     layers = ["[voice]"]
-    if music_gain is None:
+    keys = (["[key]"] if music_gain is not None else []) + (["[scorekey]"] if score else [])
+    if not keys:
         parts.append(f"[0:a]{','.join(voice)}[voice]")
     else:
-        parts.append(f"[0:a]{','.join(voice)},asplit=2[voice][key]")
+        parts.append(
+            f"[0:a]{','.join(voice)},asplit={len(keys) + 1}[voice]{''.join(keys)}")
+    if score:
+        parts.append(
+            f"[{score[0]}:a]{_STEREO_48K},volume={_decibels(score[1])}[scoreraw]")
+        parts.append(
+            "[scoreraw][scorekey]sidechaincompress=threshold=0.04:ratio=2:attack=30:"
+            "release=500[score]")
+        layers.append("[score]")
+    if music_gain is not None:
         music = [_STEREO_48K, f"volume={_decibels(music_gain)}"]
+        if score:
+            enters = score[2] + _MUSIC_AFTER_TITLE_SECONDS
+            music.append(f"adelay={int(round(enters * 1000))}:all=1")
+            music.append(f"afade=t=in:st={enters:.3f}:d={_MUSIC_IN_SECONDS:.1f}")
         riding = sound_design.music_filter(music_off)
         if riding:
             music.append(riding)
@@ -685,10 +712,14 @@ class Direction:
     beds: dict = field(default_factory=dict)
     timelines: List[ass_subtitles.Timeline] = field(default_factory=list)
     stats: List[ass_subtitles.Stat] = field(default_factory=list)
+    # A score from the first frame up to the title: ``(the second the title
+    # appears, the seconds the pictures change before it)``.
+    score: Optional[Tuple[float, List[float]]] = None
 
     @property
     def sounds(self) -> bool:
-        return bool(self.hits or self.music_off or any(self.beds.values()))
+        return bool(self.hits or self.music_off or any(self.beds.values())
+                    or self.score)
 
 
 def _plan_scenes(task_dir: str, params: VideoParams) -> List[dict]:
@@ -770,8 +801,19 @@ def direct(
             found.title = ass_subtitles.Title(
                 shown[0], shown[1], str(title["text"]),
                 str(title.get("tagline") or ""), on_black=on_black)
-            if sound:
-                found.hits.append(max(0.0, shown[0] if on_black else start - 0.1))
+            landing = max(0.0, shown[0] if on_black else start - 0.1)
+            if sound and title.get("score"):
+                if cold_open_score.possible(landing):
+                    found.score = (landing, [
+                        before[0] for before in places[:number - 1]
+                        if before is not None and before[0] < landing])
+                else:
+                    logger.warning(
+                        f"the cold-open score is left out: the title comes "
+                        f"{landing:.1f} seconds in, and a score needs "
+                        f"{cold_open_score.SHORTEST_SECONDS:g}")
+            if sound and not found.score:
+                found.hits.append(landing)
         if not sound:
             continue
         if wanted.get("impact") == "start":
@@ -788,7 +830,9 @@ def direct(
         stat.end = min(stat.end, after.start - 0.15)
     # 片名和"这一句开头落一记"会落在同一处：只落一记，不然就是两倍响。
     hits: List[float] = []
-    for at in sorted(at for at in found.hits if at < duration - 1.0):
+    # Up to its title the score has its own impacts.
+    scored_until = found.score[0] + 1.0 if found.score else -1.0
+    for at in sorted(at for at in found.hits if scored_until < at < duration - 1.0):
         if not hits or at - hits[-1] > 0.2:
             hits.append(at)
     found.hits = hits
@@ -1070,6 +1114,9 @@ def editor_direction(
             for card in cards
         ],
         "hits": [round(at, 3) for at in direction.hits],
+        "score": ({"until": round(direction.score[0], 3),
+                   "cuts": [round(at, 3) for at in direction.score[1]]}
+                  if direction.score else None),
         "hit_seconds": sound_design.HIT_SECONDS,
         "music_off": _windows(direction.music_off),
         "music": {
@@ -1298,13 +1345,24 @@ def render(
             inputs += ["-stream_loop", "-1", "-i", made[-1]]
             bed_inputs.append((next_input, windows))
             next_input += 1
+        score_input = None
+        if direction.score:
+            made.append(sound_design.write_wav(
+                temporary(".finish-score-", ".wav"),
+                cold_open_score.score(*direction.score)))
+            inputs += ["-i", made[-1]]
+            score_input = (next_input, _VOICE_LUFS - _SCORE_MIX_LUFS, direction.score[0])
+            next_input += 1
+            logger.info(
+                f"  ⑥ʺ a cold-open score up to the title at {direction.score[0]:.1f}s, "
+                f"on {len(direction.score[1])} cuts")
         graph = mix_graph(
             duration=duration, voice_gain=voice_gain, music_gain=music_gain,
             cut_sounds=cut_inputs,
             cut_volume=float(params.transition_sound_volume or 0.0),
             voice_processing=voice_processing, ducking=setting("music_ducking"),
             music_off=direction.music_off if music else (),
-            hits=hit_input, beds=bed_inputs,
+            hits=hit_input, beds=bed_inputs, score=score_input,
         )
         measured = _loudness_report(_run(
             [*inputs, "-filter_complex", graph, "-map", "[mix]", "-c:a", "pcm_s24le",

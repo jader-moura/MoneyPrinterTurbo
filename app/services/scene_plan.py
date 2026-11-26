@@ -293,6 +293,16 @@ def _title(data: dict, scenes: List[dict]) -> None:
             f'the title\'s "on" is {over!r}; it is "black" (alone on a black '
             'frame) or "picture" (over its scene, the usual)'
         )
+    # "score": "cold open" - a score made for this video from its first frame
+    # up to the title, which it lands on; the video's music comes in after.
+    scored = raw.get("score") if isinstance(raw, dict) else None
+    if scored is True or _words(scored).lower().replace("-", " ") == "cold open":
+        title["score"] = "cold open"
+    elif scored not in (None, "", False):
+        raise ScenePlanError(
+            f'the title\'s "score" is {scored!r}; it is "cold open" (a score '
+            "from the first frame up to the title) or left out"
+        )
     at = raw.get("scene", 1) if isinstance(raw, dict) else 1
     try:
         at = int(at)
@@ -809,7 +819,10 @@ def report(plan: dict) -> str:
         noted = [
             (f"title over scene {titled[0]}"
              + (" (on black)" if scenes[titled[0] - 1]["direction"]["title"].get("on")
-                else "")) if titled else "no title",
+                else "")
+             + (", a cold-open score before it"
+                if scenes[titled[0] - 1]["direction"]["title"].get("score") else "")
+             ) if titled else "no title",
             counted("card", "card"),
             *([counted("stat", "stat")] if having("stat") else []),
             f"{len(having('pause_after'))} pause"
