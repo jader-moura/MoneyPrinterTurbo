@@ -179,7 +179,7 @@ class TestThePicture:
         assert saturation(orange) < 0.65 and saturation(green) < 0.45
         # Blacks are lifted and tinted teal; white is warm.
         black, white = finishing._cinematic_colours(np.array([[0.0] * 3, [1.0] * 3]))
-        assert black[2] > black[0] > 0 and white[0] > white[2]
+        assert black[2] > black[1] > black[0] and white[0] > white[2]
 
     def test_the_cinematic_table_is_a_cube_file_written_once(self, tmp_path, monkeypatch):
         monkeypatch.setattr(finishing.utils, "storage_dir",
