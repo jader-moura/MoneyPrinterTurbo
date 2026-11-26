@@ -1104,3 +1104,129 @@ def test_an_entry_without_one_says_so(resident):
     spec = dataclasses.replace(srv.REGISTRY["zimage-turbo"], img2img="")
     with pytest.raises(ValueError, match="img2img"):
         srv.RESIDENT.starting_from_image(spec)
+
+
+# --- the commit charge is kept while the weights are on the card -------------
+#
+# Every picture used to end by asking Windows for 12 GB it had just trimmed
+# away, and the third one of a fresh server died inside `module.to("cpu")`.
+
+windows_only = pytest.mark.skipif(
+    sys.platform != "win32", reason="commit charge is a Windows quantity"
+)
+
+
+class FakeTensor:
+    def __init__(self, module, megabytes):
+        self._module = module
+        self._bytes = megabytes * MB
+
+    @property
+    def device(self):
+        return type("Device", (), {"type": self._module.where})()
+
+    def numel(self):
+        return self._bytes
+
+    def element_size(self):
+        return 1
+
+
+class FakeModule:
+    def __init__(self, megabytes=200):
+        self.where = "cpu"
+        self._tensor = FakeTensor(self, megabytes)
+
+    def parameters(self):
+        return iter([self._tensor])
+
+    def buffers(self):
+        return iter([])
+
+
+@pytest.fixture
+def offload_hook(monkeypatch):
+    """accelerate's hook, reduced to the two moves it makes."""
+    import types
+
+    class CpuOffload:
+        def init_hook(self, module):
+            # What the real one must find: the charge already given up.
+            module.held_when_it_came_back = srv.HELD.held_mb()
+            module.where = "cpu"
+            return module
+
+        def pre_forward(self, module, *args, **kwargs):
+            module.where = "cuda"
+            return args, kwargs
+
+    hooks = types.ModuleType("accelerate.hooks")
+    hooks.CpuOffload = CpuOffload
+    package = types.ModuleType("accelerate")
+    package.hooks = hooks
+    monkeypatch.setitem(sys.modules, "accelerate", package)
+    monkeypatch.setitem(sys.modules, "accelerate.hooks", hooks)
+    monkeypatch.setattr(srv, "HOLD_COMMIT", True)
+    assert srv.hold_commit_through_offload() is True
+    yield CpuOffload()
+    srv.HELD.release_all()
+
+
+@windows_only
+def test_holding_is_real_commit_charge_and_comes_back():
+    before = srv.own_commit_mb()
+    assert srv.HELD.hold(1, 256 * MB) == 256 * MB
+    try:
+        assert srv.own_commit_mb() - before >= 250
+        assert srv.HELD.held_mb() == 256
+    finally:
+        srv.HELD.release(1)
+    assert srv.own_commit_mb() - before < 50
+    assert srv.HELD.held_mb() == 0
+
+
+@windows_only
+def test_weights_that_go_to_the_card_leave_their_charge_behind(offload_hook):
+    transformer = FakeModule(megabytes=200)
+    offload_hook.pre_forward(transformer)
+    assert transformer.where == "cuda"
+    assert srv.HELD.held_mb() == 280
+
+
+@windows_only
+def test_it_is_given_up_just_before_they_come_back(offload_hook):
+    transformer = FakeModule(megabytes=200)
+    offload_hook.pre_forward(transformer)
+    offload_hook.init_hook(transformer)
+    assert transformer.held_when_it_came_back == 0
+    assert srv.HELD.held_mb() == 0
+
+
+@windows_only
+def test_a_module_already_on_the_card_is_not_charged_twice(offload_hook):
+    transformer = FakeModule(megabytes=200)
+    offload_hook.pre_forward(transformer)
+    offload_hook.pre_forward(transformer)
+    assert srv.HELD.held_mb() == 280
+
+
+@windows_only
+def test_something_as_small_as_the_vae_is_not_worth_holding(offload_hook):
+    vae = FakeModule(megabytes=8)
+    offload_hook.pre_forward(vae)
+    assert srv.HELD.held_mb() == 0
+
+
+@windows_only
+def test_unloading_gives_all_of_it_back(offload_hook, monkeypatch):
+    monkeypatch.setattr(srv, "torch", None)
+    offload_hook.pre_forward(FakeModule(megabytes=200))
+    srv.RESIDENT.unload()
+    assert srv.HELD.held_mb() == 0
+
+
+@windows_only
+def test_it_can_be_switched_off(monkeypatch):
+    monkeypatch.setattr(srv, "HOLD_COMMIT", False)
+    assert srv.HELD.hold(2, 256 * MB) == 0
+    assert srv.hold_commit_through_offload() is False

@@ -346,6 +346,188 @@ def machine_commit_mb() -> "Optional[tuple[int, int]]":
     return limit - free, limit
 
 
+# --- keeping the commit charge while the weights are on the card -------------
+#
+# CPU offload gives the host copy of a module back when it moves to the card
+# and asks for it again when it moves off: 12 GB for the transformer, twice a
+# picture. Windows trims a pagefile nobody is using within about fifteen
+# seconds (measured: 49.0 GB limit, 40.1 GB fifteen seconds later), and a draw
+# keeps the transformer on the card for twenty-five. So every picture ended by
+# asking for 12 GB the machine no longer had, with the pagefile growing while
+# the weights were being copied. Sampled five times a second over three draws:
+# free commit touched 0.00 GB in each one, the limit moved 40 -> 58 -> 67 GB,
+# and the third died with "Windows fatal exception: access violation" inside
+# `module.to("cpu")` - the same trace as the two crashes that emptied a queue
+# of 146 pictures on 2026-11-25.
+#
+# So the charge is not given back. When a module goes to the card, its size is
+# committed here and never touched (commit charge, no RAM); it is released the
+# moment before the module comes back. The limit has nothing to chase, and no
+# allocation depends on the pagefile growing in time. `GEN_HOLD_COMMIT=0`
+# turns it off.
+#
+# Two fifths more than the module, because the way back costs more than the
+# module: under WDDM the copy on the card is commit charge too, and it is only
+# freed after the host copy exists. Traced ten times a second: 26.2 GB with
+# the 12 GB transformer on the card, 40.2 GB at the top of the copy back, 27.6
+# GB once the card let go. Holding exactly 12 GB left that last 2 GB to the
+# pagefile, growing mid-copy as before; a quarter more covered the peak with
+# 0.3 GB to spare, which is not a margin.
+HOLD_COMMIT = os.environ.get("GEN_HOLD_COMMIT", "1").strip().lower() not in (
+    "0", "false", "no", "off",
+)
+_HOLD_PIECE = 1024 * 1024 * 1024
+# Below this a module's host copy is not worth a system call (the VAE).
+_HOLD_AT_LEAST = 64 * 1024 * 1024
+_MEM_COMMIT_RESERVE = 0x3000
+_MEM_RELEASE = 0x8000
+_PAGE_READWRITE = 0x04
+
+
+class HeldCommit:
+    """Commit charge kept in place of host copies that are on the card."""
+
+    def __init__(self) -> None:
+        self._blocks: dict[int, list[int]] = {}
+        self._sizes: dict[int, int] = {}
+        self._lock = threading.Lock()
+        self._kernel: Any = None
+
+    def _kernel32(self) -> Any:
+        # Its own handle: argtypes set on `ctypes.windll.kernel32` would be
+        # shared with everything else in the process that uses it.
+        if self._kernel is None:
+            kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel.VirtualAlloc.restype = ctypes.c_void_p
+            kernel.VirtualAlloc.argtypes = [
+                ctypes.c_void_p, ctypes.c_size_t, ctypes.c_ulong, ctypes.c_ulong,
+            ]
+            kernel.VirtualFree.restype = ctypes.c_int
+            kernel.VirtualFree.argtypes = [
+                ctypes.c_void_p, ctypes.c_size_t, ctypes.c_ulong,
+            ]
+            self._kernel = kernel
+        return self._kernel
+
+    def hold(self, key: int, size: int) -> int:
+        """Commits `size` bytes under `key`; returns how many it got.
+
+        Best effort and never raises: falling short leaves things exactly as
+        they were before this existed, which is worth a line in the log and
+        not worth failing a picture for.
+        """
+        self.release(key)
+        if not HOLD_COMMIT or sys.platform != "win32" or size < _HOLD_AT_LEAST:
+            return 0
+        blocks: list[int] = []
+        got = 0
+        try:
+            kernel = self._kernel32()
+            # A refusal here is the pagefile still growing; it has the whole
+            # denoising loop to finish, so a few seconds of patience is free.
+            deadline = time.monotonic() + 5.0
+            while got < size:
+                piece = min(_HOLD_PIECE, size - got)
+                address = kernel.VirtualAlloc(
+                    None, piece, _MEM_COMMIT_RESERVE, _PAGE_READWRITE
+                )
+                if address:
+                    blocks.append(address)
+                    got += piece
+                elif time.monotonic() > deadline:
+                    break
+                else:
+                    time.sleep(0.1)
+        except Exception:
+            pass
+        with self._lock:
+            self._blocks[key] = blocks
+            self._sizes[key] = got
+        if got < size:
+            print(
+                f"[genserver] could keep only {got // MB} of {size // MB} MB of "
+                "commit charge for weights that went to the card; the machine "
+                "is at its commit limit",
+                flush=True,
+            )
+        return got
+
+    def release(self, key: int) -> None:
+        with self._lock:
+            blocks = self._blocks.pop(key, [])
+            self._sizes.pop(key, None)
+        for address in blocks:
+            try:
+                self._kernel32().VirtualFree(address, 0, _MEM_RELEASE)
+            except Exception:
+                pass
+
+    def release_all(self) -> None:
+        with self._lock:
+            keys = list(self._blocks)
+        for key in keys:
+            self.release(key)
+
+    def held_mb(self) -> int:
+        with self._lock:
+            return int(sum(self._sizes.values()) // MB)
+
+
+HELD = HeldCommit()
+
+
+def _on_the_host(module: Any) -> bool:
+    try:
+        return next(module.parameters()).device.type == "cpu"
+    except StopIteration:
+        return True
+
+
+def _host_bytes(module: Any) -> int:
+    return sum(
+        tensor.numel() * tensor.element_size()
+        for tensors in (module.parameters(), module.buffers())
+        for tensor in tensors
+    )
+
+
+def hold_commit_through_offload() -> bool:
+    """Teaches accelerate's CPU-offload hook to keep the charge it gives back.
+
+    Patched on the class, once: every pipeline built from the resident one
+    (img2img, ControlNet) shares these hooks, and so shares this.
+    """
+    if not HOLD_COMMIT or sys.platform != "win32":
+        return False
+    try:
+        from accelerate.hooks import CpuOffload
+    except Exception:
+        return False
+    if getattr(CpuOffload, "_holds_commit", False):
+        return True
+    back_to_the_host = CpuOffload.init_hook
+    onto_the_card = CpuOffload.pre_forward
+
+    def init_hook(self, module):
+        # Released first, so the copy that is about to be made has somewhere
+        # to go. Milliseconds apart: far inside the time Windows takes to trim.
+        HELD.release(id(module))
+        return back_to_the_host(self, module)
+
+    def pre_forward(self, module, *args, **kwargs):
+        was_on_the_host = _on_the_host(module)
+        result = onto_the_card(self, module, *args, **kwargs)
+        if was_on_the_host and not _on_the_host(module):
+            size = _host_bytes(module)
+            HELD.hold(id(module), size + size * 2 // 5)
+        return result
+
+    CpuOffload.init_hook = init_hook
+    CpuOffload.pre_forward = pre_forward
+    CpuOffload._holds_commit = True
+    return True
+
+
 # Everything that allocates or frees model memory runs on this one thread.
 #
 # The HTTP server answers each request on a new thread, and torch's allocator
@@ -549,6 +731,9 @@ class Resident:
         self.outline_hook = None
         self.model_id = None
         self.loaded_at = 0.0
+        # Whatever was held for modules on the card belongs to weights that
+        # are about to stop existing.
+        HELD.release_all()
         gc.collect()
         if torch is not None and torch.cuda.is_available():
             try:
@@ -588,6 +773,7 @@ class Resident:
         dtype = getattr(torch, spec.dtype)
         pipe = cls.from_pretrained(spec.repo, torch_dtype=dtype)
         if offload:
+            hold_commit_through_offload()
             pipe.enable_model_cpu_offload()
             # Decoding a 1536x864 image from latents in one piece is the
             # single biggest allocation after the transformer itself, and it
@@ -1438,6 +1624,7 @@ def generate(body: dict) -> dict:
                     # Off the card again, the transformer with it: the two
                     # share modules, and a transformer left half on the card
                     # is exactly what `following_outlines` describes.
+                    HELD.release(id(pipe.transformer))
                     pipe.transformer.to("cpu")
                     pipe.controlnet.to("cpu")
                     torch.cuda.empty_cache()
