@@ -132,3 +132,35 @@ def test_the_render_list_shows_the_scene_at_the_length_it_was_set(clip, tmp_path
         "t1", [{"index": 0, "material": "footage.mp4", "duration": 0.5}])
     assert os.path.basename(short[0]["path"]) == "footage.mp4"
     assert short[0]["end"] == 0.5
+
+
+def test_the_stored_render_list_can_find_the_held_copy_again(clip, tmp_path, monkeypatch):
+    """The render list is stored by name and resolved when the render starts.
+    A held copy lives in ``held/``: stored by its bare name it was "missing or
+    outside the task directory", and a video with one could not be rendered."""
+    import shutil
+
+    from app.services import scene_editor, scene_manifest
+
+    folder = tmp_path / "t1"
+    folder.mkdir()
+    shutil.copy(clip, folder / "footage.mp4")
+
+    def task_dir(sub_dir: str = ""):
+        target = tmp_path / sub_dir if sub_dir else tmp_path
+        target.mkdir(parents=True, exist_ok=True)
+        return str(target)
+
+    monkeypatch.setattr(scene_manifest.utils, "task_dir", task_dir)
+    held, plain = (
+        timeline.build_edit_list(
+            "t1", [{"index": 0, "material": "footage.mp4", "duration": seconds}])[0]["path"]
+        for seconds in (3.0, 0.5))
+
+    stored = scene_editor._edit_list_material("t1", held)
+    assert stored == f"{timeline.HELD_DIR}/{os.path.basename(held)}"
+    assert os.path.samefile(scene_manifest.resolve_material("t1", stored), held)
+    assert scene_editor._edit_list_material("t1", plain) == "footage.mp4"
+    # A file from outside the video's folder keeps going by its name alone.
+    assert scene_editor._edit_list_material(
+        "t1", str(tmp_path / "uploads" / "mine.mp4")) == "mine.mp4"

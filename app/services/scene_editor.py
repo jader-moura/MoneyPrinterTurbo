@@ -3657,6 +3657,20 @@ def _point_scene_at(task_id: str, index: int, material_path: str) -> None:
         scene_manifest.save_scenes(task_id, scenes)
 
 
+def _edit_list_material(task_id: str, path: str) -> str:
+    """How a clip is named in the stored edit list: by its path inside the
+    video's folder, so a held copy keeps its ``held/`` in front; a file from
+    anywhere else (the shared uploads) by its name alone."""
+    try:
+        inside = os.path.relpath(
+            os.path.abspath(path), os.path.abspath(utils.task_dir(task_id)))
+    except ValueError:  # another drive
+        inside = ".."
+    if inside.startswith(".."):
+        return os.path.basename(path)
+    return inside.replace("\\", "/")
+
+
 def prepare_render(task_id: str) -> VideoParams:
     """准备恢复渲染所需的参数，并在提交前把能先查的前提都查掉。"""
     _require_idle(task_id)
@@ -3702,7 +3716,7 @@ def prepare_render(task_id: str) -> VideoParams:
                     # 按文件名存，和 ``scenes[].material`` 一个写法：
                     # ``resolve_material`` 的白名单是"任务目录 + 上传目录",
                     # 存成 ``/stream`` 用的那种 ``<task_id>/<file>`` 反而解析不出来。
-                    "material": os.path.basename(item["path"]),
+                    "material": _edit_list_material(task_id, item["path"]),
                     "start": round(float(item["start"]), 3),
                     "end": round(float(item["end"]), 3),
                     # 没挑过转场的段不写这个键，渲染器照旧用整条片子的设置。
