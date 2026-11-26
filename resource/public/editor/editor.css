@@ -1420,6 +1420,112 @@ body {
   transform: translateX(var(--slide-sub, 0px)) scaleX(min(1, calc(var(--squeeze) + .1)));
 }
 
+/* The timeline strip. The numbers are the ones in ass_subtitles.py
+   (``_timelines``): --tl-edge and --tl-y come from the server with the
+   direction, --tl-x is where the marker is now (JS). */
+.dir-timeline {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  --tl-edge: calc(150 * var(--u));
+  --tl-y: calc(100% - 112 * var(--u));
+  --tl-x: 0px;
+}
+.dir-tl-plate {
+  position: absolute;
+  left: calc(var(--tl-edge) - 110 * var(--u));
+  right: calc(var(--tl-edge) - 110 * var(--u));
+  top: calc(var(--tl-y) - 120 * var(--u));
+  height: calc(198 * var(--u));
+  background: rgba(0, 0, 0, .53);
+  filter: blur(calc(25 * var(--u)));
+}
+.dir-tl-axis {
+  position: absolute;
+  left: var(--tl-edge);
+  right: var(--tl-edge);
+  top: calc(var(--tl-y) - 1.5 * var(--u));
+  height: calc(3 * var(--u));
+  background: rgba(255, 255, 255, .56);
+}
+.dir-tl-tick {
+  position: absolute;
+  top: calc(var(--tl-y) - 9 * var(--u));
+  width: calc(3 * var(--u));
+  height: calc(18 * var(--u));
+  margin-left: calc(-1.5 * var(--u));
+  background: rgba(255, 255, 255, .75);
+}
+.dir-tl-fill {
+  position: absolute;
+  left: var(--tl-edge);
+  top: calc(var(--tl-y) - 3 * var(--u));
+  width: calc(var(--tl-x) - var(--tl-edge));
+  height: calc(6 * var(--u));
+  background: #c83a3a;
+}
+.dir-tl-marker {
+  position: absolute;
+  left: var(--tl-x);
+  top: var(--tl-y);
+  width: calc(17 * var(--u));
+  height: calc(17 * var(--u));
+  box-sizing: content-box;
+  background: #fff;
+  border: calc(3 * var(--u)) solid #c83a3a;
+  transform: translate(-50%, -50%) rotate(45deg);
+}
+.dir-tl-end,
+.dir-tl-date,
+.dir-tl-label {
+  position: absolute;
+  white-space: nowrap;
+  line-height: 1;
+  text-shadow: calc(2 * var(--u)) calc(2 * var(--u)) 0 rgba(0, 0, 0, .53);
+}
+.dir-tl-end {
+  top: var(--tl-y);
+  font-size: calc(30 * var(--u));
+  color: #e8e8e8;
+}
+.dir-tl-end.first {
+  right: calc(100% - var(--tl-edge) + 18 * var(--u));
+  transform: translateY(-50%) scaleX(min(1, calc(var(--squeeze) + .1)));
+  transform-origin: 100% 50%;
+}
+.dir-tl-end.last {
+  left: calc(100% - var(--tl-edge) + 18 * var(--u));
+  transform: translateY(-50%) scaleX(min(1, calc(var(--squeeze) + .1)));
+  transform-origin: 0 50%;
+}
+.dir-tl-date {
+  left: calc(var(--tl-x) - 12 * var(--u));
+  bottom: calc(100% - var(--tl-y) + 22 * var(--u));
+  font-weight: 700;
+  font-size: calc(62 * var(--u));
+  letter-spacing: calc(3 * var(--u));
+  text-transform: uppercase;
+  transform: scaleX(var(--squeeze));
+  transform-origin: 0 100%;
+}
+.dir-tl-label {
+  left: calc(var(--tl-x) - 12 * var(--u));
+  top: calc(var(--tl-y) + 18 * var(--u));
+  font-size: calc(34 * var(--u));
+  letter-spacing: calc(2 * var(--u));
+  color: #e8e8e8;
+  transform: scaleX(min(1, calc(var(--squeeze) + .1)));
+  transform-origin: 0 0;
+}
+/* Past the middle of the axis the words hang to the left of the marker. */
+.dir-timeline.right .dir-tl-date,
+.dir-timeline.right .dir-tl-label {
+  left: auto;
+  right: calc(100% - var(--tl-x) - 12 * var(--u));
+}
+.dir-timeline.right .dir-tl-date { transform-origin: 100% 100%; }
+.dir-timeline.right .dir-tl-label { transform-origin: 100% 0; }
+
 /* 时间线上的导演项。两排：上面是画面上看得见的（片名、标题卡）和重音，
    下面是声音（配乐让开、环境声）。点一下跳到那里。 */
 .direction-lane { height: 34px; }
@@ -1447,7 +1553,31 @@ body {
   color: #9fc4ae;
 }
 .dir-mark.bed { background: #2c3a4d; border: 1px solid #47607f; color: #c9d8ec; }
+/* A timeline run: a thin line along the foot of the track, a tick per date. */
+.dir-run {
+  position: absolute;
+  top: 30px;
+  height: 3px;
+  background: #c83a3a;
+  opacity: .85;
+}
+.dir-run-date {
+  position: absolute;
+  top: 26px;
+  width: 7px;
+  height: 7px;
+  margin-left: -4px;
+  box-sizing: border-box;
+  background: #fff;
+  border: 1px solid #c83a3a;
+  transform: rotate(45deg);
+  cursor: pointer;
+  z-index: 1;
+}
+.dir-run-date:hover { background: #ffd0d0; }
 .dir-mark:hover { filter: brightness(1.25); }
+.dir-mark.card { cursor: pointer; }
+.dir-mark.card.selected { outline: 2px solid #fff; outline-offset: -1px; }
 /* 重音是一个时刻，不是一段：一个小菱形。 */
 .dir-hit {
   position: absolute;

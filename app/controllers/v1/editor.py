@@ -46,6 +46,7 @@ from app.models.schema import (
     VideoEffectsRequest,
     SubtitleEditRequest,
     SubtitleStyleRequest,
+    TitleCardRequest,
     NarrationScriptRequest,
     PublishMetadataRequest,
     PublishSceneThumbnailRequest,
@@ -77,6 +78,7 @@ from app.services import transition_sound as transition_sound_service
 from app.services import app_settings
 from app.services import direction_preview
 from app.services import narration_retake
+from app.services import title_cards
 from app.services import new_video
 from app.services import picture_shelf
 from app.services import reference_image
@@ -1076,6 +1078,66 @@ def read_direction(request: Request, task_id: str = Path(..., description="Task 
     _require_task(task_id, request_id)
     data = _handle(
         task_id, request_id, lambda: direction_preview.describe(task_id)
+    )
+    return utils.get_response(200, data)
+
+
+@router.post(
+    "/tasks/{task_id}/direction/cards",
+    summary="Add a title card on the words said at a time",
+)
+def add_title_card(
+    request: Request,
+    body: TitleCardRequest,
+    task_id: str = Path(..., description="Task ID"),
+):
+    """The card is tied to the words the narration says at ``time``, so it
+    stays on them when the narration around it changes. Answers with the
+    direction as the editor shows it."""
+    request_id = base.get_task_id(request)
+    _require_task(task_id, request_id)
+    data = _handle(
+        task_id, request_id,
+        lambda: title_cards.add(task_id, body.time, body.title, body.subtitle),
+    )
+    return utils.get_response(200, data)
+
+
+@router.put(
+    "/tasks/{task_id}/direction/cards",
+    summary="Reword a title card, or move it",
+)
+def change_title_card(
+    request: Request,
+    body: TitleCardRequest,
+    task_id: str = Path(..., description="Task ID"),
+):
+    """``start`` says which card (when it starts, in seconds). ``title`` and
+    ``subtitle`` reword it; ``time`` moves it onto the words said then."""
+    request_id = base.get_task_id(request)
+    _require_task(task_id, request_id)
+    data = _handle(
+        task_id, request_id,
+        lambda: title_cards.change(
+            task_id, body.start, title=body.title, subtitle=body.subtitle,
+            time=body.time),
+    )
+    return utils.get_response(200, data)
+
+
+@router.delete(
+    "/tasks/{task_id}/direction/cards",
+    summary="Take a title card out",
+)
+def delete_title_card(
+    request: Request,
+    task_id: str = Path(..., description="Task ID"),
+    start: float = Query(..., ge=0, description="When the card starts, in seconds"),
+):
+    request_id = base.get_task_id(request)
+    _require_task(task_id, request_id)
+    data = _handle(
+        task_id, request_id, lambda: title_cards.remove(task_id, start)
     )
     return utils.get_response(200, data)
 

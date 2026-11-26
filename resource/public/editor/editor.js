@@ -44,6 +44,9 @@ const ui = {
   dirTitleText: el("dir-title-text"), dirTagline: el("dir-tagline"),
   dirCard: el("dir-card"), dirCardTitle: el("dir-card-title"),
   dirCardSub: el("dir-card-sub"),
+  dirTimeline: el("dir-timeline"), dirTlTicks: el("dir-tl-ticks"),
+  dirTlFirst: el("dir-tl-first"), dirTlLast: el("dir-tl-last"),
+  dirTlDate: el("dir-tl-date"), dirTlLabel: el("dir-tl-label"),
   directionLane: el("direction-lane"), directionCell: el("direction-cell"),
   yt: el("yt"), subsYt: el("subs-yt"), subsSafe: el("subs-safe"),
   captionPanel: el("caption-panel"), captionText: el("caption-text"),
@@ -350,6 +353,7 @@ async function load(taskId) {
     state.imageStylePinned = !!data.image_style_pinned;
     state.selected = state.scenes.length ? 0 : -1;
     state.line = -1;
+    state.card = null;
     state.playhead = 0;
     state.loadedClip = -1;
     ui.narration.src = data.audio_url || "";
@@ -4226,6 +4230,7 @@ function drawVoice() {
       // where it can be heard on its own and recorded again.
       savePromptEdit();
       state.line = index;
+      state.card = null;
       state.adding = false;
       drawInspector();
       markLine();
@@ -4434,6 +4439,11 @@ function drawLinePanel(line) {
   more.className = "row";
   more.append(
     button("Edit the caption…", "small", () => openCaption(line.index)),
+    button("Add a title card here", "small", async () => {
+      // On the words of this line, at the time they are really said.
+      const heard = await heardLine(line);
+      openCard(null, heard ? heard.start : line.start);
+    }),
     button("Back to the scene", "small", () => {
       state.line = -1;
       markLine();
@@ -5091,6 +5101,7 @@ function usedPhotoNote(scene) {
 function drawInspector() {
   ui.inspBody.innerHTML = "";
   if (state.adding) { drawAddForm(); return; }
+  if (state.card) { drawCardPanel(state.card); return; }
   const line = selectedLine();
   if (line) { drawLinePanel(line); return; }
 
@@ -5689,8 +5700,9 @@ function startDrag(event) {
   const index = Number(event.currentTarget.dataset.index);
   state.selected = index;
   state.adding = false;
-  // Clicking a picture takes the panel back from a narration line.
+  // Clicking a picture takes the panel back from a narration line or a card.
   state.line = -1;
+  state.card = null;
   markLine();
   drawInspector();
   markSelection();
@@ -6438,6 +6450,12 @@ async function loadDirection() {
     };
   }
   if (taskId !== state.taskId) return;
+  showDirection(found);
+}
+
+/** Take a direction as the server gave it and draw it everywhere. */
+function showDirection(found) {
+  clearTimeout(state.directionTimer);
   state.direction = found;
   if (found && found.state === "listening") {
     state.directionTimer = setTimeout(loadDirection, DIRECTION_POLL);
@@ -6447,6 +6465,132 @@ async function loadDirection() {
   drawDirectionTrack();
   drawDirection();
   soundDirection();
+}
+
+/* ---------- title cards, by hand ----------
+
+   A card is tied to the words the narration says when it appears, not to a
+   number of seconds, so it stays on them when the narration changes. The
+   server answers every change with the whole direction, placed again. */
+const CARD_TITLE_CHARS = 40;
+const CARD_SUBTITLE_CHARS = 60;
+
+function cardsPath() {
+  return `/tasks/${encodeURIComponent(state.taskId)}/direction/cards`;
+}
+
+/** Open the panel on a card of the direction, or on a new one at `time`. */
+function openCard(card, time) {
+  savePromptEdit();
+  state.card = card
+    ? { start: card.start, time: card.start, title: card.title || "",
+        subtitle: card.subtitle || "", moved: false }
+    : { start: null, time: Math.max(0, Number(time) || 0), title: "",
+        subtitle: "", moved: false };
+  state.line = -1;
+  state.adding = false;
+  markLine();
+  drawInspector();
+  drawDirectionTrack();
+}
+
+function closeCard() {
+  state.card = null;
+  drawInspector();
+  drawDirectionTrack();
+}
+
+async function saveCard(card) {
+  const fresh = card.start === null;
+  const body = { title: card.title, subtitle: card.subtitle };
+  if (fresh || card.moved) body.time = card.time;
+  if (!fresh) body.start = card.start;
+  try {
+    const found = await call(fresh ? "POST" : "PUT", cardsPath(), body);
+    showDirection(found);
+    // The card as the server placed it: it starts on a word, not on the click.
+    const placed = ((found && found.cards) || [])
+      .filter((one) => one.title === card.title.trim().replace(/\s+/g, " "))
+      .sort((a, b) => Math.abs(a.start - card.time) - Math.abs(b.start - card.time))[0];
+    state.card = null;
+    if (placed) openCard(placed); else closeCard();
+    say(fresh ? "The card was added. It is in the finished video when it is rendered."
+      : "The card was changed.");
+  } catch (error) {
+    say(String(error.message || error), "error");
+  }
+}
+
+async function deleteCard(card) {
+  try {
+    const found = await call(
+      "DELETE", `${cardsPath()}?start=${encodeURIComponent(card.start)}`);
+    showDirection(found);
+    closeCard();
+    say("The card was deleted.");
+  } catch (error) {
+    say(String(error.message || error), "error");
+  }
+}
+
+function drawCardPanel(card) {
+  const fresh = card.start === null;
+  ui.inspTitle.textContent = fresh ? "New title card" : "Title card";
+
+  const says = inspectorGroup("What it says");
+  const field = (label, key, most, hint) => {
+    const wrap = document.createElement("div");
+    wrap.className = "field";
+    const caption = document.createElement("label");
+    caption.textContent = label;
+    const input = document.createElement("input");
+    input.type = "text";
+    input.maxLength = most;
+    input.value = card[key];
+    input.placeholder = hint;
+    input.addEventListener("input", () => {
+      card[key] = input.value;
+      save.disabled = !card.title.trim();
+    });
+    input.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" && card.title.trim()) saveCard(card);
+    });
+    wrap.append(caption, input);
+    says.appendChild(wrap);
+    return input;
+  };
+  const title = field("Title", "title", CARD_TITLE_CHARS, "December 1978");
+  field("Second line (optional)", "subtitle", CARD_SUBTITLE_CHARS,
+    "West Summerdale Avenue");
+  ui.inspBody.appendChild(says);
+
+  const when = inspectorGroup("When it appears");
+  const at = document.createElement("p");
+  at.className = "hint";
+  at.textContent = `At ${fmt(card.time)}`
+    + (card.moved && !fresh ? ` (was ${fmt(card.start)}; not saved yet)` : "")
+    + ". It starts on the word being said there, stays about six seconds, "
+    + "and follows those words if the narration changes.";
+  const move = button("Put it at the playhead", "small", () => {
+    card.time = Math.max(0, state.playhead);
+    card.moved = true;
+    drawInspector();
+  });
+  const moveRow = document.createElement("div");
+  moveRow.className = "row";
+  moveRow.append(move);
+  when.append(at, moveRow);
+  ui.inspBody.appendChild(when);
+
+  const save = button(fresh ? "Add the card" : "Save", "small", () => saveCard(card));
+  save.disabled = !card.title.trim();
+  const row = document.createElement("div");
+  row.className = "row";
+  row.append(save);
+  if (!fresh) row.append(button("Delete the card", "small", () => deleteCard(card)));
+  row.append(button("Back to the scene", "small", closeCard));
+  ui.inspBody.appendChild(row);
+  if (fresh) title.focus();
 }
 
 /** 换任务时把上一条片子的导演项清掉，声音也停掉。 */
@@ -6573,7 +6717,8 @@ function drawDirection() {
   const cards = (found && found.cards) || [];
   const title = found && found.title;
   const unitPx = Math.min(ui.frame.clientWidth || 0, ui.frame.clientHeight || 0) / 1080;
-  if (!found || !unitPx || (!title && !cards.length)) {
+  const lines = (found && found.timelines) || [];
+  if (!found || !unitPx || (!title && !cards.length && !lines.length)) {
     ui.direction.hidden = true;
     return;
   }
@@ -6606,6 +6751,7 @@ function drawDirection() {
   }
   ui.dirTitle.style.opacity = String(shown);
   ui.dirDim.style.opacity = String(0.64 * shown);
+  drawDirectionTimeline(found, at, unitPx);
 
   // 标题卡：左上角，从左边滑进来 20 个单位。
   const index = cards.findIndex((card) => at >= card.start && at < card.end);
@@ -6631,6 +6777,68 @@ function drawDirection() {
   ui.dirCard.style.opacity = String(unit(since / 0.45) * unit((card.end - at) / 0.45));
   box.setProperty("--slide", (112 + 20 * unit(since / 0.6)) * unitPx + "px");
   box.setProperty("--slide-sub", (112 + 20 * unit(since / 0.75)) * unitPx + "px");
+}
+
+/** The timeline strip as the finished video has it at `at`: the axis, a tick
+    per event, the fill and the marker on the event being told, its date and
+    what happened. The geometry and the timings are the render's
+    (ass_subtitles.py, `_timelines`), sent with the direction. */
+function drawDirectionTimeline(found, at, unitPx) {
+  const box = ui.dirTimeline;
+  const line = ((found && found.timelines) || [])
+    .find((one) => at >= one.start && at < one.end && (one.events || []).length);
+  if (!line) { box.style.opacity = "0"; return; }
+  const how = found.timeline || {};
+  const fade = Number(how.fade) || 0.5;
+  const move = Number(how.move) || 0.6;
+
+  // It gives way to the title (and to cards, when it is at the top with them).
+  let open = unit((at - line.start) / fade) * unit((line.end - at) / fade);
+  for (const [from, to] of how.holes || []) {
+    if (at >= from && at < to) open = 0;
+    else open = Math.min(open, unit((at < from ? from - at : at - to) / fade));
+  }
+  box.style.opacity = String(open);
+  if (!open) return;
+
+  const events = line.events;
+  let now = 0;
+  for (let i = 1; i < events.length; i += 1) if (at >= events[i].at) now = i;
+  const event = events[now];
+  const before = events[Math.max(0, now - 1)];
+  const slid = now ? unit((at - event.at) / move) : 1;
+  const place = before.place + (event.place - before.place) * slid;
+
+  const edge = (Number(how.edge) || 150) * unitPx;
+  const span = ui.frame.clientWidth - 2 * edge;
+  const fromEdge = (Number(how.from_edge) || 112) * unitPx;
+  box.style.setProperty("--tl-edge", edge + "px");
+  box.style.setProperty("--tl-y",
+    (how.top ? fromEdge : ui.frame.clientHeight - fromEdge) + "px");
+  box.style.setProperty("--tl-x", edge + span * place + "px");
+  box.classList.toggle("right", event.place > 0.5);
+
+  const key = `${line.start}:${events.length}:${unitPx}:${span}`;
+  if (state.directionTimeline !== key) {
+    state.directionTimeline = key;
+    ui.dirTlFirst.textContent = String(line.first || "");
+    ui.dirTlLast.textContent = String(line.last || "");
+    ui.dirTlTicks.innerHTML = "";
+    for (const one of events) {
+      const tick = document.createElement("i");
+      tick.className = "dir-tl-tick";
+      tick.style.left = edge + span * one.place + "px";
+      ui.dirTlTicks.appendChild(tick);
+    }
+  }
+  ui.dirTlDate.textContent = String(event.date || "");
+  ui.dirTlLabel.textContent = String(event.label || "");
+  const since = now ? event.at : line.start;
+  const next = now + 1 < events.length ? events[now + 1].at : line.end;
+  const until = Math.min(next, since + (Number(how.label_seconds) || 8));
+  ui.dirTlDate.style.opacity = String(unit((at - since) / 0.2));
+  ui.dirTlLabel.style.opacity = String(
+    at < until ? unit((at - since) / 0.2) * unit((until - at) / 0.4) : 0);
 }
 
 /* 时间线上的那条导演轨道。上排：片名、标题卡、重音；下排：配乐让开、环境声。
@@ -6663,23 +6871,51 @@ function drawDirectionTrack() {
     || "What the finished video adds: the title, title cards, impacts, "
       + "ambience and where the music drops out.";
 
-  const span = (kind, row, start, end, label, tip) => {
+  const span = (kind, row, start, end, label, tip, chosen) => {
     const mark = document.createElement("div");
     mark.className = `dir-mark ${kind} ${row}`;
+    if (chosen) {
+      mark.addEventListener("click", chosen);
+      mark.title = "Click to change this card";
+    }
     mark.style.left = start * px + "px";
     mark.style.width = Math.max(6, (end - start) * px) + "px";
     mark.textContent = label;
-    mark.title = `${tip} · ${fmt(start)}–${fmt(end)}`;
+    mark.title = `${tip} · ${fmt(start)}–${fmt(end)}`
+      + (chosen ? "\nClick to change this card" : "");
     mark.addEventListener("click", () => scrubTo(start));
     lane.appendChild(mark);
+    return mark;
   };
+  for (const line of ready.timelines || []) {
+    const run = document.createElement("div");
+    run.className = "dir-run";
+    run.style.left = line.start * px + "px";
+    run.style.width = Math.max(6, (line.end - line.start) * px) + "px";
+    run.title = `Timeline ${line.first || ""}${line.last ? "–" + line.last : ""}`
+      + ` · ${fmt(line.start)}–${fmt(line.end)}`;
+    lane.appendChild(run);
+    for (const event of line.events || []) {
+      const date = document.createElement("div");
+      date.className = "dir-run-date";
+      date.style.left = event.at * px + "px";
+      date.title = `Timeline: ${event.date}${event.label ? " — " + event.label : ""}`
+        + ` · ${fmt(event.at)}`;
+      date.addEventListener("click", () => scrubTo(event.at + 1));
+      lane.appendChild(date);
+    }
+  }
   if (ready.title) {
     span("title", "row-a", ready.title.start, ready.title.end,
       ready.title.text, `Title: ${ready.title.text}`);
   }
   for (const card of ready.cards || []) {
-    span("card", "row-a", card.start, card.end, card.title,
-      `Title card: ${card.title}${card.subtitle ? " — " + card.subtitle : ""}`);
+    const mark = span("card", "row-a", card.start, card.end, card.title,
+      `Title card: ${card.title}${card.subtitle ? " — " + card.subtitle : ""}`,
+      () => openCard(card));
+    mark.classList.toggle("selected",
+      !!state.card && state.card.start !== null
+        && Math.abs(state.card.start - card.start) < 0.01);
   }
   for (const [start, end] of ready.music_off || []) {
     span("music-off", "row-b", start, end, "music off",

@@ -40,12 +40,23 @@ A plan may also direct the edit; every item is optional::
          "impact": "end",               # a low hit: "start" or "end" of the line
          "music": "off",                # no music under this scene
          "ambience": "room",            # "wind" or "room" under this scene
-         "card": {"title": "December 1978", "subtitle": "West Summerdale Avenue"}}
+         "card": {"title": "December 1978", "subtitle": "West Summerdale Avenue"},
+         "timeline": {"date": "Dec 1978", "label": "The search of the house"}}
       ]
     }
 
 The pause is recorded into the narration; the rest is carried out by the
 finishing pass (``finishing.py``), so it needs a Finish look to be set.
+
+``timeline`` puts a date on a strip that stays on screen: an axis from the
+first date to the last, with a marker that moves to each event as its scene
+is spoken. The strip stays up from one event to the next, through the scenes
+between them, until the end of a scene marked ``"timeline": "end"`` (or of the
+last event's scene when none is).
+
+``timeline`` 是一条留在画面上的时间轴：从第一个日期到最后一个，念到哪件事，
+标记就挪到哪儿。它从一件事留到下一件事，直到写了 ``"timeline": "end"`` 的那
+一段念完（没有写的话，到最后一件事那一段念完）。
 """
 
 from __future__ import annotations
@@ -75,6 +86,8 @@ MAX_PAUSE_SECONDS = 4.0
 MIN_PAUSE_SECONDS = 0.2
 _CARD_TITLE_CHARS = 40
 _CARD_SUBTITLE_CHARS = 60
+_TIMELINE_DATE_CHARS = 14
+_TIMELINE_LABEL_CHARS = 36
 
 
 class ScenePlanError(ValueError):
@@ -94,6 +107,72 @@ def _lines(value: Any, number: int, what: str, first: str, second: str) -> dict:
             f'{{"{first}": "...", "{second}": "..."}}'
         )
     return {first: _words(value.get(first)), second: _words(value.get(second))}
+
+
+_MONTHS = ("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct",
+           "nov", "dec")
+#: 没写月份、只写了"初 / 中 / 末"或者季节的日期，落在这一年的哪儿（0 到 1）。
+_PARTS_OF_A_YEAR = (
+    ("early", 0.15), ("mid", 0.5), ("late", 0.85), ("end of", 0.95),
+    ("winter", 0.08), ("spring", 0.3), ("summer", 0.55), ("autumn", 0.8),
+    ("fall", 0.8),
+)
+
+
+def timeline_when(date: Any) -> Optional[float]:
+    """A date as a number of years, so it can be placed on an axis:
+    ``"Nov 12, 1988"`` is about 1988.86, ``"late 1960s"`` about 1968.5.
+    ``None`` when it names no year.
+
+    一条日期落在时间轴的哪儿。要有四位数的年份；月份、日子、"late"、季节会
+    把它往这一年里面挪。``1970s`` 这样的年代落在它的中间。
+    """
+    text = _words(date).lower()
+    year = re.search(r"(?<!\d)(\d{4})(s)?(?!\d)", text)
+    if not year:
+        return None
+    start, decade = float(year.group(1)), bool(year.group(2))
+    rest = text[:year.start()] + " " + text[year.end():]
+    share = None
+    for position, name in enumerate(_MONTHS):
+        if re.search(rf"\b{name}", rest):
+            day = re.search(r"(?<!\d)(\d{1,2})(?!\d)", rest)
+            share = (position + (min(int(day.group(1)), 31) - 1) / 31.0
+                     if day else position + 0.5) / 12.0
+            break
+    if share is None:
+        for word, part in _PARTS_OF_A_YEAR:
+            if re.search(rf"\b{word}\b", rest):
+                share = part
+                break
+    if decade:
+        return start + 10.0 * (0.5 if share is None else share)
+    return start + (0.0 if share is None else share)
+
+
+def _timeline(value: Any, number: int) -> dict:
+    """一段上的时间轴项：一件事（``{"date", "label"}``），或者 ``"end"``。"""
+    if isinstance(value, str) and value.strip().lower() in ("end", "off", "stop"):
+        return {"end": True}
+    ends = isinstance(value, dict) and bool(value.get("end"))
+    if ends and not _words(value.get("date")):
+        return {"end": True}
+    event = _lines(value, number, "timeline", "date", "label")
+    if timeline_when(event["date"]) is None:
+        raise ScenePlanError(
+            f"scene {number}: the timeline date is {event['date']!r}; it needs a "
+            'year in figures, like "1978", "Nov 12, 1988" or "late 1960s" '
+            '(or write "end" to take the timeline off after this scene)'
+        )
+    if len(event["date"]) > _TIMELINE_DATE_CHARS:
+        raise ScenePlanError(
+            f"scene {number}: the timeline date is {len(event['date'])} "
+            f"characters; the most is {_TIMELINE_DATE_CHARS} - shorten the month"
+        )
+    event["label"] = event["label"][:_TIMELINE_LABEL_CHARS]
+    if ends:
+        event["end"] = True
+    return event
 
 
 def _direction(entry: dict, number: int) -> dict:
@@ -157,6 +236,10 @@ def _direction(entry: dict, number: int) -> dict:
             )
         card["subtitle"] = card["subtitle"][:_CARD_SUBTITLE_CHARS]
         found["card"] = card
+
+    timeline = entry.get("timeline")
+    if timeline not in (None, "", False):
+        found["timeline"] = _timeline(timeline, number)
 
     # 这一段的画面是一张定位地图（``locator_map``），不是画出来的图。
     if entry.get("map") not in (None, "", False):
@@ -356,7 +439,8 @@ def directed(plan_scenes: Any) -> bool:
 
 
 #: 给一条已经做出来的片子补导演项时，一段上能写的那几样。
-_REDIRECT_FIELDS = ("card", "impact", "music", "ambience", "pause_after", "map")
+_REDIRECT_FIELDS = ("card", "impact", "music", "ambience", "pause_after", "map",
+                    "timeline")
 
 
 def _scene_numbers(key: Any, total: int) -> List[int]:
@@ -474,6 +558,11 @@ def outline(plan_scenes: List[dict]) -> str:
             marks.append(f"card: {direction['card'].get('title', '')}")
         if direction.get("map"):
             marks.append(f"map: {direction['map'].get('label', '')}")
+        if direction.get("timeline"):
+            event = direction["timeline"]
+            marks.append("timeline: " + " ".join(
+                part for part in (str(event.get("date") or ""),
+                                  "end" if event.get("end") else "") if part))
         if direction.get("impact"):
             marks.append(f"impact {direction['impact']}")
         if direction.get("music"):
@@ -561,6 +650,31 @@ def direction_notes(scenes: List[dict]) -> List[str]:
                 f"{last} and {first} - join the two stretches or drop one"
             )
 
+    # 时间轴：一条轴上只有一件事，标记就没有地方可挪；"end" 前面没有事，
+    # 就是什么都没关掉。
+    run: List[int] = []
+    for number in having("timeline"):
+        event = scenes[number - 1]["direction"]["timeline"]
+        if event.get("date"):
+            run.append(number)
+        elif not run:
+            notes.append(
+                f'scene {number} ends a timeline, and no timeline is showing '
+                "there - put the dates on the scenes before it"
+            )
+        if event.get("end"):
+            if len(run) == 1:
+                notes.append(
+                    f"the timeline on scene {run[0]} has one date - with nothing "
+                    "to move to it is a caption; a card says that better"
+                )
+            run = []
+    if len(run) == 1:
+        notes.append(
+            f"the timeline on scene {run[0]} has one date - with nothing to "
+            "move to it is a caption; a card says that better"
+        )
+
     impacts = having("impact")
     most = max(3, math.ceil(minutes / 2.0))
     if len(impacts) > most:
@@ -640,6 +754,12 @@ def report(plan: dict) -> str:
         if having("map"):
             noted.append(f"map on scene{'' if len(having('map')) == 1 else 's'} "
                          f"{_runs(having('map'))}")
+        dated = [at for at in having("timeline")
+                 if scenes[at - 1]["direction"]["timeline"].get("date")]
+        if dated:
+            noted.append(
+                f"{len(dated)} timeline date{'' if len(dated) == 1 else 's'} "
+                f"(scenes {dated[0]} to {dated[-1]})")
         lines.append("direction: " + "; ".join(noted))
         # 每张地图标在了哪儿，用数据说一遍：坐标写错了（标到了海里、标到了
         # 另一个国家）这一行一眼就看得出来。
@@ -656,7 +776,7 @@ def report(plan: dict) -> str:
         lines.extend(direction_notes(scenes))
     else:
         lines.append(
-            "no direction (title, cards, pauses, impacts, music, ambience): the "
+            "no direction (title, cards, timeline, pauses, impacts, music, ambience): the "
             "finishing pass will choose title cards itself and add nothing else"
         )
     return "\n".join(lines)

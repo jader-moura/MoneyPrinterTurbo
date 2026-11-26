@@ -569,6 +569,7 @@ class Direction:
     hits: List[float] = field(default_factory=list)
     music_off: List[Tuple[float, float]] = field(default_factory=list)
     beds: dict = field(default_factory=dict)
+    timelines: List[ass_subtitles.Timeline] = field(default_factory=list)
 
     @property
     def sounds(self) -> bool:
@@ -608,6 +609,7 @@ def direct(
     places = ass_subtitles.locate_lines(
         words, [str(scene.get("narration") or "") for scene in scenes])
     sound = setting("sound_design")
+    found.timelines = _timelines(scenes, places, duration)
     for number, (scene, place) in enumerate(zip(scenes, places), start=1):
         wanted = scene.get("direction") or {}
         if not wanted:
@@ -649,6 +651,53 @@ def direct(
     found.music_off = sound_design.merged(found.music_off, gap=4.0)
     found.beds = {kind: sound_design.merged(windows, gap=2.0)
                   for kind, windows in found.beds.items()}
+    return found
+
+
+def _timelines(
+    scenes: Sequence[dict], places: Sequence[Optional[Tuple[float, float]]],
+    duration: float,
+) -> List[ass_subtitles.Timeline]:
+    """The plan's timeline dates, grouped into the strips that show them.
+
+    A strip opens a moment before its first event is spoken and stays through
+    every scene after it, dated or not, until the end of a scene marked
+    ``"end"`` - or of its last event's scene when none is. Each strip has its
+    own axis, from its earliest date to its latest, and an event sits on it
+    where its date falls.
+    """
+    found: List[ass_subtitles.Timeline] = []
+    events: List[Tuple[float, float, dict, float]] = []
+
+    def close(until: float) -> None:
+        if not events:
+            return
+        years = [when for _, _, _, when in events]
+        low, high = min(years), max(years)
+        start = max(0.0, events[0][0] - 0.3)
+        end = min(until, duration - 2.5)
+        if end - start >= 2.0:
+            found.append(ass_subtitles.Timeline(
+                start, end,
+                [ass_subtitles.TimelineEvent(
+                    at, str(event.get("date") or ""), str(event.get("label") or ""),
+                    (when - low) / (high - low) if high > low else 0.5)
+                 for at, _, event, when in events if at < end],
+                str(int(low)), str(int(high)) if int(high) != int(low) else ""))
+        events.clear()
+
+    for scene, place in zip(scenes, places):
+        event = (scene.get("direction") or {}).get("timeline")
+        if not isinstance(event, dict) or place is None:
+            continue
+        start, end = place
+        when = scene_plan.timeline_when(event.get("date"))
+        if when is not None:
+            events.append((start, end, event, when))
+        if event.get("end"):
+            close(end + 0.4)
+    if events:
+        close(events[-1][1] + 1.0)
     return found
 
 
@@ -839,6 +888,12 @@ def editor_direction(
     title = direction.title
     if title is not None and title.end - title.start < 1.0:
         title = None
+    top = False
+    if direction.timelines and params.subtitle_enabled and cues:
+        try:
+            top = ass_subtitles.timeline_on_top(subtitle_style(params), True)
+        except Exception as exc:  # a missing caption font is the render's to report
+            logger.warning(f"the timeline is previewed at the bottom: {exc}")
     return {
         "planned": direction.planned,
         "timing": "recording" if heard else "estimate",
@@ -877,6 +932,29 @@ def editor_direction(
         ],
         "card_font": font,
         "card_squeeze": squeeze,
+        "timelines": [
+            {
+                "start": round(line.start, 3), "end": round(line.end, 3),
+                "first": line.first, "last": line.last,
+                "events": [
+                    {"at": round(event.at, 3), "date": event.date,
+                     "label": event.label, "place": round(event.place, 4)}
+                    for event in sorted(line.events, key=lambda event: event.at)
+                ],
+            }
+            for line in direction.timelines
+        ],
+        # The same numbers the render draws the strip from.
+        "timeline": {
+            "top": top,
+            "holes": _windows(ass_subtitles.timeline_holes(title, cards, top)),
+            "edge": ass_subtitles.TIMELINE_EDGE,
+            "from_edge": (ass_subtitles.TIMELINE_FROM_TOP if top
+                          else ass_subtitles.TIMELINE_FROM_BOTTOM),
+            "move": ass_subtitles.TIMELINE_MOVE_SECONDS,
+            "label_seconds": ass_subtitles.TIMELINE_LABEL_SECONDS,
+            "fade": ass_subtitles.TIMELINE_FADE_SECONDS,
+        },
     }
 
 
@@ -903,13 +981,14 @@ def write_subtitles(
     cards = title_cards(
         task_dir, params, words, duration,
         planned=direction.cards if direction.planned else None)
-    if not captions and not cards and direction.title is None:
+    if not captions and not cards and direction.title is None and not direction.timelines:
         return ""
     style = subtitle_style(params)
     content = ass_subtitles.build(
         cues if captions else [], width=width, height=height, style=style, mode=mode,
         max_lines=int(getattr(params, "subtitle_max_lines", 0) or 0),
         words=words, title_cards=cards, title=direction.title,
+        timelines=direction.timelines,
     )
     target = os.path.splitext(output_file)[0] + ".ass"
     with open(target, "w", encoding="utf-8") as handle:

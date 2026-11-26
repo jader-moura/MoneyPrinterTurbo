@@ -402,8 +402,11 @@ class TestThePage:
 
     def test_a_placement_still_being_timed_is_asked_for_again(self):
         body = JS.split("\nasync function loadDirection(")[1].split("\n}\n")[0]
-        assert 'found.state === "listening"' in body
-        assert "setTimeout(loadDirection, DIRECTION_POLL)" in body
+        assert "showDirection(found);" in body
+        # Shown by the function the title card routes' answers go through too.
+        shown = _function("showDirection")
+        assert 'found.state === "listening"' in shown
+        assert "setTimeout(loadDirection, DIRECTION_POLL)" in shown
         # 中途换了任务，迟到的答案不作数。
         assert "if (taskId !== state.taskId) return;" in body
 

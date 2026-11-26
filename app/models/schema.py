@@ -1134,6 +1134,19 @@ class CutSoundRequest(BaseModel):
     volume: Optional[float] = None
 
 
+class TitleCardRequest(BaseModel):
+    """A title card made or changed in the editor.
+
+    ``start`` names an existing card by when it starts; ``time`` is where a
+    new card goes, or where an existing one is moved to (both in seconds).
+    """
+
+    start: Optional[float] = None
+    time: Optional[float] = None
+    title: Optional[str] = None
+    subtitle: Optional[str] = None
+
+
 class SubtitleEditRequest(BaseModel):
     """改一条字幕的文字。时间轴和配音都不动。"""
 

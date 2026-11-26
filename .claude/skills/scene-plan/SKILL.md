@@ -186,8 +186,21 @@ same file:
 | `music` | a scene | `"off"`: no music under this scene. It fades out before the scene and returns after it; neighbouring `"off"` scenes make one stretch. |
 | `ambience` | a scene | `"wind"` (exteriors, cold, open places) or `"room"` (a low, close interior tone) under this scene. Neighbouring scenes with the same ambience make one stretch. |
 | `map` | a scene | This scene's picture is a **locator map** the app draws, not a generated image: dark land and sea, a red marker, the place name, and a small inset showing where on the continent it is. `lat`, `lon` and `label` (at most 40 characters) are required. Optional: `sublabel` (one short line), `zoom` (`city`, `area`, `region`, `country`, `continent` or `world`; default `region`), `width_km` (the exact width of the view, 40 to 18000, in place of `zoom`), `also` (up to six other places, each `lat`, `lon`, `label`, shown as small dots), `modern: false` (hide today's borders and country names). A map scene needs no `prompt`. |
+| `timeline` | a scene | A date on a **timeline strip** that stays along the bottom of the frame: an axis from the earliest date to the latest, a tick for every dated scene, and a marker that slides to this scene's date when it starts to be spoken. `date` (at most 14 characters, with the year in figures: `"1978"`, `"Nov 12, 1988"`, `"Late 1960s"`, `"Fall 1986"`) is shown large above the marker; `label` (at most 36 characters) says what happened and stays for eight seconds. Also written `"Nov 12, 1988 \| Second day of digging"`. The strip stays up through the scenes between dates. `"timeline": "end"` on a scene takes it off when that scene has been spoken; with no `"end"` it leaves after the last dated scene. Dates after an `"end"` start a new strip with its own axis. |
 
 How to use them:
+
+- **Timeline.** Use it where the story moves through dates faster than a
+  viewer can hold them: a biography told in a minute, the months before a
+  crime, a manhunt day by day, a trial. Put a date on every scene whose
+  narration gives one, in the narration's own order (a step back in time moves
+  the marker back), and write the `label` as the event in four or five words,
+  not the sentence again. One strip can run for most of a video: start it
+  where the story becomes chronological and end it after the last date. Do not
+  run it over a cold open that is told out of order. Positions follow the
+  dates, so a decade of nothing shows as a gap and a busy month as a cluster;
+  give the day or month when you have it. It shares the screen with cards (top
+  left) and gives way to the title.
 
 - **Title.** Put it on the line that ends the cold open and sends the story
   back to the start ("To answer that, we have to go back to the beginning."),

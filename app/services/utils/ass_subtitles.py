@@ -98,6 +98,33 @@ class Title:
 
 
 @dataclass
+class TimelineEvent:
+    """One date on a timeline. ``place`` is where it sits on the axis, from 0
+    (the left end) to 1."""
+
+    at: float
+    date: str
+    label: str = ""
+    place: float = 0.0
+
+
+@dataclass
+class Timeline:
+    """A strip that stays on screen from ``start`` to ``end``: an axis with a
+    tick for every event and a marker on the one being told. ``first`` and
+    ``last`` are written at the two ends of the axis.
+
+    留在画面上的一条时间轴：每件事一个刻度，标记停在正在讲的那一件上。
+    """
+
+    start: float
+    end: float
+    events: List[TimelineEvent] = field(default_factory=list)
+    first: str = ""
+    last: str = ""
+
+
+@dataclass
 class _Sheet:
     width: int
     height: int
@@ -564,6 +591,172 @@ def _title(sheet: _Sheet, title: Optional[Title]) -> None:
               2, "TitleSub")
 
 
+# The timeline strip. Every number is a unit of a 1080-high frame, and the
+# editor's preview (``drawDirectionTimeline`` in editor.js, ``.dir-timeline``
+# in editor.css) draws from the same ones: change them together.
+TIMELINE_EDGE = 150         # from the side of the frame to each end of the axis
+TIMELINE_FROM_BOTTOM = 112  # the axis, measured from the bottom of the frame
+TIMELINE_FROM_TOP = 118     # ... or from the top, when captions have the bottom
+TIMELINE_MOVE_SECONDS = 0.6   # the marker's slide to the next event
+TIMELINE_LABEL_SECONDS = 8.0  # how long an event's label stays under its date
+TIMELINE_FADE_SECONDS = 0.5
+_TIMELINE_DATE_SIZE = 62
+_TIMELINE_LABEL_SIZE = 34
+_TIMELINE_END_SIZE = 30
+
+
+def timeline_on_top(style: Style, captions: bool) -> bool:
+    """Whether the timeline sits at the top of the frame. Its place is the
+    bottom; captions that are there too have it first."""
+    if not captions:
+        return False
+    position = str(style.position or "bottom")
+    if position in ("top", "center", "two_thirds_bottom", "two_thirds", "2/3_bottom"):
+        return False
+    if position == "custom":
+        return float(style.custom_position or 0.0) >= 62.0
+    return True
+
+
+def open_spans(start: float, end: float,
+               holes: Sequence[Tuple[float, float]]) -> List[Tuple[float, float]]:
+    """``start`` to ``end`` with the ``holes`` cut out of it; what is left in
+    pieces too short to read is dropped."""
+    pieces = [(float(start), float(end))]
+    for cut_from, cut_to in sorted(holes):
+        left: List[Tuple[float, float]] = []
+        for begins, stops in pieces:
+            if cut_to <= begins or cut_from >= stops:
+                left.append((begins, stops))
+                continue
+            if cut_from > begins:
+                left.append((begins, cut_from))
+            if cut_to < stops:
+                left.append((cut_to, stops))
+        pieces = left
+    return [(begins, stops) for begins, stops in pieces if stops - begins >= 0.5]
+
+
+def timeline_holes(title: Optional[Title], cards: Sequence[TitleCard],
+                   top: bool) -> List[Tuple[float, float]]:
+    """When the timeline gives way: under the title, which has the whole
+    frame, and under each card when the strip is at the top with them."""
+    holes: List[Tuple[float, float]] = []
+    if title is not None and title.end - title.start >= 1.0:
+        holes.append((title.start, title.end))
+    if top:
+        holes.extend((card.start, card.end) for card in cards)
+    return holes
+
+
+def _timelines(sheet: _Sheet, timelines: Sequence[Timeline],
+               holes: Sequence[Tuple[float, float]], top: bool) -> None:
+    """The timeline strip: a blurred dark band, a thin axis with a tick for
+    each event and a year at each end, a red fill up to the event being told,
+    a marker on it, its date above the axis and what happened below.
+
+    The band, axis and ticks are one set of events for the whole run. The
+    fill, the marker and the words are one set per event, each starting where
+    the one before it stopped and sliding to its own place. ``holes`` are the
+    stretches the strip gives way in (the title; cards, when it is on top).
+    """
+    scale = min(sheet.width, sheet.height) / 1080.0
+    x0 = TIMELINE_EDGE * scale
+    span = sheet.width - 2 * x0
+    y = TIMELINE_FROM_TOP * scale if top else sheet.height - TIMELINE_FROM_BOTTOM * scale
+    red = _CARD_ACCENT[4:]
+    fade_ms = int(TIMELINE_FADE_SECONDS * 1000)
+    move_ms = int(TIMELINE_MOVE_SECONDS * 1000)
+
+    def fades(begins: float, stops: float, since: float, until: float,
+              whole: Timeline) -> Tuple[int, int]:
+        """A piece fades where the strip itself appears or leaves, and cuts
+        where the next event simply takes over from it."""
+        fade_in = fade_ms if begins <= whole.start + 0.005 or begins > since + 0.005 else 0
+        fade_out = fade_ms if stops >= whole.end - 0.005 or stops < until - 0.005 else 0
+        return fade_in, fade_out
+
+    for line in timelines:
+        events = sorted(line.events, key=lambda event: event.at)
+        if not events or line.end - line.start < 1.0:
+            continue
+        xs = [x0 + span * min(1.0, max(0.0, float(event.place))) for event in events]
+        fade = f"\\fad({fade_ms},{fade_ms})"
+        ticks = " ".join(
+            _box(x - 1.5 * scale, y - 9 * scale, x + 1.5 * scale, y + 9 * scale)
+            for x in sorted(set(round(x) for x in xs)))
+        for begins, stops in open_spans(line.start, line.end, holes):
+            _line(sheet, begins, stops,
+                  f"{{{fade}\\pos(0,0)\\1c&H000000&\\1a&H78&\\blur{50 * scale:.0f}\\p1}}"
+                  f"{_box(x0 - 110 * scale, y - 120 * scale, x0 + span + 110 * scale, y + 78 * scale)}"
+                  "{\\p0}", 0, "CardBar")
+            _line(sheet, begins, stops,
+                  f"{{{fade}\\pos(0,0)\\1c&HFFFFFF&\\1a&H70&\\p1}}"
+                  f"{_box(x0, y - 1.5 * scale, x0 + span, y + 1.5 * scale)}{{\\p0}}",
+                  1, "CardBar")
+            _line(sheet, begins, stops,
+                  f"{{{fade}\\pos(0,0)\\1c&HFFFFFF&\\1a&H40&\\p1}}{ticks}{{\\p0}}",
+                  1, "CardBar")
+            for text, anchor, x in ((line.first, 6, x0 - 18 * scale),
+                                    (line.last, 4, x0 + span + 18 * scale)):
+                if _clean(text):
+                    _line(sheet, begins, stops,
+                          f"{{{fade}\\an{anchor}\\pos({x:.0f},{y:.0f})"
+                          f"\\fs{_TIMELINE_END_SIZE * scale:.0f}}}{_clean(text)}",
+                          2, "CardSub")
+
+        for number, event in enumerate(events):
+            since = line.start if number == 0 else max(line.start, event.at)
+            until = events[number + 1].at if number + 1 < len(events) else line.end
+            until = min(until, line.end)
+            x, was = xs[number], xs[number - 1] if number else xs[number]
+            right = float(event.place) > 0.5
+            text_x, text_was = ((x + 12 * scale, was + 12 * scale) if right
+                                else (x - 12 * scale, was - 12 * scale))
+            radius = 12 * scale
+            date = _clean(event.date).upper()
+            for begins, stops in open_spans(since, until, holes):
+                fade_in, fade_out = fades(begins, stops, since, until, line)
+                moving = number > 0 and abs(begins - since) < 0.005 and abs(x - was) > 0.5
+                share = max(0.1, 100.0 * (x - x0) / span)
+                share_was = max(0.1, 100.0 * (was - x0) / span)
+                grows = (f"\\fscx{share_was:.2f}\\t(0,{move_ms},\\fscx{share:.2f})"
+                         if moving else f"\\fscx{share:.2f}")
+                _line(sheet, begins, stops,
+                      f"{{\\fad({fade_in},{fade_out})\\pos({x0:.0f},{y - 3 * scale:.0f})"
+                      f"{grows}\\p1}}{_box(0, 0, span, 6 * scale)}{{\\p0}}", 2, "CardBar")
+
+                def placed(at_x: float, was_x: float, at_y: float) -> str:
+                    if moving:
+                        return (f"\\move({was_x:.0f},{at_y:.0f},{at_x:.0f},{at_y:.0f},"
+                                f"0,{move_ms})")
+                    return f"\\pos({at_x:.0f},{at_y:.0f})"
+
+                _line(sheet, begins, stops,
+                      f"{{\\fad({fade_in},{fade_out}){placed(x - radius, was - radius, y - radius)}"
+                      f"\\1c&HFFFFFF&\\3c&H{red}&\\bord{3 * scale:g}\\p1}}"
+                      f"m {radius:.0f} 0 l {2 * radius:.0f} {radius:.0f} {radius:.0f} "
+                      f"{2 * radius:.0f} 0 {radius:.0f}{{\\p0}}", 3, "CardBar")
+                if date:
+                    _line(sheet, begins, stops,
+                          f"{{\\fad({max(fade_in, 200)},{fade_out})\\an{3 if right else 1}"
+                          f"{placed(text_x, text_was, y - 22 * scale)}"
+                          f"\\fs{_TIMELINE_DATE_SIZE * scale:.0f}}}{date}", 4, "CardTitle")
+            label = _clean(event.label)
+            if label:
+                said_from = max(line.start, event.at) if number else line.start
+                said_until = min(until, said_from + TIMELINE_LABEL_SECONDS)
+                for begins, stops in open_spans(said_from, said_until, holes):
+                    moving = number > 0 and abs(begins - said_from) < 0.005 \
+                        and abs(x - was) > 0.5
+                    where = (f"\\move({text_was:.0f},{y + 18 * scale:.0f},{text_x:.0f},"
+                             f"{y + 18 * scale:.0f},0,{move_ms})" if moving
+                             else f"\\pos({text_x:.0f},{y + 18 * scale:.0f})")
+                    _line(sheet, begins, stops,
+                          f"{{\\fad(200,400)\\an{9 if right else 7}{where}"
+                          f"\\fs{_TIMELINE_LABEL_SIZE * scale:.0f}}}{label}", 4, "CardSub")
+
+
 def build(
     cues: Sequence[Cue],
     *,
@@ -575,6 +768,7 @@ def build(
     words: Optional[Sequence[Word]] = None,
     title_cards: Sequence[TitleCard] = (),
     title: Optional[Title] = None,
+    timelines: Sequence[Timeline] = (),
 ) -> str:
     """整份 ASS 文件的内容。``cues`` 为空时只有标题卡（如果有的话）。
 
@@ -591,6 +785,9 @@ def build(
                 _single_words(sheet, timed)
             else:
                 _highlighted(sheet, timed)
+    if timelines:
+        top = timeline_on_top(style, bool(cues))
+        _timelines(sheet, timelines, timeline_holes(title, title_cards, top), top)
     _cards(sheet, title_cards)
     _title(sheet, title)
     return _header(sheet) + "\n".join(sheet.events) + "\n"
