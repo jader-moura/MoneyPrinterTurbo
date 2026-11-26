@@ -295,9 +295,10 @@ How to use them:
 
 What the app needs for it to work, which you should tell the user:
 
-- a **Finish look** must be chosen in the new-video form. Without one the
-  classic renderer runs: pauses are still recorded, everything else in the
-  direction is ignored.
+- a **Finish look** is needed: the plan's `"look"`, or one chosen in the
+  new-video form. Without one the classic renderer runs: pauses are still
+  recorded, everything else in the direction is ignored. A plan with direction
+  should therefore name its look.
 - **Pauses** are recorded with Edge voices and Chatterbox. Other voices read
   straight through.
 - If a scene's narration is rewritten in the editor and re-recorded, the
@@ -351,7 +352,8 @@ Then tell the user:
   scenes, the estimated length, and how many scenes are drawn from photos;
 - what you directed, in one or two lines: the title, how many cards, pauses
   and impacts, and which sequences play without music;
-- to choose a Finish look in the form, since the direction needs it;
+- which look the plan sets, or, if it sets none, to choose a Finish look in
+  the form, since the direction needs it;
 - to open the editor's new-video form, leave the script box empty, open
   **More script settings**, and paste the file's contents into **Scene plan**;
 - that the video stops before any picture is drawn, so they can read the
