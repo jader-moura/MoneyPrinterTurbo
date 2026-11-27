@@ -417,6 +417,38 @@ SENTENCE_ENDINGS = frozenset(
     "?.!\u2026\uff1f\u3002\uff01\u061f\u0964\u0965\u06d4\u104b\u17d4\u1362"
 ) | {"\n", ""}
 
+# Quotes and brackets that may close a line after its last punctuation mark,
+# as in ``He said "no."``.
+_LINE_CLOSERS = "\"'”’»)]）】」』 \t"
+
+
+def ends_a_spoken_line(text) -> bool:
+    """这段话是不是停在一个断句点上（逗号也算）。
+
+    不是的话，这句话还没念完：下一段画面接着念的是**同一句**。一句话可以配
+    几张图，但不能被拆成几句来念——"for them." / "To learn…" 念出来是两句，
+    字幕也是两条。
+
+    Whether the text stops at a punctuation mark the voice and the subtitles
+    break on. Text that does not is the first part of a line the next picture
+    goes on speaking: one sentence may take several pictures, but it is never
+    recorded as several sentences.
+    """
+    stripped = str(text or "").rstrip(_LINE_CLOSERS)
+    return bool(stripped) and stripped[-1] in const.PUNCTUATIONS
+
+
+def ends_a_sentence(text) -> bool:
+    """这段话是不是停在句号、问号、感叹号上（逗号不算）。"""
+    stripped = str(text or "").rstrip(_LINE_CLOSERS)
+    return bool(stripped) and stripped[-1] in SENTENCE_ENDINGS
+
+
+def spoken_key(text) -> str:
+    """只留字母数字，用来比"这是不是同一句话"。字幕和脚本的标点、大小写、
+    空白常常不一样。"""
+    return re.sub(r"[\W_]+", "", str(text or "").lower())
+
 
 # 语速。这两个数字是量出来的，不是猜的：用户那条 499 秒的片子共 1151 个词，
 # 合 2.31 词/秒。估算只用在"这一句要不要拆开"这个判断上，每张图具体停到哪

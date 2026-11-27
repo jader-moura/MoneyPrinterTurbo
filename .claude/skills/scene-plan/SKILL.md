@@ -84,13 +84,33 @@ red keeps its colour, teal shadows, glow, grain: thrillers and true crime),
 ## Dividing the narration
 
 - One scene is one picture. Aim for **3 to 7 seconds** of speech, about 8 to
-  18 words. Over 9 seconds a still picture drags; split the sentence at a
-  natural clause instead. Under 2 seconds flickers; join it to its neighbour.
+  18 words, or whatever length the user asks for. Over 9 seconds a still
+  picture drags; give the sentence a second picture (below). Under 2 seconds
+  flickers; join it to its neighbour.
 - A new scene starts when what the viewer should **see** changes: a new
   person, place, time, action or idea. Two short sentences about the same
   moment belong in one scene.
-- Every scene's narration must end with a full stop, question mark or
-  exclamation mark. Each scene is spoken as its own line.
+- **Scenes divide the pictures, never the sentences.** The narration is the
+  script, word for word and mark for mark. Never add a full stop, capital
+  letter or any other word to make a part of a sentence stand as its own
+  line: "…for them." / "To learn what had become of her." is recorded as two
+  sentences and subtitled as two lines, and it sounds wrong.
+- When one sentence needs two or more pictures, cut it where a speaker would
+  breathe and leave the first part **without closing punctuation**. A
+  narration that does not end in punctuation runs on into the next scene: the
+  sentence is recorded and subtitled whole, and only the picture changes
+  under it.
+
+  ```json
+  { "narration": "and it took nearly four decades for them", "prompt": "..." },
+  { "narration": "to learn what had become of her.", "prompt": "..." }
+  ```
+
+  A part that ends at a comma keeps its comma (`"By the time he met Sandi,"`);
+  the next scene carries on in lower case, exactly as the script has it.
+- The last scene must end its sentence, and so must any scene with a
+  `pause_after`: a pause goes between sentences, not inside one. Put every
+  other piece of direction on whichever part its words are spoken in.
 - Write for the ear, because a voice reads it: spell numbers and years the way
   they are said ("nineteen eighty two", "forty nine women"), no brackets, no
   headings, no emoji, no stage directions.
@@ -333,7 +353,10 @@ The app refuses a plan that breaks any of these, so check them yourself first:
   no comments, no trailing commas, quotes inside text escaped as `\"`;
 - between 1 and 600 scenes;
 - every scene has a non-empty `narration` and a non-empty `prompt`;
-- every `narration` ends with a full stop, question mark or exclamation mark;
+- the scenes' narrations, joined in order, are the script exactly: no full
+  stop or capital letter added where a sentence was divided between pictures;
+- the last `narration` ends with a full stop, question mark or exclamation
+  mark, and so does every scene that has a `pause_after`;
 - `image` is exactly `"text"` or `"photo"`;
 - every `"photo"` scene has `photo_kind` (`person`, `place` or `thing`) and at
   least one of `photo_name` and `photo_search`;
@@ -355,7 +378,8 @@ the app will:
 ```
 
 It prints the number of scenes, the estimated length, which scenes are drawn
-from photos, any scene that holds one picture too long, and a `direction:`
+from photos, any scene that holds one picture too long, which sentences are
+spoken whole across more than one picture, and a `direction:`
 line listing the title, cards, pauses, impacts, music-off scenes and ambience
 it read, and one `map on scene N:` line for each map saying where its
 coordinates really are. Under that it remarks on direction that breaks the

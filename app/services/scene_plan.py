@@ -25,6 +25,16 @@ draws from it without asking a model.
       ]
     }
 
+一句话可以配几张图：前一段的 ``narration`` 不写句末标点，就是这句话还没念
+完，下一段接着念。配音和字幕里它还是一句话，只是画面换了一张。
+
+One sentence may take several pictures. A scene whose ``narration`` stops
+without closing punctuation is the first part of a sentence the next scene
+finishes; it is recorded and subtitled as one sentence::
+
+    {"narration": "and it took nearly four decades for them", "prompt": "..."},
+    {"narration": "to learn what had become of her.", "prompt": "..."}
+
 分镜还可以带"导演"的那几样（都可以不写）：片名打在哪一段上、哪几段出标题
 卡、哪一句后面停一下、哪一句上落一记重音、哪几段不要配乐、哪几段垫环境声。
 停顿是配音时真的停；其余几样由成片精修（``finishing.py``）照着做。
@@ -454,37 +464,100 @@ def parse(text: str) -> dict:
                        "direction": direction})
     _title(data, scenes)
 
-    # 配音和字幕是按分句来的，画面按段来：每一段占几条字幕，加起来必须正好
-    # 是整篇的条数，不然画面对不上声音。一段一行就是为了让这一条成立。
+    # 一句话可以配几张图：前一段不停在标点上，就是这句话还没念完，下一段接着
+    # 念。最后一段后面没有东西可接，所以它必须把话说完；停顿是插在两句话
+    # 之间的，不能插在一句话中间。
+    if not utils.ends_a_sentence(scenes[-1]["narration"]):
+        raise ScenePlanError(
+            f"scene {len(scenes)} is the last one and its narration stops "
+            "mid-sentence; end it with a full stop, question mark or "
+            "exclamation mark"
+        )
+    for number, scene in enumerate(scenes, start=1):
+        if scene["direction"].get("pause_after") and not utils.ends_a_spoken_line(
+                scene["narration"]):
+            raise ScenePlanError(
+                f"scene {number} has a pause_after but its sentence goes on in "
+                f"scene {number + 1}; put the pause on the scene that ends the "
+                "sentence"
+            )
+
+    # 配音和字幕是按分句来的，画面按段来：每一句（可能跨几段）占几条字幕，加
+    # 起来必须正好是整篇的条数，不然画面对不上声音。
     whole = len(utils.split_string_by_punctuations(
-        "\n".join(scene["narration"] for scene in scenes)))
-    parts = sum(
-        len(utils.split_string_by_punctuations(scene["narration"])) for scene in scenes
-    )
-    if whole != parts:
+        utils.remove_pause_tags(script_of({"scenes": scenes}))))
+    if whole != sum(cue_counts(scenes)):
         raise ScenePlanError(
             "the scenes cannot be lined up with the narration: read as one "
-            f"script they make {whole} spoken lines, scene by scene {parts}. "
-            "End each scene's narration with a full stop, question mark or "
-            "exclamation mark"
+            f"script they make {whole} spoken lines, scene by scene "
+            f"{sum(cue_counts(scenes))}. End each sentence with a full stop, "
+            "question mark or exclamation mark"
         )
     return {"subject": _words(data.get("subject")), "scenes": scenes,
             "look": look(data)}
 
 
 def script_of(plan: dict) -> str:
-    """整篇旁白：一段一行。换行是硬的断句点，所以每一段都自己成句。
+    """整篇旁白：一句一行。换行是硬的断句点。
+
+    一段停在句号上，后面换行；一段没把话说完（没有标点，或者停在逗号上），
+    下一段用空格接上——念出来、字幕上都还是**一句话**，只是画面换了一张。
+    把它们也用换行隔开的话，"for them" 和 "to learn what had become of her"
+    就成了两句：配音各念各的，字幕也断成两条。
 
     要停一下的那一段，行尾带一个 ``[pause: 1s]``：配音时照它插一段真的静音
     （``voice.tts``），字幕、关键词那几处本来就会把这种标签去掉。
+
+    One sentence per line. A scene that ends its sentence is followed by a
+    line break; a scene that stops before the sentence does is joined to the
+    next one with a space, so the sentence is recorded and subtitled whole
+    while the picture changes under it.
     """
-    lines = []
+    parts: List[str] = []
     for scene in plan["scenes"]:
+        narration = str(scene.get("narration") or "")
         pause = (scene.get("direction") or {}).get("pause_after")
-        lines.append(
-            f"{scene['narration']} [pause: {pause:g}s]" if pause else scene["narration"]
-        )
-    return "\n".join(lines)
+        parts.append(f"{narration} [pause: {pause:g}s]" if pause else narration)
+        parts.append("\n" if pause or utils.ends_a_sentence(narration) else " ")
+    return "".join(parts[:-1])
+
+
+def sentences_of(plan_scenes: List[dict]) -> List[List[int]]:
+    """哪几段合起来念的是一条不断开的话：``[[1], [2, 3], [4], ...]``（段号）。
+
+    一段不停在标点上，就和后面那段连着念。逗号是断句点：停在逗号上的那一段
+    自己就是一条字幕，不用和后面合。
+
+    The scene numbers that speak one unbroken line together. A scene whose
+    narration does not stop at punctuation runs on into the next.
+    """
+    groups: List[List[int]] = []
+    open_group: List[int] = []
+    for number, scene in enumerate(plan_scenes, start=1):
+        open_group.append(number)
+        narration = str(scene.get("narration") or "") if isinstance(scene, dict) else ""
+        if utils.ends_a_spoken_line(narration):
+            groups.append(open_group)
+            open_group = []
+    if open_group:
+        groups.append(open_group)
+    return groups
+
+
+def cue_counts(plan_scenes: List[dict]) -> List[int]:
+    """每一段占几条字幕。几段合念一句时，这一句的条数记在把它念完的那一段上，
+    前面几段记 0——所以加起来还是整篇的条数。
+
+    How many subtitle lines each scene accounts for. When several scenes
+    share a line, its count goes to the scene that finishes it and the ones
+    before it count none, so the total is still the whole script's.
+    """
+    counts = [0] * len(plan_scenes)
+    for group in sentences_of(plan_scenes):
+        said = " ".join(
+            str(plan_scenes[number - 1].get("narration") or "") for number in group)
+        counts[group[-1] - 1] = len(utils.split_string_by_punctuations(said))
+    return counts
 
 
 def prompts_of(plan: dict) -> List[str]:
@@ -610,6 +683,13 @@ def redirected(
             spoken = recorded.get(number) or 0.0
         if spoken and spoken > direction.get("pause_after", 0.0):
             direction["pause_after"] = spoken
+        if direction.get("pause_after") and not utils.ends_a_spoken_line(
+                old.get("narration")):
+            raise ScenePlanError(
+                f"scene {number} has a pause_after but its sentence goes on in "
+                f"scene {number + 1}; put the pause on the scene that ends the "
+                "sentence"
+            )
         scenes.append({**old, "direction": direction})
     _title(data, scenes)
     for scene in scenes:
@@ -808,6 +888,28 @@ def report(plan: dict) -> str:
         lines.append(
             "one picture is held for over 9 seconds in scenes " + ", ".join(held)
             + " - consider splitting them"
+        )
+    shared = [group for group in sentences_of(scenes) if len(group) > 1]
+    if shared:
+        lines.append(
+            f"{len(shared)} sentence{'' if len(shared) == 1 else 's'} spoken "
+            "whole across more than one picture: scenes "
+            + ", ".join(f"{group[0]}-{group[-1]}" for group in shared)
+        )
+    # 上一段停在句号上，这一段却以小写字母开头：多半是一句话被拆开、又给前
+    # 半句硬加了句号。那样念出来是两句。
+    chopped = [
+        at for at in range(2, len(scenes) + 1)
+        if scenes[at - 1]["narration"][:1].islower()
+        and utils.ends_a_sentence(scenes[at - 2]["narration"])
+    ]
+    if chopped:
+        lines.append(
+            f"scene{'' if len(chopped) == 1 else 's'} {_runs(chopped)} "
+            f"start{'s' if len(chopped) == 1 else ''} in lower case after a "
+            "full stop - a sentence divided between two pictures is recorded "
+            "as two sentences that way; take the full stop off the first part "
+            "so it runs on into the next scene"
         )
     if directed(scenes):
         def counted(key: str, word: str) -> str:

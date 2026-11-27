@@ -31,6 +31,7 @@ stretching the baked MP4.
 
 from __future__ import annotations
 
+import bisect
 from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import os
@@ -858,6 +859,129 @@ def _counts_from_scene_narration(scenes: list[dict]) -> list[int]:
     return counts
 
 
+def match_scenes_to_cues(
+    cues: list[dict], narrations: list[str]
+) -> tuple[list[float], int]:
+    """每一段从第几秒开始念，照它自己的台词在字幕里找。
+
+    返回 ``(每段的开始时间, 第一个找不到的段的位置)``；全找到时位置是 ``-1``。
+
+    为什么按文字找，而不是数条数
+    ----------------------------
+    数条数的前提是"一段占整数条字幕"。一句话配两张图时不成立：
+    "and it took nearly four decades for them / to learn what had become of
+    her." 是**一条**字幕、两段画面，第二段从这条字幕的中间开始。把它拆成两
+    条字幕来凑整数，就是把一句话录成了两句——那正是不能做的事。
+
+    所以把字幕连成一串字母，每一段顺着往下认领自己那几个字。落在一条字幕中
+    间的那个点，按字数在这条字幕的时间里折算：一条字幕就三四秒，按字数折
+    算差不出十分之几秒。
+
+    一段没接在上一段后面（中间有一段被删了）时，从后面的字幕开头里找它——
+    被删的那几句归前一张图，念着的时候它接着停。
+
+    Counting subtitle lines assumes a scene covers whole lines. A sentence
+    shown over two pictures breaks that: it is one line and two scenes, the
+    second starting inside the line. So the lines are joined into one run of
+    letters and each scene claims its own; a point inside a line is placed
+    by its share of the line's letters. A scene that does not follow the one
+    before it (a scene was deleted) is looked for at the start of a later
+    line.
+    """
+    keys = [utils.spoken_key(cue.get("text")) for cue in cues]
+    offsets: list[int] = []
+    total = 0
+    for key in keys:
+        offsets.append(total)
+        total += len(key)
+    spoken = "".join(keys)
+
+    def seconds_at(position: int) -> float:
+        # 同一个位置上可能排着几条空字幕（只有标点的）；最后那条才是有字的。
+        index = bisect.bisect_right(offsets, position) - 1
+        start = float(cues[index]["start"])
+        inside = position - offsets[index]
+        if not inside or not keys[index]:
+            return start
+        return start + (float(cues[index]["end"]) - start) * inside / len(keys[index])
+
+    starts: list[float] = []
+    at = 0
+    for position, narration in enumerate(narrations):
+        wanted = utils.spoken_key(narration)
+        if not wanted:
+            return starts, position
+        found = at if spoken.startswith(wanted, at) else next(
+            (offset for offset, key in zip(offsets, keys)
+             if key and offset > at and spoken.startswith(wanted, offset)),
+            -1,
+        )
+        if found < 0 or found >= total:
+            return starts, position
+        try:
+            starts.append(seconds_at(found))
+        except (TypeError, ValueError, KeyError):
+            return starts, position
+        at = found + len(wanted)
+    return starts, -1
+
+
+def _windows_from_spoken_text(
+    cues: list[dict], scenes: list[dict], target: float
+) -> list[dict]:
+    """每一段画面的窗口，照它的台词在字幕里的位置（:func:`match_scenes_to_cues`）。
+
+    有一段认不出来就返回空，交回上面：宁可对得不够准，也不把一句的时间安到
+    另一句的画面上。
+    """
+    if not cues or not scenes:
+        return []
+    narrations = [str(scene.get("narration") or "") for scene in scenes]
+    # 只有场景存着的台词合起来正好是整条旁白时才认。旧任务里存的是按下标配
+    # 的那一份（两张图存着前两句，后面还有两句没人管）：照它排，等于把缓存
+    # 当成了事实。
+    if "".join(utils.spoken_key(text) for text in narrations) != "".join(
+            utils.spoken_key(cue.get("text")) for cue in cues):
+        return []
+    starts, missing = match_scenes_to_cues(cues, narrations)
+    if missing >= 0:
+        return []
+    try:
+        end = max(float(cues[-1]["end"]), target)
+    except (TypeError, ValueError, KeyError):
+        return []
+    # 和 ``_windows_from_cues`` 一样：第一段从 0 开始，每段到下一段开始为止。
+    edges = [0.0] + starts[1:] + [end]
+    windows: list[dict] = []
+    for start, stop in zip(edges, edges[1:]):
+        if stop <= start:
+            return []
+        windows.append({"start": round(start, 3), "end": round(stop, 3)})
+    return windows
+
+
+def spoken_windows(
+    task_id: str, cues: list[dict], scenes: list[dict], target: float
+) -> list[dict]:
+    """没人拖过的片子，每一段画面照它那句旁白该占的时间段；排不出来是空。
+
+    渲染器和时间线界面都从这里拿，账只有一本。
+
+    条数相等不等于一对一：一段占两条字幕、另一句话配了两张图，条数也正好
+    相等。所以场景存着台词时先看它们数出来的条数对不对得上。
+    """
+    if not cues or not scenes:
+        return []
+    counts = _counts_from_scene_narration(scenes)
+    one_each = len(cues) == len(scenes)
+    if one_each and (not counts or sum(counts) == len(cues)):
+        return _windows_from_cues(cues, target)
+    windows = _windows_from_grouped_cues(task_id, cues, scenes, target)
+    if not windows and one_each:
+        return _windows_from_cues(cues, target)
+    return windows
+
+
 def _windows_from_grouped_cues(
     task_id: str, cues: list[dict], scenes: list[dict], target: float
 ) -> list[dict]:
@@ -882,6 +1006,13 @@ def _windows_from_grouped_cues(
     # 而不一致的后果不是报错，是整条退回平均铺，同步白做。场景里存的
     # narration 就是当时真正用的分组，照它数不会错。
     counts = _counts_from_scene_narration(scenes)
+
+    if counts and sum(counts) != len(cues):
+        # 每段都存着台词，条数却对不上：有一句话配了几张图，那几段合起来才
+        # 是一条字幕。照文字去认每一段从哪儿开始。
+        matched = _windows_from_spoken_text(cues, scenes, target)
+        if matched:
+            return matched
 
     if not counts or sum(counts) != len(cues):
         # 旧任务可能没存 narration，或者脚本后来被改过。退回从脚本重算，
@@ -971,14 +1102,9 @@ def plan_windows(
     # 不该被我们再按字幕重算一遍。
     if not scene_manifest.has_timing_edits(scenes):
         cues = scene_manifest.narration_segments(task_id)
-        # 一段画面一条字幕时直接用；一张图配一整句话时先把那几条合起来。
-        spoken = (
-            _windows_from_cues(cues, target)
-            if cues and len(cues) == len(scenes)
-            else _windows_from_grouped_cues(task_id, cues, scenes, target)
-            if cues
-            else []
-        )
+        # 一段画面一条字幕时直接用；一张图配一整句话时先把那几条合起来；
+        # 一句话配几张图时照文字把这条字幕分给它们。
+        spoken = spoken_windows(task_id, cues, scenes, target)
         if spoken:
             _report_long_holds(task_id, spoken)
             return spoken

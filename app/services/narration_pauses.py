@@ -360,8 +360,8 @@ def apply(task_id: str, wanted: Dict[int, float]) -> dict:
 
     # 字幕：一段占几条是数出来的（和分镜进来时的算法一样），所以按"第几条"
     # 挪最稳；数不上（台词改过）才退回按时间。
-    counts = [len(utils.split_string_by_punctuations(str(scene.get("narration") or "")))
-              for scene in plan]
+    # 几段合念一句时，这一句记在把它念完的那一段上（``scene_plan.cue_counts``）。
+    counts = scene_plan.cue_counts(plan)
     cue_scene: List[int] = []
     for number, count in enumerate(counts, start=1):
         cue_scene.extend([number] * count)

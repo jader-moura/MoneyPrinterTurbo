@@ -1941,24 +1941,99 @@ def narration_for_scenes(
 
     用户亲手改过的那一段例外,用他写的字：那不是缓存,那是他的输入。
     """
+    return _narration_shown(task_id, manifest, windows)[0]
+
+
+#: 一句话最多认它配了这么多张图。再多就不是"一句话几张图"，是别的事。
+_MOST_PICTURES_PER_LINE = 8
+
+
+def _narration_shown(
+    task_id: str,
+    manifest: dict | None = None,
+    windows: list[dict] | None = None,
+) -> tuple[list[str], list[bool]]:
+    """``narration_for_scenes`` 的那一列，外加每一段是不是和下一段合念一句。
+
+    一句话配了几张图时（分镜里前一段不写句末标点），这句话在字幕里是一条，
+    按时间只能归给其中一段，别的几段就空了。这时候每一段显示它自己存着的
+    那一截——合起来正好是那一条字幕才这么认，所以不会认错——并且记下它们
+    是连着的：重新配音时要用空格接回一句，不能再一段一行。
+
+    The list ``narration_for_scenes`` returns, plus whether each scene's text
+    runs on into the next scene's. A sentence shown over several pictures is
+    one subtitle line, so by time it lands on one of them and leaves the
+    others empty. Each then shows the part it stored - only when the parts
+    add up to exactly that line - and is marked as joined, so re-recording
+    puts the sentence back together instead of reading one part per line.
+    """
     manifest = manifest if manifest is not None else scene_manifest.load(task_id)
     scenes = manifest["scenes"]
     stored = [str(scene.get("narration") or "") for scene in scenes]
+    joined = [False for _ in scenes]
     try:
         derived = _narration_by_time(task_id, manifest, windows)
     except scene_manifest.SceneError as exc:
         # 排不出时间线（参数读不回来之类）时宁可显示存着的旧文字，也不要让
         # 审片界面打不开。
         logger.warning(f"cannot pair narration by time for {task_id}: {exc}")
-        return stored
+        return stored, joined
     if len(derived) != len(stored):
-        return stored
-    return [
-        stored[position]
-        if scenes[position].get("narration_edited") or not derived[position]
+        return stored, joined
+
+    edited = [bool(scene.get("narration_edited")) for scene in scenes]
+    shown = [
+        stored[position] if edited[position] or not derived[position]
         else derived[position]
         for position in range(len(scenes))
     ]
+
+    def spare(position: int) -> bool:
+        """这一段按时间没分到话，自己存着一截，也没人改过。"""
+        return (0 <= position < len(scenes) and not derived[position]
+                and not edited[position] and bool(_spoken_key(stored[position])))
+
+    for position in range(len(scenes)):
+        if edited[position] or not derived[position]:
+            continue
+        own = _spoken_key(stored[position])
+        # 这一段分到的可能不止这一条（它前后还有别的整句）：存着的几截合起来
+        # 是其中的一条就行。
+        texts = derived[position].split("\n")
+        lines = [_spoken_key(line) for line in texts]
+        if not own or own in lines:
+            continue
+        first = position
+        while spare(first - 1) and position - first < _MOST_PICTURES_PER_LINE:
+            first -= 1
+        last = position
+        while spare(last + 1) and last - position < _MOST_PICTURES_PER_LINE:
+            last += 1
+        found = None
+        for start in range(first, position + 1):
+            for stop in range(last, position - 1, -1):
+                if stop == start:
+                    continue
+                said = "".join(_spoken_key(stored[at]) for at in range(start, stop + 1))
+                if said and said in lines:
+                    found = (start, stop, said)
+                    break
+            if found:
+                break
+        if not found:
+            continue
+        start, stop, said = found
+        # 这一段分到的别的整句留下，放在那一截的前面或者后面。
+        index = lines.index(said)
+        before, after = texts[:index], texts[index + 1:]
+        for at in range(start, stop + 1):
+            shown[at] = stored[at]
+            joined[at] = at < stop
+        if before:
+            shown[start] = "\n".join(before + [stored[start]])
+        if after:
+            shown[stop] = "\n".join([stored[stop]] + after)
+    return shown, joined
 
 
 def narration_script(task_id: str) -> str:
@@ -1970,10 +2045,19 @@ def narration_script(task_id: str) -> str:
 
     按时间分配出来的块本身就是脚本顺序(场景顺序即时间顺序),重排画面动不了
     它。一句都不丢,所以拼回去仍然是完整的脚本。
+
+    合念一句的那几段用空格接：换行是硬的断句点，接成两行就把一句话录成了
+    两句。
     """
     manifest = scene_manifest.load(task_id)
-    blocks = narration_for_scenes(task_id, manifest)
-    script = "\n".join(block.strip() for block in blocks if block.strip())
+    blocks, joined = _narration_shown(task_id, manifest)
+    parts: list[str] = []
+    for block, runs_on in zip(blocks, joined):
+        if not block.strip():
+            continue
+        parts.append(block.strip())
+        parts.append(" " if runs_on else "\n")
+    script = "".join(parts[:-1])
     # 一句都没排出来（既没有脚本也没有字幕）时退回旧的拼接，总比交一段空
     # 脚本给 TTS 好。
     return script or scene_manifest.narration_script(task_id)
@@ -3397,7 +3481,7 @@ _PACED_KEY = "paced_to_narration"
 def _spoken_key(text: Any) -> str:
     """只留字母数字，用来比"这是不是同一句话"。字幕和脚本的标点、大小写、
     空白常常不一样。"""
-    return re.sub(r"[\W_]+", "", str(text or "").lower())
+    return utils.spoken_key(text)
 
 
 def narration_paced_durations(task_id: str, manifest: dict | None = None) -> list:
@@ -3424,37 +3508,21 @@ def narration_paced_durations(task_id: str, manifest: dict | None = None) -> lis
             "this video has no subtitle timing to tell when each line is "
             "spoken, so the pictures cannot be matched to the narration"
         )
-    keys = [_spoken_key(cue.get("text")) for cue in cues]
-
-    starts: list[float] = []
-    at = 0
-    for position, scene in enumerate(scenes):
-        wanted = _spoken_key(scene.get("narration"))
-        if not wanted:
+    # 一句话配了几张图时，后面那几段从一条字幕的中间开始：认字，不数条数
+    # （``timeline.match_scenes_to_cues``）。
+    starts, missing = timeline.match_scenes_to_cues(
+        cues, [str(scene.get("narration") or "") for scene in scenes])
+    if missing >= 0:
+        if not _spoken_key(scenes[missing].get("narration")):
             raise SceneError(
-                f"scene {position + 1} has no narration, so there is no line "
+                f"scene {missing + 1} has no narration, so there is no line "
                 "to time it to"
             )
-        found = -1
-        for first in range(at, len(cues)):
-            if not keys[first] or not wanted.startswith(keys[first]):
-                continue
-            joined = ""
-            last = first
-            while last < len(cues) and len(joined) < len(wanted):
-                joined += keys[last]
-                last += 1
-            if joined == wanted:
-                found = first
-                at = last
-                break
-        if found < 0:
-            raise SceneError(
-                f"the narration of scene {position + 1} is not in the recorded "
-                "narration in this order (it was edited or moved), so the "
-                "pictures cannot be matched to it automatically"
-            )
-        starts.append(float(cues[found]["start"]))
+        raise SceneError(
+            f"the narration of scene {missing + 1} is not in the recorded "
+            "narration in this order (it was edited or moved), so the "
+            "pictures cannot be matched to it automatically"
+        )
 
     end = max(
         float(manifest.get("audio_duration") or 0.0), float(cues[-1]["end"])
@@ -3484,10 +3552,7 @@ def _planned_spoken_durations(task_id: str, manifest: dict) -> list | None:
     if not cues or not scenes:
         return None
     target = max(0.0, float(manifest.get("audio_duration") or 0.0))
-    if len(cues) == len(scenes):
-        windows = timeline._windows_from_cues(cues, target)
-    else:
-        windows = timeline._windows_from_grouped_cues(task_id, cues, scenes, target)
+    windows = timeline.spoken_windows(task_id, cues, scenes, target)
     if not windows or len(windows) != len(scenes):
         return None
     return [
