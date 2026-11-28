@@ -354,6 +354,7 @@ async function load(taskId) {
     state.imageStyles = data.image_styles || [];
     state.imageStyle = data.image_style || "";
     state.imageStylePinned = !!data.image_style_pinned;
+    state.videoSource = data.video_source || "";
     state.selected = state.scenes.length ? 0 : -1;
     state.line = -1;
     state.card = null;
@@ -406,6 +407,7 @@ async function refresh() {
   state.imageStyles = data.image_styles || [];
   state.imageStyle = data.image_style || "";
   state.imageStylePinned = !!data.image_style_pinned;
+  state.videoSource = data.video_source || "";
   state.selected = Math.min(keep, state.scenes.length - 1);
   state.loadedClip = -1;
   applyAspect();
@@ -5611,8 +5613,16 @@ const GENERATED_SOURCES = new Set([
   "openai_image", "codex_image", "infistar", "loomloom", "jalapeno", "muapi",
 ]);
 
+/** 这一段的画面是不是"画出来的"——也就是能不能重画、能不能照着照片画。
+
+    看的不只是这一段现在摆着什么：一段摆了照片本身、或者传上来的一张图，
+    它的来源就成了 ``local``，可这条片子的画面还是画的，服务端重画时用的
+    也是这条片子的来源。只看这一段的话，换过一次照片的段就再也没有"照着
+    照片画"这条路了。 */
 function isGenerated(scene) {
-  return GENERATED_SOURCES.has(String(scene.source || ""));
+  const source = String(scene.source || "");
+  if (GENERATED_SOURCES.has(source)) return true;
+  return source === "local" && GENERATED_SOURCES.has(String(state.videoSource || ""));
 }
 
 function regenerateLabel(scene) {

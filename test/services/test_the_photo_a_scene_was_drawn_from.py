@@ -167,7 +167,9 @@ class TestDrawingFromItAgain:
         assert "openPhotoPicker(" in place and "true\n        );" in place
         assert "queueRegeneration(" not in place
         opened = JS.split("function openPhotoPicker(")[1].split("\n}\n")[0]
-        assert opened.index("if (again) {") < opened.index("browseGoogle(before)")
+        # 开窗从不自己去搜：搜什么是用户的事。
+        assert "if (again) {" in opened
+        assert "browseGoogle(" not in opened and "findPhotos(" not in opened
         assert "redrawFromPhoto({ photo_kept: photoPick.kept })" in JS
         # 只有存下来的照片才有这个按钮：照着画过的那一张，或者开画之前定下的那一张。
         before = JS.split('button("Redraw from this same photo"')[0][-160:]
@@ -197,3 +199,19 @@ class TestTheInspector:
     def test_a_scene_drawn_before_photos_were_kept_says_so(self):
         body = JS.split("function usedPhotoNote(scene)")[1].split("\n}\n")[0]
         assert "The photo itself was not kept" in body
+
+
+class TestASceneHoldingAPhotoCanStillBeRedrawn:
+    """摆了照片本身（或者传上来的一张图）的段，来源成了 ``local``。这条片子
+    的画面还是画的，所以它照样有"照着照片画"那条路。"""
+
+    def test_the_page_is_told_where_the_videos_pictures_come_from(self):
+        source = (ROOT / "app" / "services" / "scene_editor.py").read_text(
+            encoding="utf-8")
+        assert 'payload["video_source"] = ' in source
+        assert JS.count('state.videoSource = data.video_source || "";') == 2
+
+    def test_a_local_scene_in_a_drawn_video_counts_as_drawn(self):
+        body = JS.split("function isGenerated(scene) {")[1].split("\n}\n")[0]
+        assert 'source === "local"' in body
+        assert "GENERATED_SOURCES.has(String(state.videoSource" in body

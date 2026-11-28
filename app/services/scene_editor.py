@@ -2341,6 +2341,9 @@ def describe(task_id: str, endpoint: str = "", *, with_timing: bool = False) -> 
     # 这条片子叫什么。顶栏要显示它：开着三个标签页的时候，一串 uuid 说不出
     # 哪个是哪个。
     payload["subject"] = str(getattr(params, "video_subject", "") or "").strip()
+    # 这条片子的画面从哪来。重画一段用的是它，不是那一段现在摆着的东西：
+    # 摆了一张照片本身的段（来源成了 ``local``）照样可以重画。
+    payload["video_source"] = str(getattr(params, "video_source", "") or "")
     # 开片时挑的"多少画面照着照片画"。界面点"开画"时要先请人挑那几张照片。
     payload["photo_scene_percent"] = int(
         getattr(params, "photo_scene_percent", 0) or 0
