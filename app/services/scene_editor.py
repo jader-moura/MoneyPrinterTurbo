@@ -1447,6 +1447,44 @@ def upload_material(task_id: str, index: Any, filename: str, source: Any) -> dic
             pass
 
 
+def footage_on_scene(task_id: str, index: Any, address: Any, start: Any,
+                     end: Any) -> dict:
+    """Put a part of a YouTube video on a scene, without its sound.
+
+    Only that part is fetched (see ``footage``), straight into the task's own
+    folder. From there it is placed like a clip the user uploaded: what the
+    scene showed before goes into its history, and a clip shorter than the
+    scene is slowed to cover it.
+    """
+    from app.services import footage, scene_video
+
+    _require_idle(task_id)
+    scenes = _scenes_or_fail(task_id)
+    _scene_at(scenes, index)
+    try:
+        clip = footage.fetch(address, start, end, utils.task_dir(task_id))
+    except footage.FootageError as exc:
+        raise SceneError(str(exc)) from exc
+    replace_material(task_id, index, clip)
+    return scene_video.fit_own_clip(task_id, index, faster=False)
+
+
+def keep_picked_footage(task_id: str, session: str, address: Any, start: Any,
+                        end: Any) -> dict:
+    from app.services import footage
+
+    try:
+        return footage.keep_pick(task_id, session, address, start, end)
+    except footage.FootageError as exc:
+        raise SceneError(str(exc)) from exc
+
+
+def picked_footage(task_id: str, session: str = "") -> dict:
+    from app.services import footage
+
+    return footage.picked(task_id, session)
+
+
 def place_map(task_id: str, index: Any, place: dict) -> dict:
     """把这一段的画面换成一张定位地图（``locator_map``）。
 

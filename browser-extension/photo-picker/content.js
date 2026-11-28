@@ -24,6 +24,9 @@
     }
   } catch { return; }
   if (!to || to.error || window.top !== window) return;
+  // A window opened to get footage: a bar on YouTube marks where the wanted
+  // part of the video starts and ends, and sends the two times to the editor.
+  if (to.kind === "footage") { footageBar(); return; }
 
   const MIN = Number(to.min) || 512;
   const HOW = "Click a picture to open it large, then click the large picture to use it.";
@@ -113,4 +116,125 @@
   const start = () => say(HOW);
   if (document.body) start();
   else document.addEventListener("DOMContentLoaded", start);
+
+  /* ---- footage: mark a part of the video that is playing ---- */
+  function footageBar() {
+    const marks = { video: "", start: null, end: null };
+    let panel = null;
+    let text = null;
+    let busy = false;
+
+    const clock = (seconds) => {
+      const whole = Math.floor(seconds);
+      const tenth = Math.floor((seconds - whole) * 10);
+      return Math.floor(whole / 60) + ":" + String(whole % 60).padStart(2, "0")
+        + (tenth ? "." + tenth : "");
+    };
+    const player = () => document.querySelector("video.html5-main-video")
+      || document.querySelector("video");
+    const videoId = () => {
+      const found = new URL(location.href).searchParams.get("v");
+      if (found) return found;
+      const parts = location.pathname.split("/").filter(Boolean);
+      return ["shorts", "embed", "live"].includes(parts[0]) ? (parts[1] || "") : "";
+    };
+
+    function tell(message, bad) {
+      if (!text) return;
+      text.textContent = message;
+      panel.style.background = bad ? "#b3261e" : "#1a57c9";
+    }
+
+    function describe() {
+      if (!videoId() || !player()) {
+        tell("Open a video and watch it. Mark the part you want here.");
+        return;
+      }
+      if (marks.video !== videoId()) { marks.start = null; marks.end = null; }
+      const from = marks.start == null ? "–" : clock(marks.start);
+      const to = marks.end == null ? "–" : clock(marks.end);
+      const length = marks.start != null && marks.end != null && marks.end > marks.start
+        ? " (" + (marks.end - marks.start).toFixed(1) + " s)" : "";
+      tell("Part to use: " + from + " to " + to + length);
+    }
+
+    function mark(which) {
+      const video = player();
+      if (!videoId() || !video) { describe(); return; }
+      if (marks.video !== videoId()) {
+        marks.video = videoId(); marks.start = null; marks.end = null;
+      }
+      marks[which] = Math.round(video.currentTime * 10) / 10;
+      describe();
+    }
+
+    async function use() {
+      if (busy) return;
+      describe();
+      if (marks.video !== videoId() || marks.start == null || marks.end == null) {
+        tell("Mark where the part starts and where it ends first.", true);
+        return;
+      }
+      if (marks.end <= marks.start) {
+        tell("The end has to be after the start. Mark them again.", true);
+        return;
+      }
+      busy = true;
+      tell("Sending this part to the editor…");
+      let answer = null;
+      try {
+        answer = await chrome.runtime.sendMessage({
+          type: "footage",
+          chosen: {
+            url: "https://www.youtube.com/watch?v=" + marks.video,
+            start: marks.start, end: marks.end,
+          },
+        });
+      } catch (error) {
+        answer = { error: String(error.message || error) };
+      }
+      if (answer && answer.ok) {
+        tell("Done. Go back to the editor — it is fetching this part.");
+        return;
+      }
+      busy = false;
+      tell("That part cannot be used: " + ((answer && answer.error) || "no answer"), true);
+    }
+
+    function build() {
+      if (panel || !document.body) return;
+      panel = document.createElement("div");
+      panel.style.cssText = "position:fixed;left:50%;bottom:14px;transform:translateX(-50%);"
+        + "z-index:2147483647;display:flex;gap:8px;align-items:center;max-width:94vw;"
+        + "padding:8px 12px;border-radius:14px;background:#1a57c9;color:#fff;"
+        + "font:600 13px/1.3 Arial,sans-serif;box-shadow:0 4px 18px rgba(0,0,0,.5)";
+      text = document.createElement("span");
+      text.style.cssText = "margin-right:6px";
+      panel.appendChild(text);
+      for (const [label, act] of [
+        ["Start here", () => mark("start")],
+        ["End here", () => mark("end")],
+        ["Use this part", use],
+      ]) {
+        const press = document.createElement("button");
+        press.type = "button";
+        press.textContent = label;
+        press.style.cssText = "all:unset;cursor:pointer;padding:6px 12px;border-radius:9px;"
+          + "background:#fff;color:#123a86;font:700 13px/1.2 Arial,sans-serif;white-space:nowrap";
+        press.addEventListener("click", (event) => {
+          event.preventDefault();
+          event.stopPropagation();
+          act();
+        });
+        panel.appendChild(press);
+      }
+      document.body.appendChild(panel);
+      describe();
+      // YouTube changes video without loading a new page.
+      setInterval(() => { if (!busy) describe(); }, 1500);
+    }
+
+    if (document.body) build();
+    else document.addEventListener("DOMContentLoaded", build);
+  }
 })();

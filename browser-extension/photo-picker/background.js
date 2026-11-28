@@ -21,6 +21,7 @@ function arm(tab, marker) {
   }
   return chrome.storage.session.set({
     [keyOf(tab)]: {
+      kind: wanted.kind === "footage" ? "footage" : "photo",
       api: String(wanted.api).replace(/\/+$/, ""),
       task: String(wanted.task),
       session: String(wanted.session || ""),
@@ -66,6 +67,38 @@ async function pick(tab, chosen) {
   return { ok: true };
 }
 
+/** The part of a video the user marked: where it is and from when to when. */
+async function footage(tab, chosen) {
+  const to = await armed(tab);
+  if (!to) throw new Error("this window was not opened by the editor");
+  let answer;
+  try {
+    answer = await fetch(
+      `${to.api}/tasks/${encodeURIComponent(to.task)}/footage/picked`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(to.key ? { "x-api-key": to.key } : {}),
+        },
+        body: JSON.stringify({
+          session: to.session, url: String(chosen.url || ""),
+          start: Number(chosen.start), end: Number(chosen.end),
+        }),
+      });
+  } catch (error) {
+    throw new Error("could not reach the editor; is the app still running?");
+  }
+  let payload = null;
+  try { payload = await answer.json(); } catch { /* an empty answer */ }
+  if (!answer.ok) {
+    throw new Error((payload && (payload.message || payload.detail))
+      || `the editor answered ${answer.status}`);
+  }
+  setTimeout(() => chrome.tabs.remove(tab).catch(() => {}), 700);
+  return { ok: true };
+}
+
 chrome.runtime.onMessage.addListener((message, sender, respond) => {
   const tab = sender.tab && sender.tab.id;
   if (tab == null || !message) return false;
@@ -73,6 +106,7 @@ chrome.runtime.onMessage.addListener((message, sender, respond) => {
   if (message.type === "arm") work = Promise.resolve().then(() => arm(tab, message.marker)).then(() => armed(tab));
   else if (message.type === "state") work = armed(tab);
   else if (message.type === "pick") work = pick(tab, message.chosen || {});
+  else if (message.type === "footage") work = footage(tab, message.chosen || {});
   else return false;
   work.then(respond, (error) => respond({ error: String(error.message || error) }));
   return true;

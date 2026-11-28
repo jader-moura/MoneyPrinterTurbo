@@ -1872,6 +1872,68 @@ def upload_scene_material(
 
 
 @router.post(
+    "/tasks/{task_id}/scenes/{index}/footage",
+    response_model=SceneResponse,
+    summary="Put a part of a YouTube video on a scene, without its sound",
+)
+def footage_for_scene(
+    request: Request,
+    task_id: str = Path(..., description="Task ID"),
+    index: int = Path(..., ge=0, description="Scene index"),
+    url: str = Body(..., embed=True, min_length=1, max_length=500),
+    start: str = Body(..., embed=True, max_length=20),
+    end: str = Body(..., embed=True, max_length=20),
+):
+    """``start`` and ``end`` are times in the video, like ``2:34``. Only that
+    part is downloaded."""
+    request_id = base.get_task_id(request)
+    _require_task(task_id, request_id)
+    placed = _handle(
+        task_id, request_id,
+        lambda: scene_editor.footage_on_scene(task_id, index, url, start, end),
+    )
+    answer = dict(_scene_payload(task_id, index))
+    answer["fit"] = placed.get("fit")
+    return utils.get_response(200, answer)
+
+
+@router.post(
+    "/tasks/{task_id}/footage/picked",
+    summary="The part of a YouTube video marked in the user's own browser",
+)
+def keep_picked_scene_footage(
+    request: Request,
+    task_id: str = Path(..., description="Task ID"),
+    session: str = Body("", embed=True, max_length=80),
+    url: str = Body(..., embed=True, min_length=1, max_length=500),
+    start: float = Body(..., embed=True, ge=0),
+    end: float = Body(..., embed=True, ge=0),
+):
+    """Sent by the browser extension; the editor asks for it below."""
+    request_id = base.get_task_id(request)
+    _require_task(task_id, request_id)
+    data = _handle(
+        task_id, request_id,
+        lambda: scene_editor.keep_picked_footage(task_id, session, url, start, end),
+    )
+    return utils.get_response(200, data)
+
+
+@router.get(
+    "/tasks/{task_id}/footage/picked",
+    summary="Whether a part was marked in the browser since this search",
+)
+def picked_scene_footage(
+    request: Request,
+    task_id: str = Path(..., description="Task ID"),
+    session: str = Query("", max_length=80),
+):
+    request_id = base.get_task_id(request)
+    _require_task(task_id, request_id)
+    return utils.get_response(200, scene_editor.picked_footage(task_id, session))
+
+
+@router.post(
     "/tasks/{task_id}/scenes/{index}/fit",
     response_model=SceneResponse,
     summary="Slow a scene's own video clip so that it covers the scene",

@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
   "name": "MoneyPrinterTurbo photo picker",
-  "version": "1.0.0",
-  "description": "In the Google Images window opened by the MoneyPrinterTurbo editor, click a large picture to send it to the editor.",
+  "version": "1.1.0",
+  "description": "In the windows opened by the MoneyPrinterTurbo editor: click a large picture on Google Images to send it to the editor, or mark a part of a YouTube video to use as footage.",
   "permissions": ["storage"],
   "host_permissions": ["<all_urls>"],
   "background": { "service_worker": "background.js" },

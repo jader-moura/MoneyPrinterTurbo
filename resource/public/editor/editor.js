@@ -139,6 +139,12 @@ const ui = {
   photoClose: el("photo-close"),
   photoLine: el("photo-line"), photoKeepSlot: el("photo-keep"),
   photoKept: el("photo-kept"), photoSkip: el("photo-skip"),
+  footageModal: el("footage-modal"), footageTitle: el("footage-title"),
+  footageLine: el("footage-line"), footageSearch: el("footage-search"),
+  footageBrowse: el("footage-browse"), footageHow: el("footage-how"),
+  footageLink: el("footage-link"), footageFrom: el("footage-from"),
+  footageTo: el("footage-to"), footageNote: el("footage-note"),
+  footageAdd: el("footage-add"), footageClose: el("footage-close"),
   photoGoogle: el("photo-google"), photoGoogleNote: el("photo-google-note"),
   undo: el("undo"), redo: el("redo"), split: el("split"),
   duplicate: el("duplicate"), deleteScene: el("delete-scene"),
@@ -4181,6 +4187,218 @@ ui.photoModal.addEventListener("drop", (event) => {
   else googleNote("Only a picture can be dropped here.", "warn");
 });
 
+/* ---------- footage from YouTube ----------
+
+   A few seconds of a YouTube video on a scene, without its sound. The user
+   finds and watches the video in their own browser (the same window trick as
+   Google Images), then says which part: either by typing the link and the two
+   times here, or — with the photo picker extension — by marking the start and
+   the end on the video itself, which sends them here.
+
+   Nothing is searched for or fetched until the user asks. */
+const YOUTUBE_SEARCH = "https://www.youtube.com/results?search_query=";
+const FOOTAGE_WINDOW = "mpt-footage";
+const FOOTAGE_EXTENSION = [1, 1];
+const footage = { at: -1, session: "", timer: 0, window: null, words: {} };
+
+/** The extension is installed and new enough to mark a part on YouTube. */
+function footageMarkerReady() {
+  const have = String(document.documentElement.dataset.mptPhotoPicker || "")
+    .split(".").map(Number);
+  if (!have.length || Number.isNaN(have[0])) return false;
+  return have[0] > FOOTAGE_EXTENSION[0]
+    || (have[0] === FOOTAGE_EXTENSION[0] && (have[1] || 0) >= FOOTAGE_EXTENSION[1]);
+}
+
+function footageNote(text, kind) {
+  ui.footageNote.className = "hint" + (kind ? " " + kind : "");
+  ui.footageNote.textContent = text || "";
+}
+
+/** "2:34", "1:02:34" or "154" as seconds; NaN when it is not a time. */
+function footageSeconds(text) {
+  const parts = String(text || "").trim().replace(",", ".").split(":");
+  if (!parts[0] || parts.length > 3) return NaN;
+  let total = 0;
+  for (const part of parts) {
+    if (!/^\d+(\.\d+)?$/.test(part)) return NaN;
+    total = total * 60 + Number(part);
+  }
+  return total;
+}
+
+function footageClock(seconds) {
+  const whole = Math.floor(seconds);
+  const rest = Math.round((seconds - whole) * 10) / 10;
+  const clock = `${Math.floor(whole / 60)}:${String(whole % 60).padStart(2, "0")}`;
+  return rest ? `${clock}${String(rest).slice(1)}` : clock;
+}
+
+function openFootage(scene) {
+  footage.at = scene.index;
+  footage.key = photoWordsKey(scene);
+  ui.footageTitle.textContent = `Get footage for scene ${scene.index + 1}`;
+  const length = Number(scene.duration || scene.clip_duration || 0);
+  ui.footageLine.textContent = [
+    photoSceneLine(scene),
+    length ? `This scene lasts ${length.toFixed(1)} seconds.` : "",
+  ].filter(Boolean).join(" ");
+  ui.footageSearch.value = footage.words[footage.key] || "";
+  ui.footageLink.value = "";
+  ui.footageFrom.value = "";
+  ui.footageTo.value = "";
+  ui.footageHow.innerHTML = footageMarkerReady()
+    ? "Type what to search for and click <b>Search on YouTube</b>: YouTube opens "
+      + "in a window of your own browser. Open a video and watch it; at the "
+      + "bottom of that window, click <b>Start here</b> where the part you want "
+      + "begins, <b>End here</b> where it ends, then <b>Use this part</b>."
+    : "Type what to search for and click <b>Search on YouTube</b>: YouTube opens "
+      + "in a window of your own browser. Open a video and watch it, then copy "
+      + "its address into <b>Video link</b> below and write where the part you "
+      + "want starts and ends."
+      + (document.documentElement.dataset.mptPhotoPicker
+        ? " <br>To mark the part on the video itself, reload the photo picker "
+          + "extension: open <b>chrome://extensions</b> and click its reload "
+          + "button, then reload this page."
+        : "");
+  footageNote("");
+  ui.footageModal.hidden = false;
+  ui.footageSearch.focus();
+}
+
+function stopWatchingFootage() {
+  footage.session = "";
+  clearTimeout(footage.timer);
+}
+
+function closeFootage() {
+  stopWatchingFootage();
+  const opened = footage.window;
+  footage.window = null;
+  try { if (opened && !opened.closed) opened.close(); } catch { /* already closed */ }
+  ui.footageModal.hidden = true;
+  footage.at = -1;
+}
+
+/** Once a second: has the user marked a part in the YouTube window? */
+function watchFootage(at, session) {
+  clearTimeout(footage.timer);
+  footage.timer = setTimeout(async () => {
+    if (footage.session !== session || footage.at !== at) return;
+    let data = null;
+    try {
+      data = await call("GET", `/tasks/${encodeURIComponent(state.taskId)}`
+        + `/footage/picked?session=${encodeURIComponent(session)}`);
+    } catch {
+      // One missed answer is nothing; ask again in a second.
+    }
+    if (footage.session !== session || footage.at !== at) return;
+    if (data && data.state === "picked" && data.url) {
+      ui.footageLink.value = data.url;
+      ui.footageFrom.value = footageClock(Number(data.start));
+      ui.footageTo.value = footageClock(Number(data.end));
+      addFootage();
+      return;
+    }
+    watchFootage(at, session);
+  }, 1000);
+}
+
+/** Open YouTube in the user's own browser. Only ever called from a click. */
+function browseYouTube() {
+  if (footage.at < 0) return;
+  const words = ui.footageSearch.value.trim();
+  if (!words) {
+    footageNote("Type what to search for first.", "warn");
+    ui.footageSearch.focus();
+    return;
+  }
+  footage.words[footage.key] = words;
+  const session = `${Date.now().toString(36)}${Math.random().toString(36).slice(2)}`;
+  const marker = encodeURIComponent(JSON.stringify({
+    kind: "footage", api: location.origin + API, task: state.taskId, session,
+    key: apiKey(),
+  }));
+  const width = Math.min(1240, Math.max(640, window.screen.availWidth - 80));
+  const height = Math.min(900, Math.max(520, window.screen.availHeight - 80));
+  const left = Math.max(0, window.screen.availWidth - width - 20);
+  stopWatchingFootage();
+  // A YouTube address pasted into the search box opens that video itself.
+  const address = /^https?:\/\/\S+$/i.test(words)
+    ? words.split("#")[0] : YOUTUBE_SEARCH + encodeURIComponent(words);
+  footage.window = window.open(
+    `${address}#mpt-pick=${marker}`, FOOTAGE_WINDOW,
+    `popup=yes,width=${width},height=${height},left=${left},top=40`);
+  if (!footage.window) {
+    footageNote("Your browser blocked the YouTube window. Allow pop-ups for "
+      + "this page and click Search on YouTube again.", "warn");
+    return;
+  }
+  try { footage.window.focus(); } catch { /* the browser decides */ }
+  footageNote("");
+  footage.session = session;
+  watchFootage(footage.at, session);
+}
+
+/** Fetch the part that is written in the three boxes and put it on the scene. */
+function addFootage() {
+  const at = footage.at;
+  if (at < 0) return;
+  const url = ui.footageLink.value.trim();
+  const start = ui.footageFrom.value.trim();
+  const end = ui.footageTo.value.trim();
+  if (!url) {
+    footageNote("Paste the video's link first.", "warn");
+    ui.footageLink.focus();
+    return;
+  }
+  const from = footageSeconds(start);
+  const to = footageSeconds(end);
+  if (Number.isNaN(from) || Number.isNaN(to)) {
+    footageNote("Write the start and the end as times, like 2:34 and 2:38.", "warn");
+    (Number.isNaN(from) ? ui.footageFrom : ui.footageTo).focus();
+    return;
+  }
+  if (to <= from) {
+    footageNote("The end has to be after the start.", "warn");
+    ui.footageTo.focus();
+    return;
+  }
+  if (state.busy) {
+    footageNote("The editor is busy with something else; try again in a moment.", "warn");
+    return;
+  }
+  closeFootage();
+  run(`Getting ${(to - from).toFixed(1)} seconds of footage for scene ${at + 1}`, async () => {
+    const placed = await call("POST", scenePath(at) + "/footage", { url, start, end });
+    return `Scene ${at + 1} now shows ${(to - from).toFixed(1)} seconds of that `
+      + `video, without its sound.${fitNote(placed && placed.fit)} `
+      + "What it showed before is under “Earlier media”.";
+  });
+}
+
+ui.footageBrowse.addEventListener("click", browseYouTube);
+ui.footageSearch.addEventListener("keydown", (event) => {
+  if (event.key === "Enter") browseYouTube();
+});
+ui.footageSearch.addEventListener("input", () => {
+  if (footage.key) footage.words[footage.key] = ui.footageSearch.value;
+});
+// A link copied with "Copy video URL at current time" carries the start.
+ui.footageLink.addEventListener("input", () => {
+  if (ui.footageFrom.value.trim()) return;
+  const at = /[?&#]t=(\d+)/.exec(ui.footageLink.value);
+  if (at) ui.footageFrom.value = footageClock(Number(at[1]));
+});
+ui.footageAdd.addEventListener("click", addFootage);
+ui.footageClose.addEventListener("click", closeFootage);
+ui.footageModal.addEventListener("click", (event) => {
+  if (event.target === ui.footageModal) closeFootage();
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && !ui.footageModal.hidden) closeFootage();
+});
+
 /* ---------- thumbnails ---------- */
 
 /* 每段画面抓一帧存成静态图。
@@ -5346,6 +5564,11 @@ function drawInspector() {
   const pair = document.createElement("div");
   pair.className = "insp-pair";
   pair.appendChild(earlier);
+  const clip = button("Get footage…", "small", () => openFootage(scene));
+  clip.title = "Put a few seconds of a YouTube video on this scene, without "
+    + "its sound. You find and watch the video in your own browser and say "
+    + "where the part you want starts and ends.";
+  pair.appendChild(clip);
   // The scene's own file gets a row to itself, under the first: bring one in,
   // or find the one that is there. Four buttons do not fit one row.
   const files = document.createElement("div");

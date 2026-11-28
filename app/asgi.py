@@ -222,14 +222,17 @@ def configure_cors(instance: FastAPI, allowed_origins: list[str]) -> None:
     )
 
 
-_PHOTO_PICKER_PATH = re.compile(r"/api/v1/tasks/[^/]+/photos/picked/?")
+_PHOTO_PICKER_PATH = re.compile(
+    r"/api/v1/tasks/[^/]+/(?:photos|footage)/picked/?"
+)
 
 
 def _is_photo_picker_request(request: Request, origin: str) -> bool:
-    """The photo picker extension handing over the picture the user clicked.
+    """The photo picker extension handing over the picture the user clicked,
+    or the part of a YouTube video they marked.
 
     Its requests carry ``Origin: chrome-extension://<id>``, which is never the
-    app's own origin. Only this one route is opened to it, and only for POST:
+    app's own origin. Only these two routes are opened to it, and only for POST:
     a web page cannot send that Origin, so this lets in browser extensions the
     user installed and nothing else. Everything else stays behind the guard.
     """

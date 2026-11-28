@@ -486,6 +486,37 @@
   </div>
 </div>
 
+<!-- A few seconds of a YouTube video for a scene. The user finds the video in
+     their own browser; here they say which part of it. -->
+<div id="footage-modal" class="modal" hidden>
+  <div class="modal-box wide">
+    <h2 id="footage-title">Get footage</h2>
+    <p id="footage-line" class="hint photo-line"></p>
+    <div class="row photo-search-row">
+      <input id="footage-search" type="text" maxlength="200" autocomplete="off"
+        placeholder="What to search for on YouTube">
+      <button id="footage-browse" class="btn primary"
+        title="Open YouTube in a window of your own browser with these words.">Search on YouTube</button>
+    </div>
+    <p id="footage-how" class="hint"></p>
+    <div class="row photo-search-row">
+      <input id="footage-link" type="text" maxlength="500" autocomplete="off"
+        placeholder="Video link, e.g. https://www.youtube.com/watch?v=…">
+      <input id="footage-from" type="text" maxlength="12" autocomplete="off"
+        class="footage-time" placeholder="From 2:34" title="Where the part starts, like 2:34">
+      <input id="footage-to" type="text" maxlength="12" autocomplete="off"
+        class="footage-time" placeholder="To 2:38" title="Where the part ends, like 2:38">
+    </div>
+    <p id="footage-note" class="hint"></p>
+    <div class="modal-foot">
+      <span class="hint">Only that part is fetched, without its sound. Up to 60 seconds.</span>
+      <span class="spacer"></span>
+      <button id="footage-close" class="btn small">Close</button>
+      <button id="footage-add" class="btn small primary">Add this footage</button>
+    </div>
+  </div>
+</div>
+
 <!-- 永久删除一条片子。这是编辑器里唯一一件撤销不了的事，所以它先问，
      而且说清楚会没掉什么。 -->
 <div id="delete-modal" class="modal" hidden>

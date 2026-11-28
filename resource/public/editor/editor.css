@@ -989,6 +989,7 @@ body {
    原比例缩进格子里，不裁——裁掉的那一块可能正是要看的。 */
 .photo-search-row { margin-bottom: 8px; }
 .photo-line { margin: 0 0 8px; font-style: italic; }
+.footage-time { flex: 0 0 110px; width: 110px; }
 .photo-line:empty { display: none; }
 #photo-keep { margin-bottom: 8px; }
 /* 这一段已经存着的那张照片，摆在窗里。整张都看得见，不裁。 */
