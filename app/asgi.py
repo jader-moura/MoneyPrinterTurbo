@@ -1,6 +1,7 @@
 """Application implementation - ASGI."""
 
 import math
+import re
 import os
 from contextlib import asynccontextmanager
 from urllib.parse import urlsplit
@@ -221,6 +222,24 @@ def configure_cors(instance: FastAPI, allowed_origins: list[str]) -> None:
     )
 
 
+_PHOTO_PICKER_PATH = re.compile(r"/api/v1/tasks/[^/]+/photos/picked/?")
+
+
+def _is_photo_picker_request(request: Request, origin: str) -> bool:
+    """The photo picker extension handing over the picture the user clicked.
+
+    Its requests carry ``Origin: chrome-extension://<id>``, which is never the
+    app's own origin. Only this one route is opened to it, and only for POST:
+    a web page cannot send that Origin, so this lets in browser extensions the
+    user installed and nothing else. Everything else stays behind the guard.
+    """
+    return (
+        request.method == "POST"
+        and origin.lower().startswith("chrome-extension://")
+        and _PHOTO_PICKER_PATH.fullmatch(request.url.path) is not None
+    )
+
+
 def is_browser_origin_allowed(
     request: Request, allowed_origins: list[str]
 ) -> bool:
@@ -232,6 +251,8 @@ def is_browser_origin_allowed(
         # 避免安全修复错误地改变现有 API 客户端的调用契约。
         return True
     if "*" in allowed_origins or origin in allowed_origins:
+        return True
+    if _is_photo_picker_request(request, origin):
         return True
 
     # 浏览器对同源 POST 也可能发送 Origin。仅比较 scheme + authority，忽略

@@ -471,10 +471,22 @@ class TestTheEditorOffersIt:
             "scene.reference.query"
         )
         assert "ui.photoSearch.value = before;" in body
-        # 打开时搜的是 Google 图片的窗口；图库那一遍不再自己跑。
-        assert "if (before) browseGoogle(before);" in body
-        assert "else writePhotoWords();" in body
         assert "findPhotos(" not in body
+
+    def test_opening_the_window_searches_and_writes_nothing(self):
+        """开窗不搜、也不让模型写词：搜什么是用户的事。"""
+        script = self._script()
+        body = self._body(script, "openPhotoPicker")
+        assert "writePhotoWords(" not in body
+        assert "browseGoogle(" not in body
+        # 空着框点搜索也不替他写。
+        assert "writePhotoWords(" not in self._body(script, "searchPhotosFromBox")
+        # 想让模型写，有一个按钮，点了才写。
+        page = (ROOT / "resource" / "public" / "editor" / "index.html").read_text(
+            encoding="utf-8"
+        )
+        assert 'id="photo-suggest"' in page
+        assert 'ui.photoSuggest.addEventListener("click", writePhotoWords);' in script
 
     def test_the_words_are_remembered_per_scene_even_if_never_searched(self):
         script = self._script()
@@ -485,28 +497,18 @@ class TestTheEditorOffersIt:
             typed[:typed.index("});")]
         )
 
-    def test_the_models_words_reach_the_box_before_the_search_runs(self):
-        """词先落框、后搜索：搜索失败的时候框里不能是空的。"""
+    def test_suggested_words_only_fill_the_box(self):
+        """模型写的词只填进框里，不搜：搜不搜还是用户点。写不出来的时候
+        说清楚，不停在一句"正在想"上。"""
         body = self._body(self._script(), "writePhotoWords")
         assert "/photos/words`" in body
-        assert body.index("ui.photoSearch.value = words;") < body.index(
-            "browseGoogle(words);"
-        )
-
-    def test_clicking_the_button_always_ends_in_a_search(self):
-        """点"照着照片重画"就会自己搜一遍。现在搜的是 Google 图片的窗口
-        （用户说了：有它就不用再让图库搜一遍）。写词那一步没成的时候
-        （接口没重启、模型没应答）不能停在一个空框和一句"正在想"上：
-        说清楚，让用户自己打词。"""
-        body = self._body(self._script(), "writePhotoWords")
+        assert "ui.photoSearch.value = words;" in body
+        assert "browseGoogle(" not in body
+        assert "findPhotos(" not in body
         failed = body[body.index("} catch (error) {"):]
         failed = failed[:failed.index("\n  }\n")]
-        # 写词失败不 return、不停下来。
         assert "return" not in failed
-        assert "browseGoogle(words);" in body
         assert "Could not work out what to search for." in body
-        # 图库的搜索还在，只是要自己点。
-        assert "findPhotos(" not in body
         find = self._body(self._script(), "findPhotos")
         assert "ui.photoSearch.value = (data && data.query) || search;" in find
 

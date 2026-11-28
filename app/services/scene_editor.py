@@ -684,6 +684,81 @@ def keep_uploaded_photo(raw: bytes, name: str = "") -> dict:
             "name": str(name or "")}
 
 
+def keep_photo_from_address(url: str, search: str = "") -> dict:
+    """收下用户从自己的浏览器里带回来的一个图片地址：下载回来，返回一个凭
+    它来用的名字。
+
+    和"传一张自己的"是同一条路、同一套检查；区别只是它记得自己是哪来的，
+    这样别的段再挑到同一张时能标出来。
+    """
+    import uuid
+
+    address = str(url or "").strip()
+    try:
+        reference = reference_image.chosen(
+            {"url": address}, " ".join(str(search or "").split())
+        )
+    except reference_image.ReferenceImageError as exc:
+        raise SceneError(str(exc)) from exc
+    token = uuid.uuid4().hex
+    with _PHOTO_LOCK:
+        _UPLOADED[token] = reference
+        for stale in list(_UPLOADED)[:-_UPLOADED_KEPT]:
+            _UPLOADED.pop(stale, None)
+    return {"file": token, "width": reference.width, "height": reference.height}
+
+
+# 扩展交来的、编辑器还没来取的那一张。一条片子一张：后点的盖掉先点的。
+_PICKED: dict = {}
+_PICKED_TASKS = 20
+
+
+def keep_picked_photo(task_id: str, raw: bytes, *, source: str = "",
+                      page: str = "", session: str = "") -> dict:
+    """收下用户在自己浏览器的 Google 图片窗口里点中的那一张（由浏览器扩展
+    交来），留着等编辑器来取。
+
+    和"传一张自己的"是同一条路、同一套检查（尺寸、类型、重新编码）；区别
+    只是它记得自己是哪来的。
+    """
+    import dataclasses
+    import uuid
+
+    try:
+        reference = reference_image.uploaded(raw, "it")
+    except reference_image.ReferenceImageError as exc:
+        raise SceneError(str(exc)) from exc
+    address = str(source or "").strip()
+    if not address.lower().startswith(("http://", "https://")):
+        address = ""
+    reference = dataclasses.replace(
+        reference, source_url=address,
+        page_url=address or str(page or "").strip(),
+    )
+    token = uuid.uuid4().hex
+    kept = {"file": token, "width": reference.width, "height": reference.height}
+    with _PHOTO_LOCK:
+        _UPLOADED[token] = reference
+        for stale in list(_UPLOADED)[:-_UPLOADED_KEPT]:
+            _UPLOADED.pop(stale, None)
+        _PICKED.pop(str(task_id), None)
+        _PICKED[str(task_id)] = {"session": str(session or ""), **kept}
+        for stale in list(_PICKED)[:-_PICKED_TASKS]:
+            _PICKED.pop(stale, None)
+    return kept
+
+
+def picked_photo(task_id: str, session: str = "") -> dict:
+    """编辑器来问：点了没有。点了就交出去，只交一次；别的那一次搜索点的
+    不算。"""
+    with _PHOTO_LOCK:
+        kept = _PICKED.get(str(task_id))
+        if not kept or kept["session"] != str(session or ""):
+            return {"state": "waiting"}
+        _PICKED.pop(str(task_id), None)
+    return {"state": "picked", **{k: v for k, v in kept.items() if k != "session"}}
+
+
 def browse_for_photo(task_id: str, index: Any, *, search: str = "") -> dict:
     """开一个小浏览器窗口，在 Google 图片里搜这一段的词，让用户自己点一张。
 

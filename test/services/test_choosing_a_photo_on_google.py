@@ -248,28 +248,83 @@ class TestThePage:
             assert f'id="{dom_id}"' in HTML
             assert f'el("{dom_id}")' in JS
 
-    def test_opening_the_picker_opens_the_browser(self):
-        assert "if (before) browseGoogle(before);" in _body("openPhotoPicker")
-        written = _body("writePhotoWords")
-        assert written.index("ui.photoSearch.value = words;") < written.index(
-            "browseGoogle(words);"
-        )
+    def test_the_browser_opens_only_when_asked(self):
+        assert "browseGoogle(" not in _body("openPhotoPicker")
+        assert "browseGoogle(" not in _body("writePhotoWords")
+        clicked = JS.split('ui.photoGoogle.addEventListener("click"')[1][:400]
+        assert "browseGoogle(words);" in clicked
 
-    def test_the_clicked_picture_is_drawn_from_at_once(self):
-        body = _body("watchPhotoBrowser")
-        assert 'data.state === "picked" && data.file' in body
-        assert "redrawFromPhoto({ photo_upload: data.file });" in body
-
-    def test_an_answer_about_an_older_window_is_ignored(self):
-        assert "data.session === browsing.session" in _body("watchPhotoBrowser")
-
-    def test_a_browser_that_cannot_open_is_shown_not_hidden(self):
+    def test_google_opens_in_the_users_own_browser(self):
+        """服务端另开的那个浏览器过不了 Google 的验证码。窗口开在用户自己
+        的浏览器里，服务端什么都不开。"""
         body = _body("browseGoogle")
-        assert 'googleNote(String(error.message || error), "warn");' in body
+        assert "window.open(" in body
+        assert "/photos/browse" not in JS
 
-    def test_closing_the_picker_closes_the_browser(self):
+    def test_a_blocked_window_is_shown_not_hidden(self):
+        body = _body("browseGoogle")
+        assert "if (!photoWindow) {" in body
+        assert "Allow pop-ups" in body
+
+    def test_closing_the_picker_closes_the_window(self):
         assert "closePhotoBrowser();" in _body("closePhotoPicker")
-        assert 'call("DELETE", photoBrowserPath())' in _body("closePhotoBrowser")
+        assert "opened.close();" in _body("closePhotoBrowser")
+
+    def test_a_dragged_or_copied_address_is_downloaded_by_the_server(self):
+        assert "/photos/address`" in _body("takePhotoAddress")
+        assert "redrawFromPhoto({ photo_upload: data.file });" in _body(
+            "takePhotoAddress")
+        # Google 的格子拖过来是一个链接；原图在它的 imgurl 里。
+        assert '.get("imgurl")' in _body("photoAddressIn")
+        drop = JS.split('ui.photoModal.addEventListener("drop"')[1][:600]
+        assert "takePhotoAddress(address);" in drop
+        paste = JS.split('document.addEventListener("paste"')[1][:800]
+        assert "takePhotoAddress(text);" in paste
+        # 往搜索框里贴的普通词不拦。
+        assert "if (!isPhotoAddress(text)) return;" in paste
+
+
+class TestAPictureFromItsAddress:
+    def test_it_is_downloaded_and_kept_like_an_upload(self, task_root):
+        from fastapi.testclient import TestClient
+
+        from app import asgi
+        from app.services import reference_image, scene_editor
+
+        task_id, _ = _reviewed_task(task_root)
+        photo = reference_image.Reference(
+            data=b"png", query="apple", source_url="https://example.com/a.jpg",
+            page_url="https://example.com/a.jpg", provider="", width=1200,
+            height=800,
+        )
+        with patch.object(reference_image, "chosen", return_value=photo) as chosen:
+            answer = TestClient(asgi.app).post(
+                f"/api/v1/tasks/{task_id}/photos/address",
+                json={"url": " https://example.com/a.jpg ", "search": "apple"},
+            )
+        assert answer.status_code == 200, answer.text
+        assert chosen.call_args.args == ({"url": "https://example.com/a.jpg"}, "apple")
+        data = answer.json()["data"]
+        assert (data["width"], data["height"]) == (1200, 800)
+        assert scene_editor.uploaded_reference_photo(data["file"]) is photo
+
+    def test_one_that_cannot_be_downloaded_says_why(self, task_root):
+        from fastapi.testclient import TestClient
+
+        from app import asgi
+        from app.services import reference_image
+
+        task_id, _ = _reviewed_task(task_root)
+        with patch.object(
+            reference_image, "chosen",
+            side_effect=reference_image.ReferenceImageError("it answered 403"),
+        ):
+            answer = TestClient(asgi.app).post(
+                f"/api/v1/tasks/{task_id}/photos/address",
+                json={"url": "https://example.com/a.jpg"},
+            )
+        assert answer.status_code != 200 or answer.json()["status"] != 200
+        assert "403" in answer.text
 
     def test_a_pasted_or_dropped_picture_is_used_too(self):
         paste = JS.split('document.addEventListener("paste"')[1][:400]
@@ -286,3 +341,109 @@ class TestNothingWasTakenAway:
         assert "findPhotos(" not in _body("writePhotoWords")
         assert 'ui.photoFind.addEventListener("click", searchPhotosFromBox);' in JS
         assert "if (words) findPhotos(words);" in _body("searchPhotosFromBox")
+
+
+def _png(width: int, height: int) -> bytes:
+    out = io.BytesIO()
+    Image.new("RGB", (width, height), (40, 90, 160)).save(out, "PNG")
+    return out.getvalue()
+
+
+class TestAPictureClickedInTheUsersOwnBrowser:
+    """装了扩展的话，在自己浏览器的 Google 图片窗口里点大图就行：扩展把图
+    交给服务端，编辑器来取。"""
+
+    def _client(self):
+        from fastapi.testclient import TestClient
+
+        from app import asgi
+
+        return TestClient(asgi.app)
+
+    def test_the_clicked_picture_reaches_the_editor_once(self, task_root):
+        task_id, _ = _reviewed_task(task_root)
+        client = self._client()
+        path = f"/api/v1/tasks/{task_id}/photos/picked"
+        assert client.get(path, params={"session": "s1"}).json()["data"] == {
+            "state": "waiting"
+        }
+        sent = client.post(
+            path, files={"file": ("picked-photo", _png(1200, 800), "image/png")},
+            data={"source": "https://example.com/a.jpg",
+                  "page": "https://www.google.com/search?q=apple", "session": "s1"},
+        )
+        assert sent.status_code == 200, sent.text
+        # 别的那一次搜索点的不算。
+        assert client.get(path, params={"session": "old"}).json()["data"][
+            "state"] == "waiting"
+        got = client.get(path, params={"session": "s1"}).json()["data"]
+        assert got["state"] == "picked"
+        assert (got["width"], got["height"]) == (1200, 800)
+        photo = scene_editor.uploaded_reference_photo(got["file"])
+        assert photo.source_url == "https://example.com/a.jpg"
+        # 只交一次。
+        assert client.get(path, params={"session": "s1"}).json()["data"][
+            "state"] == "waiting"
+
+    def test_a_picture_too_small_is_refused_with_the_reason(self, task_root):
+        task_id, _ = _reviewed_task(task_root)
+        sent = self._client().post(
+            f"/api/v1/tasks/{task_id}/photos/picked",
+            files={"file": ("picked-photo", _png(200, 150), "image/png")},
+            data={"session": "s1"},
+        )
+        assert sent.status_code != 200
+        assert "long edge" in sent.text
+
+    def test_the_page_arms_the_window_and_waits_for_the_click(self):
+        body = _body("browseGoogle")
+        assert "#mpt-pick=${marker}" in body
+        assert "watchPhotoPick(photoPick.at, session);" in body
+        watch = _body("watchPhotoPick")
+        assert "/photos/picked?session=" in watch
+        assert "redrawFromPhoto({ photo_upload: data.file });" in watch
+        assert "stopWatchingPhotoPick();" in _body("closePhotoBrowser")
+
+    def test_the_extension_is_there_and_only_acts_in_that_window(self):
+        import json
+
+        folder = ROOT / "browser-extension" / "photo-picker"
+        manifest = json.loads((folder / "manifest.json").read_text(encoding="utf-8"))
+        assert manifest["manifest_version"] == 3
+        content = (folder / "content.js").read_text(encoding="utf-8")
+        background = (folder / "background.js").read_text(encoding="utf-8")
+        assert '"#mpt-pick="' in content
+        # 不是编辑器开的窗口，什么都不做。
+        assert "if (!to || to.error || window.top !== window) return;" in content
+        assert "dataset.mptPhotoPicker" in content
+        assert "dataset.mptPhotoPicker" in JS
+        assert "/photos/picked`" in background
+
+
+class TestTheExtensionIsLetIn:
+    """扩展的请求带着 ``Origin: chrome-extension://…``。只有交图的那一条路
+    对它开；别的路、别的来源照旧被挡。"""
+
+    def _post(self, task_root, path_tail, origin):
+        from fastapi.testclient import TestClient
+
+        from app import asgi
+
+        task_id, _ = _reviewed_task(task_root)
+        return TestClient(asgi.app).post(
+            f"/api/v1/tasks/{task_id}/{path_tail}",
+            files={"file": ("picked-photo", _png(1200, 800), "image/png")},
+            data={"session": "s1"}, headers={"Origin": origin},
+        )
+
+    def test_the_extension_can_hand_over_a_picture(self, task_root):
+        sent = self._post(task_root, "photos/picked", "chrome-extension://abcdefgh")
+        assert sent.status_code == 200, sent.text
+
+    def test_a_web_page_cannot(self, task_root):
+        sent = self._post(task_root, "photos/picked", "https://evil.example")
+        assert sent.status_code == 403
+
+    def test_no_other_route_is_opened_to_extensions(self, task_root):
+        sent = self._post(task_root, "photos", "chrome-extension://abcdefgh")
+        assert sent.status_code == 403

@@ -22,7 +22,9 @@ scene, since seeing the real result is the entire point of a review.
 import os
 from typing import Optional
 
-from fastapi import Depends, File, Path, Query, Request, UploadFile
+from fastapi import (
+    Body, Depends, File, Form, Path, Query, Request, UploadFile,
+)
 from fastapi.responses import FileResponse, Response
 from loguru import logger
 from starlette.background import BackgroundTask
@@ -1586,6 +1588,66 @@ def upload_scene_photo(
     data = _handle(
         task_id, request_id,
         lambda: scene_editor.keep_uploaded_photo(raw, file.filename or ""),
+    )
+    return utils.get_response(200, data)
+
+
+@router.post(
+    "/tasks/{task_id}/photos/picked",
+    summary="A picture clicked in the user's own browser, sent by the extension",
+)
+def keep_picked_scene_photo(
+    request: Request,
+    task_id: str = Path(..., description="Task ID"),
+    file: UploadFile = File(...),
+    source: str = Form("", max_length=4000),
+    page: str = Form("", max_length=4000),
+    session: str = Form("", max_length=80),
+):
+    """浏览器扩展把用户点中的那一张交到这里；编辑器再来取（见下）。"""
+    request_id = base.get_task_id(request)
+    _require_task(task_id, request_id)
+    raw = file.file.read(reference_image.MAX_BYTES + 1)
+    data = _handle(
+        task_id, request_id,
+        lambda: scene_editor.keep_picked_photo(
+            task_id, raw, source=source, page=page, session=session
+        ),
+    )
+    return utils.get_response(200, data)
+
+
+@router.get(
+    "/tasks/{task_id}/photos/picked",
+    summary="Whether a picture was clicked in the browser since this search",
+)
+def picked_scene_photo(
+    request: Request,
+    task_id: str = Path(..., description="Task ID"),
+    session: str = Query("", max_length=80),
+):
+    request_id = base.get_task_id(request)
+    _require_task(task_id, request_id)
+    return utils.get_response(200, scene_editor.picked_photo(task_id, session))
+
+
+@router.post(
+    "/tasks/{task_id}/photos/address",
+    summary="Download a picture from its address to redraw a scene from",
+)
+def scene_photo_from_address(
+    request: Request,
+    task_id: str = Path(..., description="Task ID"),
+    url: str = Body(..., embed=True, min_length=1, max_length=2000),
+    search: str = Body("", embed=True, max_length=200),
+):
+    """用户在自己的浏览器里挑的一张图，带回来的只是它的地址（拖过来的、
+    复制的图片地址）。下载回来之后用 ``photo_upload`` 来排重画。"""
+    request_id = base.get_task_id(request)
+    _require_task(task_id, request_id)
+    data = _handle(
+        task_id, request_id,
+        lambda: scene_editor.keep_photo_from_address(url, search),
     )
     return utils.get_response(200, data)
 

@@ -133,6 +133,7 @@ const ui = {
   deleteCancel: el("delete-cancel"), deleteConfirm: el("delete-confirm"),
   photoModal: el("photo-modal"), photoTitle: el("photo-title"),
   photoSearch: el("photo-search"), photoFind: el("photo-find"),
+  photoSuggest: el("photo-suggest"),
   photoNote: el("photo-note"), photoGrid: el("photo-grid"),
   photoUpload: el("photo-upload"), photoAuto: el("photo-auto"),
   photoClose: el("photo-close"),
@@ -3671,13 +3672,11 @@ async function keepRoundPhoto(pick) {
     if (photoPick.at !== at) return;
     photoNote(`${String(error.message || error).replace(/[.\s]+$/, "")}. `
       + "Choose another photo for this scene.", "warn");
-    googleNote("Click Search on Google to open the window again.");
     return;
   }
   if (scene) scene.photo_pick = pick.skip ? "skip" : "photo";
   if (photoPick.at !== at || !photoRound.on) return;
-  // 先等那个小窗口关掉再开下一个：关和开撞在一起，关掉的会是新开的那个。
-  await closePhotoBrowser();
+  closePhotoBrowser();
   nextRoundPhoto();
 }
 
@@ -3735,16 +3734,14 @@ function openPhotoPicker(scene, keyword, style, again) {
   ui.photoGrid.innerHTML = "";
   ui.photoModal.hidden = false;
   photoPick.key = photoWordsKey(scene);
-  // 框里一打开就得有词，而且是"之前搜的那个"：
+  // 框里放的是"之前搜的那个"，没有就空着：
   //   1. 这一段刚才在这里搜过的词（改过的也算）；
-  //   2. 没有的话，上次照着照片画这一段时用的词（记在这一段上）；
-  //   3. 都没有，才让模型从台词和提示词里写一条。
+  //   2. 没有的话，上次照着照片画这一段时用的词（记在这一段上）。
+  // 开窗不搜、也不让模型写词：搜什么是用户的事。想让模型写一条，有
+  // "Suggest words" 那个按钮，点了才写。
   const before = photoPick.words[photoPick.key]
     || ((scene.reference && scene.reference.query) || "").trim();
   ui.photoSearch.value = before;
-  // 有词就马上开 Google 图片的小窗口；没词等模型写出来再开（见下）。
-  // 图库那一遍不再自己搜：用户是在 Google 的窗口里挑的，再搜一遍只是多
-  // 一次会失败的请求。想用图库，"Search" 按钮还在。
   googleNote("");
   photoNote(photoRoundNote());
   // "还是这张照片，换一档再画"：照片已经有了，不用去开 Google 的窗口。
@@ -3753,38 +3750,38 @@ function openPhotoPicker(scene, keyword, style, again) {
       + "“Draw from this photo”. Or search for another one.");
     return;
   }
-  if (before) browseGoogle(before);
-  else writePhotoWords();
+  ui.photoSearch.focus();
 }
 
-/** 让模型写搜索词，写完填进框里，再开 Google 图片的窗口去搜。词先落框、
-    后搜索：窗口开不了的时候，框里不能是空的。 */
+/** 让模型写搜索词，写完填进框里。只在用户点了 "Suggest words" 时才跑，
+    而且只写词、不搜：搜不搜、搜什么，还是用户点。 */
 async function writePhotoWords() {
   const at = photoPick.at;
+  if (at < 0) return;
   ui.photoFind.disabled = true;
+  ui.photoSuggest.disabled = true;
   photoNote("Working out what to search for…", "pending");
   let words = "";
   try {
     const data = await call("GET", `${scenePath(at)}/photos/words`);
     words = ((data && data.query) || "").trim();
   } catch (error) {
-    // 单独写词的那一步没成（比如接口还没重启、还不认识这条路由）。不能
-    // 就此停在一个空框上：退回原来那一步——让搜索自己写词、自己搜，搜到
-    // 之后词照样填进框里。点一下按钮就开始搜，这件事不能因为加了一步而没了。
-    console.warn("could not get the search words on their own", error);
+    console.warn("could not get the search words", error);
   }
-  if (photoPick.at !== at) return;
   ui.photoFind.disabled = false;
-  ui.photoSearch.value = words;
+  ui.photoSuggest.disabled = false;
+  if (photoPick.at !== at) return;
   if (words) {
-    photoNote(photoRoundNote());
-    browseGoogle(words);
+    ui.photoSearch.value = words;
+    if (photoPick.key) photoPick.words[photoPick.key] = words;
+    photoNote("Change the words if you like, then click Search on Google."
+      + (photoRound.on ? " " + photoRoundNote() : ""));
   } else {
-    // 词没写出来（模型没应答）。不停在一个空框和一句"正在想"上。
+    // 词没写出来（模型没应答）。框里原来的字不动。
     photoNote("Could not work out what to search for. Type it above and "
       + "click Search on Google.", "warn");
-    ui.photoSearch.focus();
   }
+  ui.photoSearch.focus();
 }
 
 function closePhotoPicker() {
@@ -3908,13 +3905,17 @@ function redrawFromPhoto(extra) {
   queueRegeneration(at, keyword, style, true, strength, photo);
 }
 
-/** 按框里的词搜。框空着就先让模型写一条，而不是拿空词去搜。 */
+/** 按框里的词搜。框空着就请用户先打词：不替他写、也不拿空词去搜。 */
 function searchPhotosFromBox() {
   const words = ui.photoSearch.value.trim();
   if (words) findPhotos(words);
-  else writePhotoWords();
+  else {
+    photoNote("Type what to search for first.", "warn");
+    ui.photoSearch.focus();
+  }
 }
 ui.photoFind.addEventListener("click", searchPhotosFromBox);
+ui.photoSuggest.addEventListener("click", writePhotoWords);
 ui.photoSearch.addEventListener("keydown", (event) => {
   if (event.key === "Enter") searchPhotosFromBox();
 });
@@ -3951,89 +3952,106 @@ document.addEventListener("keydown", (event) => {
 
 /* ---------- 在 Google 图片里自己挑 ----------
 
-   点"照着照片重画"，这个程序就在本机上开一个小浏览器窗口，里面是 Google
-   图片搜这一段的词。用户在那里点一张图把它放大，再点那张大图——就是它了，
-   这边直接开画。不需要任何搜索 API、不需要密钥，也没有额度。
+   Google 图片开在**用户自己的浏览器**里（一个小窗口，用的是他平时那份资
+   料、那些登录）。以前是服务端另开一个受调试接口控制的浏览器，用一份全新
+   的资料目录——Google 把它当机器人，验证码怎么点都过不去。
 
-   窗口是服务端开的（一张网页读不到别的网站的窗口里点了什么），所以这里
-   做的只有三件事：叫它开、每秒问一次"点了没有"、关窗时叫它关。
+   一张网页读不到别的网站的窗口里点了什么。装了那个小扩展
+   （browser-extension/photo-picker）的话，在那个窗口里点大图就行：扩展把
+   图交给服务端，这边每秒问一次"点了没有"。没装的话由用户带回来：
+     · 在大图上右键"复制图片"，回到这里按 Ctrl+V；
+     · 或者把图直接拖到这扇窗上；
+     · 或者复制图片地址，回到这里按 Ctrl+V。
+   图片本身（复制、拖文件）和传一张自己的走同一条路；只有地址的，由服务端
+   去那个地址下载。 */
+const GOOGLE_IMAGES = "https://www.google.com/search?udm=2&q=";
+const PHOTO_WINDOW = "mpt-photo-search";
+let photoWindow = null;
+const photoWatch = { session: "", timer: 0 };
 
-   粘贴和拖进来也收：从别处复制来的一张图，按 Ctrl+V 就用它。 */
-const browsing = { on: false, timer: 0, session: "" };
-
+// 没装扩展时的说明写在页面里；装了的话是下面这一句。
 const GOOGLE_HOW = ui.photoGoogleNote.innerHTML;
+const GOOGLE_HOW_CLICK = "Type what to search for and click <b>Search on "
+  + "Google</b>: Google Images opens in a window of your own browser. There, "
+  + "click a picture to open it large, then <b>click the large picture</b> — "
+  + "it is used straight away. Pictures too small to draw from cannot be "
+  + "clicked.";
+
+/** 那个小扩展装了没有。它在每张页面上留一个记号。 */
+function photoPickerInstalled() {
+  return !!document.documentElement.dataset.mptPhotoPicker;
+}
 
 function googleNote(text, kind) {
   ui.photoGoogleNote.className = "hint" + (kind ? " " + kind : "");
   if (text) ui.photoGoogleNote.textContent = text;
-  else ui.photoGoogleNote.innerHTML = GOOGLE_HOW;
-}
-
-function photoBrowserPath() {
-  return `/tasks/${encodeURIComponent(state.taskId)}/photos/browse`;
-}
-
-function stopWatchingPhotoBrowser() {
-  browsing.on = false;
-  clearTimeout(browsing.timer);
-}
-
-/** 开那个窗口去搜 ``words``。开不了就说是什么开不了——不悄悄换成别的。 */
-async function browseGoogle(words) {
-  if (photoPick.at < 0 || !words) return;
-  const at = photoPick.at;
-  stopWatchingPhotoBrowser();
-  ui.photoGoogle.disabled = true;
-  googleNote("Opening a browser window on Google Images…", "pending");
-  try {
-    const data = await call("POST",
-      `${scenePath(at)}/photos/browse?search=${encodeURIComponent(words)}`);
-    if (photoPick.at !== at) { closePhotoBrowser(); return; }
-    browsing.session = (data && data.session) || "";
-    browsing.on = true;
-    googleNote("");
-    watchPhotoBrowser(at);
-  } catch (error) {
-    if (photoPick.at !== at) return;
-    googleNote(String(error.message || error), "warn");
-  } finally {
-    ui.photoGoogle.disabled = false;
+  else {
+    ui.photoGoogleNote.innerHTML = photoPickerInstalled()
+      ? GOOGLE_HOW_CLICK : GOOGLE_HOW;
   }
 }
 
-function watchPhotoBrowser(at) {
-  clearTimeout(browsing.timer);
-  browsing.timer = setTimeout(async () => {
-    if (!browsing.on || photoPick.at !== at) return;
+function stopWatchingPhotoPick() {
+  photoWatch.session = "";
+  clearTimeout(photoWatch.timer);
+}
+
+/** 每秒问一次：扩展把点中的那一张交来了没有。 */
+function watchPhotoPick(at, session) {
+  clearTimeout(photoWatch.timer);
+  photoWatch.timer = setTimeout(async () => {
+    if (photoWatch.session !== session || photoPick.at !== at) return;
     let data = null;
     try {
-      data = await call("GET", photoBrowserPath());
+      data = await call("GET", `/tasks/${encodeURIComponent(state.taskId)}`
+        + `/photos/picked?session=${encodeURIComponent(session)}`);
     } catch {
       // 问不到一次不算什么，下一秒再问。
     }
-    if (!browsing.on || photoPick.at !== at) return;
-    if (data && data.session === browsing.session) {
-      if (data.state === "picked" && data.file) {
-        stopWatchingPhotoBrowser();
-        redrawFromPhoto({ photo_upload: data.file });
-        return;
-      }
-      if (data.state === "closed" || data.state === "none") {
-        stopWatchingPhotoBrowser();
-        googleNote("The browser window was closed without choosing a picture. "
-          + "Click Search on Google to open it again.");
-        return;
-      }
+    if (photoWatch.session !== session || photoPick.at !== at) return;
+    if (data && data.state === "picked" && data.file) {
+      stopWatchingPhotoPick();
+      redrawFromPhoto({ photo_upload: data.file });
+      return;
     }
-    watchPhotoBrowser(at);
+    watchPhotoPick(at, session);
   }, 1000);
 }
 
+/** 在用户自己的浏览器里开 Google 图片搜 ``words``。只在他点了按钮时才叫到：
+    浏览器只让"点出来的"窗口打开。同一个名字，再搜就换掉里面的页面。 */
+function browseGoogle(words) {
+  if (photoPick.at < 0 || !words) return;
+  const width = Math.min(1040, Math.max(480, window.screen.availWidth - 80));
+  const height = Math.min(860, Math.max(480, window.screen.availHeight - 80));
+  const left = Math.max(0, window.screen.availWidth - width - 20);
+  // 地址后面带一个记号：扩展凭它知道这个窗口是编辑器开的、点中的图交到
+  // 哪里。没装扩展的话它只是一段没人读的 # 后缀。
+  const session = `${Date.now().toString(36)}${Math.random().toString(36).slice(2)}`;
+  const marker = encodeURIComponent(JSON.stringify({
+    api: location.origin + API, task: state.taskId, session, key: apiKey(), min: 512,
+  }));
+  stopWatchingPhotoPick();
+  photoWindow = window.open(
+    `${GOOGLE_IMAGES}${encodeURIComponent(words)}#mpt-pick=${marker}`, PHOTO_WINDOW,
+    `popup=yes,width=${width},height=${height},left=${left},top=40`);
+  if (!photoWindow) {
+    googleNote("Your browser blocked the Google Images window. Allow pop-ups "
+      + "for this page and click Search on Google again.", "warn");
+    return;
+  }
+  try { photoWindow.focus(); } catch { /* 给不给焦点由浏览器定 */ }
+  googleNote("");
+  photoWatch.session = session;
+  watchPhotoPick(photoPick.at, session);
+}
+
 function closePhotoBrowser() {
-  const was = browsing.on;
-  stopWatchingPhotoBrowser();
-  if (!was || !state.taskId) return Promise.resolve();
-  return call("DELETE", photoBrowserPath()).catch(() => {});
+  stopWatchingPhotoPick();
+  const opened = photoWindow;
+  photoWindow = null;
+  try { if (opened && !opened.closed) opened.close(); } catch { /* 已经关了 */ }
+  return Promise.resolve();
 }
 
 ui.photoGoogle.addEventListener("click", () => {
@@ -4045,6 +4063,16 @@ ui.photoGoogle.addEventListener("click", () => {
   if (photoPick.key) photoPick.words[photoPick.key] = words;
   browseGoogle(words);
 });
+
+/** 带回来的图用不了的时候说什么。服务端不收太小的图；从网页上带回来的小
+    图几乎总是缩略图。 */
+function copiedPhotoProblem(error) {
+  const why = String(error.message || error);
+  return /long edge/.test(why)
+    ? "That picture is too small to draw from — it is a small preview. Open "
+      + "the picture large first and copy that one."
+    : why;
+}
 
 /** 粘贴或拖进来的一张图：和"传一张自己的"一样，收下就开画。 */
 async function takeCopiedPhoto(blob) {
@@ -4059,24 +4087,78 @@ async function takeCopiedPhoto(blob) {
     const data = await upload(
       `/tasks/${encodeURIComponent(state.taskId)}/photos`, file);
     if (photoPick.at !== at) return;
+    googleNote("");
     redrawFromPhoto({ photo_upload: data.file });
   } catch (error) {
     if (photoPick.at !== at) return;
-    const why = String(error.message || error);
-    // 服务端不收太小的图。从网页上带回来的小图几乎总是缩略图。
-    googleNote(/long edge/.test(why)
-      ? "That picture is too small to draw from — it is a small preview. Open "
-        + "the picture large first and copy that one."
-      : why, "warn");
+    googleNote(copiedPhotoProblem(error), "warn");
   }
+}
+
+/** 带回来的只是一个地址（拖过来的图、复制的图片地址）。``data:`` 的就是图
+    本身；网址由服务端去下载，下回来之后和传上来的一样用。 */
+async function takePhotoAddress(address) {
+  if (photoPick.at < 0) return;
+  const at = photoPick.at;
+  googleNote("Getting that picture…", "pending");
+  try {
+    if (address.startsWith("data:")) {
+      const blob = await (await fetch(address)).blob();
+      if (photoPick.at === at) await takeCopiedPhoto(blob);
+      return;
+    }
+    const data = await call(
+      "POST", `/tasks/${encodeURIComponent(state.taskId)}/photos/address`,
+      { url: address, search: ui.photoSearch.value.trim() });
+    if (photoPick.at !== at) return;
+    googleNote("");
+    redrawFromPhoto({ photo_upload: data.file });
+  } catch (error) {
+    if (photoPick.at !== at) return;
+    googleNote(`${copiedPhotoProblem(error).replace(/[.\s]+$/, "")}. If its site `
+      + "will not hand it over, right-click the picture, choose Copy image, "
+      + "and press Ctrl+V here.", "warn");
+  }
+}
+
+function isPhotoAddress(text) {
+  return /^https?:\/\/\S+$/i.test(text) || /^data:image\/[^\s]+$/i.test(text);
+}
+
+/** 拖进来或贴进来的东西里，图在哪个地址。Google 的结果格子拖过来是一个
+    链接，原图的地址在它的 ``imgurl`` 里——那才是大图；格子里的 <img> 只是
+    缩略图。 */
+function photoAddressIn(transfer) {
+  const link = (transfer.getData("text/uri-list") || "").split(/\r?\n/)
+    .map((line) => line.trim()).find((line) => line && !line.startsWith("#")) || "";
+  try {
+    const original = new URL(link).searchParams.get("imgurl") || "";
+    if (isPhotoAddress(original)) return original;
+  } catch { /* 不是一个地址 */ }
+  const markup = transfer.getData("text/html");
+  if (markup) {
+    const img = new DOMParser().parseFromString(markup, "text/html").querySelector("img");
+    const source = img ? (img.getAttribute("src") || "").trim() : "";
+    if (isPhotoAddress(source)) return source;
+  }
+  if (isPhotoAddress(link)) return link;
+  const text = (transfer.getData("text/plain") || "").trim();
+  return isPhotoAddress(text) ? text : "";
 }
 
 document.addEventListener("paste", (event) => {
   if (ui.photoModal.hidden || !event.clipboardData) return;
   const file = [...event.clipboardData.files].find((one) => one.type.startsWith("image/"));
-  if (!file) return;
+  if (file) {
+    event.preventDefault();
+    takeCopiedPhoto(file);
+    return;
+  }
+  // 复制的是图片地址。普通的字（往搜索框里贴的词）不拦。
+  const text = (event.clipboardData.getData("text/plain") || "").trim();
+  if (!isPhotoAddress(text)) return;
   event.preventDefault();
-  takeCopiedPhoto(file);
+  takePhotoAddress(text);
 });
 
 const photoBox = ui.photoModal.querySelector(".modal-box");
@@ -4088,10 +4170,13 @@ ui.photoModal.addEventListener("dragleave", () => photoBox.classList.remove("dro
 ui.photoModal.addEventListener("drop", (event) => {
   event.preventDefault();
   photoBox.classList.remove("dropping");
-  const file = event.dataTransfer
-    && [...event.dataTransfer.files].find((one) => one.type.startsWith("image/"));
-  if (file) takeCopiedPhoto(file);
-  else googleNote("Only a picture file can be dropped here.", "warn");
+  const transfer = event.dataTransfer;
+  if (!transfer) return;
+  const file = [...transfer.files].find((one) => one.type.startsWith("image/"));
+  if (file) { takeCopiedPhoto(file); return; }
+  const address = photoAddressIn(transfer);
+  if (address) takePhotoAddress(address);
+  else googleNote("Only a picture can be dropped here.", "warn");
 });
 
 /* ---------- thumbnails ---------- */
@@ -5208,10 +5293,9 @@ function drawInspector() {
         style ? style.input.value : null
       );
     });
-    fromPhoto.title = "Search the web for photographs of this and choose the "
-      + "one to draw this scene from, or upload your own. The search words "
-      + "are written from this scene's narration and prompt, and you can "
-      + "change them.";
+    fromPhoto.title = "Search the web for a photograph and choose the one "
+      + "to draw this scene from, or upload your own. You type what to "
+      + "search for; nothing is searched until you ask.";
     photoBox.appendChild(fromPhoto);
     // 现在这张图是照着哪张照片画的，就摆在这条路下面。
     const used = usedPhotoNote(scene);
